@@ -609,7 +609,11 @@
   .vcr-bar { padding: 4px 6px; overflow-x: auto; flex-wrap: nowrap; }
   .vcr-btn { padding: 6px 10px; font-size: 0.8rem; min-height: 36px; min-width: 36px; }
   .vcr-scope-btn { font-size: 0.7rem; padding: 4px 8px; min-height: 36px; }
-  .vcr-lcd { display: none; }
+  .vcr-lcd { display: flex; }
+  .live-feed { display: none; }
+  .feed-show-btn { display: none !important; }
+  .live-legend { display: none; }
+  .legend-toggle-btn { display: none !important; }
 }
 
 /* Timeline time tooltip */
