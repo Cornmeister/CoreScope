@@ -944,41 +944,68 @@ app.get('/api/resolve-hops', (req, res) => {
     }
   }
 
-  // Second pass: disambiguate using geographic context
-  // Collect known positions from unambiguous hops
-  const knownPositions = [];
+  // Sequential disambiguation: each hop must be near the previous one
+  // Walk the path forward, resolving ambiguous hops by distance to last known position
+  // Start from first unambiguous hop (or observer position as anchor for last hop)
+  
+  // Build initial resolved positions map
+  const hopPositions = {}; // hop -> {lat, lon}
   for (const hop of hops) {
     const r = resolved[hop];
     if (r && !r.ambiguous && r.pubkey) {
       const node = allNodes.find(n => n.public_key === r.pubkey);
       if (node && node.lat && node.lon && !(node.lat === 0 && node.lon === 0)) {
-        knownPositions.push({ lat: node.lat, lon: node.lon });
+        hopPositions[hop] = { lat: node.lat, lon: node.lon };
       }
     }
   }
-  if (observerLat != null) knownPositions.push({ lat: observerLat, lon: observerLon });
 
-  if (knownPositions.length > 0) {
-    const centerLat = knownPositions.reduce((s, p) => s + p.lat, 0) / knownPositions.length;
-    const centerLon = knownPositions.reduce((s, p) => s + p.lon, 0) / knownPositions.length;
-    const dist = (lat, lon) => Math.sqrt((lat - centerLat) ** 2 + (lon - centerLon) ** 2);
-    const distObs = (observerLat != null) ? ((lat, lon) => Math.sqrt((lat - observerLat) ** 2 + (lon - observerLon) ** 2)) : null;
+  const dist = (lat1, lon1, lat2, lon2) => Math.sqrt((lat1 - lat2) ** 2 + (lon1 - lon2) ** 2);
 
-    for (let hi = 0; hi < hops.length; hi++) {
-      const hop = hops[hi];
-      const r = resolved[hop];
-      if (r && r.ambiguous) {
-        const withLoc = r.candidates.filter(c => c.lat && c.lon && !(c.lat === 0 && c.lon === 0));
-        if (withLoc.length > 0) {
-          // Last hop: prefer candidate closest to observer (it delivered the packet)
-          const isLastHop = (hi === hops.length - 1) && distObs;
-          const sortFn = isLastHop ? ((a, b) => distObs(a.lat, a.lon) - distObs(b.lat, b.lon)) : ((a, b) => dist(a.lat, a.lon) - dist(b.lat, b.lon));
-          withLoc.sort(sortFn);
-          r.name = withLoc[0].name;
-          r.pubkey = withLoc[0].pubkey;
-        }
-      }
+  // Forward pass: resolve each ambiguous hop using previous hop's position
+  let lastPos = null;
+  for (let hi = 0; hi < hops.length; hi++) {
+    const hop = hops[hi];
+    if (hopPositions[hop]) {
+      lastPos = hopPositions[hop];
+      continue;
     }
+    const r = resolved[hop];
+    if (!r || !r.ambiguous) continue;
+    const withLoc = r.candidates.filter(c => c.lat && c.lon && !(c.lat === 0 && c.lon === 0));
+    if (!withLoc.length) continue;
+
+    // Use previous hop position, or observer position for last hop, or skip
+    let anchor = lastPos;
+    if (!anchor && hi === hops.length - 1 && observerLat != null) {
+      anchor = { lat: observerLat, lon: observerLon };
+    }
+    if (anchor) {
+      withLoc.sort((a, b) => dist(a.lat, a.lon, anchor.lat, anchor.lon) - dist(b.lat, b.lon, anchor.lat, anchor.lon));
+    }
+    r.name = withLoc[0].name;
+    r.pubkey = withLoc[0].pubkey;
+    hopPositions[hop] = { lat: withLoc[0].lat, lon: withLoc[0].lon };
+    lastPos = hopPositions[hop];
+  }
+
+  // Backward pass: resolve any remaining ambiguous hops using next hop's position
+  let nextPos = observerLat != null ? { lat: observerLat, lon: observerLon } : null;
+  for (let hi = hops.length - 1; hi >= 0; hi--) {
+    const hop = hops[hi];
+    if (hopPositions[hop]) {
+      nextPos = hopPositions[hop];
+      continue;
+    }
+    const r = resolved[hop];
+    if (!r || !r.ambiguous) continue;
+    const withLoc = r.candidates.filter(c => c.lat && c.lon && !(c.lat === 0 && c.lon === 0));
+    if (!withLoc.length || !nextPos) continue;
+    withLoc.sort((a, b) => dist(a.lat, a.lon, nextPos.lat, nextPos.lon) - dist(b.lat, b.lon, nextPos.lat, nextPos.lon));
+    r.name = withLoc[0].name;
+    r.pubkey = withLoc[0].pubkey;
+    hopPositions[hop] = { lat: withLoc[0].lat, lon: withLoc[0].lon };
+    nextPos = hopPositions[hop];
   }
 
   res.json({ resolved });
