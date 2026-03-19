@@ -205,7 +205,11 @@
     function tick() {
       if (VCR.mode !== 'REPLAY') return;
       if (VCR.playhead >= VCR.buffer.length) {
-        vcrResumeLive();
+        // Try to fetch the next page before going live
+        fetchNextReplayPage().then(hasMore => {
+          if (hasMore) tick();
+          else vcrResumeLive();
+        });
         return;
       }
       const entry = VCR.buffer[VCR.playhead];
@@ -226,6 +230,27 @@
       VCR.replayTimer = setTimeout(tick, delay);
     }
     tick();
+  }
+
+  function fetchNextReplayPage() {
+    // Get timestamp of last packet in buffer to fetch the next page
+    const last = VCR.buffer[VCR.buffer.length - 1];
+    if (!last) return Promise.resolve(false);
+    const since = new Date(last.ts + 1).toISOString(); // +1ms to avoid dupe
+    return fetch(`/api/packets?limit=10000&grouped=false&since=${encodeURIComponent(since)}&order=asc`)
+      .then(r => r.json())
+      .then(data => {
+        const pkts = data.packets || [];
+        if (pkts.length === 0) return false;
+        const newEntries = pkts.map(p => ({
+          ts: new Date(p.timestamp || p.created_at).getTime(),
+          pkt: dbPacketToLive(p)
+        }));
+        // Append to buffer, playhead stays where it is (at the end, about to read new entries)
+        VCR.buffer = VCR.buffer.concat(newEntries);
+        return true;
+      })
+      .catch(() => false);
   }
 
   function stopReplay() {
