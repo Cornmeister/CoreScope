@@ -32,7 +32,6 @@ const channelKeys = require("./config.json").channelKeys || {};
 
 // Auto-derive keys for hashtag channels: SHA256("#name") first 16 bytes
 // Any channel starting with # can be decrypted algorithmically
-const crypto = require('crypto');
 function deriveHashtagKey(name) {
   return crypto.createHash('sha256').update(name).digest('hex').substring(0, 32);
 }
