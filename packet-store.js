@@ -134,7 +134,21 @@ class PacketStore {
     } else if (observer && !type && !route && !region && !hash && !since && !until && !node) {
       results = this.byObserver.get(observer) || [];
     } else if (node && !type && !route && !region && !observer && !hash && !since && !until) {
-      results = this.byNode.get(node) || [];
+      // Resolve name to pubkey, then use index + text search
+      let pubkey = node;
+      let nodeName = node;
+      if (!this.byNode.has(node)) {
+        try {
+          const row = this.db.prepare("SELECT public_key, name FROM nodes WHERE public_key = ? OR name = ? LIMIT 1").get(node, node);
+          if (row) { pubkey = row.public_key; nodeName = row.name || node; }
+        } catch {}
+      }
+      const indexed = this.byNode.get(pubkey);
+      const idSet = indexed ? new Set(indexed.map(p => p.id)) : new Set();
+      results = this.packets.filter(p =>
+        idSet.has(p.id) ||
+        (p.decoded_json && (p.decoded_json.includes(nodeName) || p.decoded_json.includes(pubkey)))
+      );
     } else {
       // Apply filters sequentially
       if (type !== undefined) {
