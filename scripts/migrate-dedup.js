@@ -33,7 +33,7 @@ console.log('Creating transmissions and observations tables...');
 db.exec(`
   CREATE TABLE transmissions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    raw_hex TEXT,
+    raw_hex TEXT NOT NULL,
     hash TEXT NOT NULL UNIQUE,
     first_seen TEXT NOT NULL,
     route_type INTEGER,
