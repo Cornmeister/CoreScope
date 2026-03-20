@@ -1670,7 +1670,7 @@ app.get('/api/observers/:id/analytics', (req, res) => {
   const id = req.params.id;
   const days = parseInt(req.query.days) || 7;
   const since = new Date(Date.now() - days * 86400000).toISOString();
-  const obsPackets = (pktStore.byObserver.get(id) || []).filter(p => p.timestamp >= since);
+  const obsPackets = (pktStore.byObserver.get(id) || []).filter(p => p.timestamp >= since).sort((a, b) => b.timestamp.localeCompare(a.timestamp));
 
   // Timeline: packets per hour (last N days, bucketed)
   const bucketMs = days <= 1 ? 3600000 : days <= 7 ? 3600000 * 4 : 86400000;
@@ -1734,8 +1734,8 @@ app.get('/api/observers/:id/analytics', (req, res) => {
   }
   const snrDistribution = Object.values(snrBuckets).sort((a, b) => parseFloat(a.range) - parseFloat(b.range));
 
-  // Recent packets (last 20)
-  const recentPackets = obsPackets.slice(-20).reverse();
+  // Recent packets (last 20) — obsPackets filtered from pktStore, newest-first
+  const recentPackets = obsPackets.slice(0, 20);
 
   res.json({ timeline, packetTypes, nodesTimeline, snrDistribution, recentPackets });
 });
