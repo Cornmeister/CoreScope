@@ -1105,11 +1105,12 @@
       renderTableRows();
       return;
     }
-    // Load children for this hash
+    // Load children (observations) for this hash
     try {
-      const data = await api(`/packets?hash=${hash}&limit=20`);
+      const data = await api(`/packets?hash=${hash}&limit=1&expand=observations`);
+      const pkt = (data.packets || [])[0];
       const group = packets.find(p => p.hash === hash);
-      if (group) group._children = data.packets || [];
+      if (group && pkt) group._children = (pkt.observations || []).map(o => ({...pkt, ...o, _isObservation: true}));
       // Resolve any new hops from children
       const childHops = new Set();
       for (const c of (group?._children || [])) {
