@@ -29,6 +29,72 @@ const MAX_HOP_DIST_SERVER = config.maxHopDist || 1.8;
 const crypto = require('crypto');
 const PacketStore = require('./packet-store');
 
+// --- Precomputed hash_size map (updated on new packets, not per-request) ---
+const _hashSizeMap = new Map();
+function _rebuildHashSizeMap() {
+  _hashSizeMap.clear();
+  // Pass 1: from ADVERT packets (most authoritative — path byte bits 7-6)
+  // packets array is sorted newest-first, so first-match = newest ADVERT
+  for (const p of pktStore.packets) {
+    if (p.payload_type === 4 && p.raw_hex) {
+      try {
+        const d = JSON.parse(p.decoded_json || '{}');
+        const pk = d.pubKey || d.public_key;
+        if (pk && !_hashSizeMap.has(pk)) {
+          const pathByte = parseInt(p.raw_hex.slice(2, 4), 16);
+          _hashSizeMap.set(pk, ((pathByte >> 6) & 0x3) + 1);
+        }
+      } catch {}
+    }
+  }
+  // Pass 2: for nodes without ADVERTs, derive from path hop lengths in any packet
+  for (const p of pktStore.packets) {
+    if (p.path_json) {
+      try {
+        const hops = JSON.parse(p.path_json);
+        if (hops.length > 0) {
+          const hopLen = hops[0].length / 2;
+          if (hopLen >= 1 && hopLen <= 4) {
+            const pathByte = p.raw_hex ? parseInt(p.raw_hex.slice(2, 4), 16) : -1;
+            const hs = pathByte >= 0 ? ((pathByte >> 6) & 0x3) + 1 : hopLen;
+            if (p.decoded_json) {
+              const d = JSON.parse(p.decoded_json);
+              const pk = d.pubKey || d.public_key;
+              if (pk && !_hashSizeMap.has(pk)) _hashSizeMap.set(pk, hs);
+            }
+          }
+        }
+      } catch {}
+    }
+  }
+}
+// Update hash_size for a single new packet (called on insert)
+function _updateHashSizeForPacket(p) {
+  if (p.payload_type === 4 && p.raw_hex) {
+    try {
+      const d = typeof p.decoded_json === 'string' ? JSON.parse(p.decoded_json || '{}') : (p.decoded_json || {});
+      const pk = d.pubKey || d.public_key;
+      if (pk) {
+        const pathByte = parseInt(p.raw_hex.slice(2, 4), 16);
+        _hashSizeMap.set(pk, ((pathByte >> 6) & 0x3) + 1);
+      }
+    } catch {}
+  } else if (p.path_json && p.decoded_json) {
+    try {
+      const d = typeof p.decoded_json === 'string' ? JSON.parse(p.decoded_json) : p.decoded_json;
+      const pk = d.pubKey || d.public_key;
+      if (pk && !_hashSizeMap.has(pk)) {
+        const hops = typeof p.path_json === 'string' ? JSON.parse(p.path_json) : p.path_json;
+        if (hops.length > 0) {
+          const pathByte = p.raw_hex ? parseInt(p.raw_hex.slice(2, 4), 16) : -1;
+          const hs = pathByte >= 0 ? ((pathByte >> 6) & 0x3) + 1 : (hops[0].length / 2);
+          if (hs >= 1 && hs <= 4) _hashSizeMap.set(pk, hs);
+        }
+      }
+    } catch {}
+  }
+}
+
 // API key middleware for write endpoints
 const API_KEY = config.apiKey || null;
 function requireApiKey(req, res, next) {
@@ -56,6 +122,7 @@ function computeContentHash(rawHex) {
 }
 const db = require('./db');
 const pktStore = new PacketStore(db, config.packetStore || {}).load();
+_rebuildHashSizeMap();
 const configuredChannelKeys = config.channelKeys || {};
 const hashChannels = Array.isArray(config.hashChannels) ? config.hashChannels : [];
 
@@ -593,7 +660,7 @@ for (const source of mqttSources) {
           path_json: JSON.stringify(decoded.path.hops),
           decoded_json: JSON.stringify(decoded.payload),
         };
-        const packetId = pktStore.insert(pktData);
+        const packetId = pktStore.insert(pktData); _updateHashSizeForPacket(pktData);
         try { db.insertTransmission(pktData); } catch (e) { console.error('[dual-write] transmission insert error:', e.message); }
 
         if (decoded.path.hops.length > 0) {
@@ -695,7 +762,7 @@ for (const source of mqttSources) {
             path_json: JSON.stringify([]),
             decoded_json: JSON.stringify(advert),
           };
-          const packetId = pktStore.insert(advertPktData);
+          const packetId = pktStore.insert(advertPktData); _updateHashSizeForPacket(advertPktData);
           try { db.insertTransmission(advertPktData); } catch (e) { console.error('[dual-write] transmission insert error:', e.message); }
           broadcast({ type: 'packet', data: { id: packetId, decoded: { header: { payloadTypeName: 'ADVERT' }, payload: advert } } });
         }
@@ -728,7 +795,7 @@ for (const source of mqttSources) {
           path_json: JSON.stringify([]),
           decoded_json: JSON.stringify(channelMsg),
         };
-        const packetId = pktStore.insert(chPktData);
+        const packetId = pktStore.insert(chPktData); _updateHashSizeForPacket(chPktData);
         try { db.insertTransmission(chPktData); } catch (e) { console.error('[dual-write] transmission insert error:', e.message); }
         broadcast({ type: 'packet', data: { id: packetId, decoded: { header: { payloadTypeName: 'GRP_TXT' }, payload: channelMsg } } });
         broadcast({ type: 'message', data: { id: packetId, decoded: { header: { payloadTypeName: 'GRP_TXT' }, payload: channelMsg } } });
@@ -751,7 +818,7 @@ for (const source of mqttSources) {
           path_json: JSON.stringify(dm.hops || []),
           decoded_json: JSON.stringify(dm),
         };
-        const packetId = pktStore.insert(dmPktData);
+        const packetId = pktStore.insert(dmPktData); _updateHashSizeForPacket(dmPktData);
         try { db.insertTransmission(dmPktData); } catch (e) { console.error('[dual-write] transmission insert error:', e.message); }
         broadcast({ type: 'packet', data: { id: packetId, decoded: { header: { payloadTypeName: 'TXT_MSG' }, payload: dm } } });
         return;
@@ -773,7 +840,7 @@ for (const source of mqttSources) {
           path_json: JSON.stringify(trace.hops || trace.path || []),
           decoded_json: JSON.stringify(trace),
         };
-        const packetId = pktStore.insert(tracePktData);
+        const packetId = pktStore.insert(tracePktData); _updateHashSizeForPacket(tracePktData);
         try { db.insertTransmission(tracePktData); } catch (e) { console.error('[dual-write] transmission insert error:', e.message); }
         broadcast({ type: 'packet', data: { id: packetId, decoded: { header: { payloadTypeName: 'TRACE' }, payload: trace } } });
         return;
@@ -995,7 +1062,7 @@ app.post('/api/packets', requireApiKey, (req, res) => {
       path_json: JSON.stringify(decoded.path.hops),
       decoded_json: JSON.stringify(decoded.payload),
     };
-    const packetId = pktStore.insert(apiPktData);
+    const packetId = pktStore.insert(apiPktData); _updateHashSizeForPacket(apiPktData);
     try { db.insertTransmission(apiPktData); } catch (e) { console.error('[dual-write] transmission insert error:', e.message); }
 
     if (decoded.path.hops.length > 0) {
@@ -1079,48 +1146,9 @@ app.get('/api/nodes', (req, res) => {
     }
   }
 
-  // Compute hash_size for each node from ADVERT path byte or path hop lengths
-  const hashSizeMap = new Map();
-  // Pass 1: from ADVERT packets (most authoritative — path byte bits 7-6)
-  // packets array is sorted newest-first, so first-match = newest ADVERT
-  for (const p of pktStore.packets) {
-    if (p.payload_type === 4 && p.raw_hex) {
-      try {
-        const d = JSON.parse(p.decoded_json || '{}');
-        const pk = d.pubKey || d.public_key;
-        if (pk && !hashSizeMap.has(pk)) {
-          const pathByte = parseInt(p.raw_hex.slice(2, 4), 16);
-          hashSizeMap.set(pk, ((pathByte >> 6) & 0x3) + 1);
-        }
-      } catch {}
-    }
-  }
-  // Pass 2: for nodes without ADVERTs, derive from path hop lengths in any packet
-  // Path hops are hex strings; their length / 2 = hash_size in bytes
-  for (const p of pktStore.packets) {
-    if (p.path_json) {
-      try {
-        const hops = JSON.parse(p.path_json);
-        if (hops.length > 0) {
-          const hopLen = hops[0].length / 2; // hex chars / 2 = bytes
-          if (hopLen >= 1 && hopLen <= 4) {
-            // The path byte tells us hash_size for ALL nodes in this packet's mesh
-            const pathByte = p.raw_hex ? parseInt(p.raw_hex.slice(2, 4), 16) : -1;
-            const hs = pathByte >= 0 ? ((pathByte >> 6) & 0x3) + 1 : hopLen;
-            // We can't map hops to pubkeys directly (hops are truncated hashes)
-            // but we know the packet's source node uses this hash_size
-            if (p.decoded_json) {
-              const d = JSON.parse(p.decoded_json);
-              const pk = d.pubKey || d.public_key;
-              if (pk && !hashSizeMap.has(pk)) hashSizeMap.set(pk, hs);
-            }
-          }
-        }
-      } catch {}
-    }
-  }
+  // Use precomputed hash_size map (rebuilt at startup, updated on new packets)
   for (const node of nodes) {
-    node.hash_size = hashSizeMap.get(node.public_key) || null;
+    node.hash_size = _hashSizeMap.get(node.public_key) || null;
   }
 
   res.json({ nodes, total, counts });
