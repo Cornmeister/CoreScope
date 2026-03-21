@@ -1087,7 +1087,7 @@ app.get('/api/nodes', (req, res) => {
       try {
         const d = JSON.parse(p.decoded_json || '{}');
         const pk = d.pubKey || d.public_key;
-        if (pk && !hashSizeMap.has(pk)) {
+        if (pk) {
           const pathByte = parseInt(p.raw_hex.slice(2, 4), 16);
           hashSizeMap.set(pk, ((pathByte >> 6) & 0x3) + 1);
         }
@@ -1111,7 +1111,7 @@ app.get('/api/nodes', (req, res) => {
             if (p.decoded_json) {
               const d = JSON.parse(p.decoded_json);
               const pk = d.pubKey || d.public_key;
-              if (pk && !hashSizeMap.has(pk)) hashSizeMap.set(pk, hs);
+              if (pk) hashSizeMap.set(pk, hs);
             }
           }
         }
