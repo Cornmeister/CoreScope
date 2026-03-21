@@ -205,6 +205,14 @@
     return str.length > len ? str.slice(0, len) + '…' : str;
   }
 
+  function formatSecondsAgo(sec) {
+    if (sec < 0) sec = 0;
+    if (sec < 60) return sec + 's ago';
+    if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
+    if (sec < 86400) return Math.floor(sec / 3600) + 'h ago';
+    return Math.floor(sec / 86400) + 'd ago';
+  }
+
   function highlightMentions(text) {
     if (!text) return '';
     return escapeHtml(text).replace(/@\[([^\]]+)\]/g, function(_, name) {
@@ -420,7 +428,7 @@
         var ch = channels.find(function (c) { return c.hash === channelName; });
         if (ch) {
           if (isFirstObservation) ch.messageCount = (ch.messageCount || 0) + 1;
-          ch.lastActivity = ts;
+          ch.lastActivityMs = Date.now();
           ch.lastSender = sender;
           ch.lastMessage = truncate(displayText, 100);
           channelListDirty = true;
@@ -430,7 +438,7 @@
             hash: channelName,
             name: channelName,
             messageCount: 1,
-            lastActivity: ts,
+            lastActivityMs: Date.now(),
             lastSender: sender,
             lastMessage: truncate(displayText, 100),
           });
@@ -465,7 +473,7 @@
       }
 
       if (channelListDirty) {
-        channels.sort(function (a, b) { return (b.lastActivity || '').localeCompare(a.lastActivity || ''); });
+        channels.sort(function (a, b) { return (b.lastActivityMs || 0) - (a.lastActivityMs || 0); });
         renderChannelList();
       }
       if (messagesDirty) {
@@ -486,11 +494,15 @@
       }
     });
 
-    // Tick relative timestamps every 30s
+    // Tick relative timestamps every 1s — iterates channels array, updates DOM text only
     timeAgoTimer = setInterval(function () {
-      document.querySelectorAll('.ch-item-time[data-ts]').forEach(function (el) {
-        el.textContent = timeAgo(el.dataset.ts);
-      });
+      var now = Date.now();
+      for (var i = 0; i < channels.length; i++) {
+        var ch = channels[i];
+        if (!ch.lastActivityMs) continue;
+        var el = document.querySelector('.ch-item-time[data-channel-hash="' + ch.hash + '"]');
+        if (el) el.textContent = formatSecondsAgo(Math.floor((now - ch.lastActivityMs) / 1000));
+      }
     }, 1000);
   }
 
@@ -517,7 +529,10 @@
       const rp = RegionFilter.getRegionParam();
       const qs = rp ? '?region=' + encodeURIComponent(rp) : '';
       const data = await api('/channels' + qs, { ttl: CLIENT_TTL.channels });
-      channels = (data.channels || []).sort((a, b) => (b.lastActivity || '').localeCompare(a.lastActivity || ''));
+      channels = (data.channels || []).map(ch => {
+        ch.lastActivityMs = ch.lastActivity ? new Date(ch.lastActivity).getTime() : 0;
+        return ch;
+      }).sort((a, b) => (b.lastActivityMs || 0) - (a.lastActivityMs || 0));
       renderChannelList();
     } catch (e) {
       if (!silent) {
@@ -540,7 +555,7 @@
     el.innerHTML = sorted.map(ch => {
       const name = ch.name || `Channel ${ch.hash}`;
       const color = getChannelColor(ch.hash);
-      const time = ch.lastActivity ? timeAgo(ch.lastActivity) : '';
+      const time = ch.lastActivityMs ? formatSecondsAgo(Math.floor((Date.now() - ch.lastActivityMs) / 1000)) : '';
       const preview = ch.lastSender && ch.lastMessage
         ? `${ch.lastSender}: ${truncate(ch.lastMessage, 28)}`
         : `${ch.messageCount} messages`;
@@ -552,7 +567,7 @@
         <div class="ch-item-body">
           <div class="ch-item-top">
             <span class="ch-item-name">${escapeHtml(name)}</span>
-            <span class="ch-item-time" data-ts="${ch.lastActivity || ''}">${time}</span>
+            <span class="ch-item-time" data-channel-hash="${ch.hash}">${time}</span>
           </div>
           <div class="ch-item-preview">${escapeHtml(preview)}</div>
         </div>
