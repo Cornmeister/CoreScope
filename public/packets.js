@@ -213,16 +213,15 @@
       if (!btn) return;
       if (btn.dataset.action === 'pkt-refresh') loadPackets();
       else if (btn.dataset.action === 'pkt-byop') showBYOP();
-    });
-
-    document.getElementById('pktPauseBtn').addEventListener('click', function() {
-      packetsPaused = !packetsPaused;
-      this.textContent = packetsPaused ? '▶' : '⏸';
-      this.title = packetsPaused ? 'Resume live updates' : 'Pause live updates';
-      this.classList.toggle('active', packetsPaused);
-      if (!packetsPaused && pauseBuffer.length) {
-        pauseBuffer.forEach(msg => wsHandler(msg));
-        pauseBuffer = [];
+      else if (btn.dataset.action === 'pkt-pause') {
+        packetsPaused = !packetsPaused;
+        btn.textContent = packetsPaused ? '▶' : '⏸';
+        btn.title = packetsPaused ? 'Resume live updates' : 'Pause live updates';
+        btn.classList.toggle('active', packetsPaused);
+        if (!packetsPaused && pauseBuffer.length) {
+          pauseBuffer.forEach(msg => wsHandler(msg));
+          pauseBuffer = [];
+        }
       }
     });
 
@@ -456,7 +455,7 @@
         <h2>Latest Packets <span class="count">(${totalCount})</span></h2>
         <div>
           <button class="btn-icon" data-action="pkt-refresh" title="Refresh">🔄</button>
-          <button class="btn-icon" id="pktPauseBtn" title="Pause live updates">⏸</button>
+          <button class="btn-icon" id="pktPauseBtn" data-action="pkt-pause" title="Pause live updates">⏸</button>
           <button class="btn-icon" data-action="pkt-byop" title="Bring Your Own Packet" aria-label="Bring Your Own Packet - paste raw packet hex for analysis" aria-haspopup="dialog">📦 BYOP</button>
         </div>
       </div>
