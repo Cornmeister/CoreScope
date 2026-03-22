@@ -29,9 +29,16 @@
 ## Mapping Design
 
 ### Melody from Raw Bytes
-- Each byte (0-255) quantized to a musical scale across 2-3 octaves
-- NOT chromatic (too chaotic) — use pentatonic or modal scales
-- First N bytes of the packet = a short melodic phrase
+- **Header bytes configure the voice** — payload type selects instrument/scale/key (see below), flags and transport codes select articulation and envelope shape. Header bytes are NOT played as notes.
+- **Payload bytes are the melody** — evenly sampled and quantized to a scale:
+  - Note count = `sqrt(payload_length)`, so proportional to packet size:
+    - 16-byte payload → 4 notes
+    - 36-byte payload → 6 notes  
+    - 64-byte payload → 8 notes
+  - Bytes selected via even spacing across the full payload (not just first N) — represents the whole packet's "shape"
+  - Each byte (0-255) quantized to the scale selected by payload type, across 2-3 octaves
+  - NOT chromatic (too chaotic) — pentatonic or modal scales
+  - Note timing: ~150-200ms per note, so 4-8 notes = 0.6-1.6 seconds per packet
 - Different payload types get different scales:
   - **ADVERT** → major pentatonic (bright, announcing, beacon-like)
   - **GRP_TXT** → minor pentatonic (conversational, human)
