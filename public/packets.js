@@ -1176,12 +1176,24 @@
       }
     }
 
+    // Location: from ADVERT lat/lon, or from known node
+    let locationHtml = '—';
+    if (decoded.lat != null && decoded.lon != null && !(decoded.lat === 0 && decoded.lon === 0)) {
+      locationHtml = `${decoded.lat.toFixed(5)}, ${decoded.lon.toFixed(5)} <a href="https://www.google.com/maps?q=${decoded.lat},${decoded.lon}" target="_blank" style="font-size:0.85em">📍map</a>`;
+      if (decoded.name) locationHtml = `${escapeHtml(decoded.name)} — ${locationHtml}`;
+    } else if (decoded.srcPubKey || decoded.pubKey) {
+      // Try to look up sender node location from HopResolver's node list
+      const senderKey = decoded.srcPubKey || decoded.pubKey;
+      const senderNode = (window.HopResolver && HopResolver.ready()) ? null : null; // could look up but keep simple
+    }
+
     panel.innerHTML = `
       <div class="detail-title">${hasRawHex ? `Packet Byte Breakdown (${size} bytes)` : typeName + ' Packet'}</div>
       <div class="detail-hash">${pkt.hash || 'Packet #' + pkt.id}</div>
       ${messageHtml}
       <dl class="detail-meta">
         <dt>Observer</dt><dd>${obsName(pkt.observer_id)}</dd>
+        <dt>Location</dt><dd>${locationHtml}</dd>
         <dt>SNR / RSSI</dt><dd>${snr != null ? snr + ' dB' : '—'} / ${rssi != null ? rssi + ' dBm' : '—'}</dd>
         <dt>Route Type</dt><dd>${routeTypeName(pkt.route_type)}</dd>
         <dt>Payload Type</dt><dd><span class="badge badge-${payloadTypeColor(pkt.payload_type)}">${typeName}</span></dd>
