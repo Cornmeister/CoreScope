@@ -1555,6 +1555,7 @@
   }
 
   function animatePath(hopPositions, typeName, color) {
+    if (!animLayer || !pathsLayer) return;
     activeAnims++;
     document.getElementById('liveAnimCount').textContent = activeAnims;
     let hopIndex = 0;
@@ -1600,6 +1601,7 @@
   }
 
   function pulseNode(key, pos, typeName) {
+    if (!animLayer || !nodesLayer) return;
     if (!nodeMarkers[key]) {
       const ghost = L.circleMarker(pos, {
         radius: 5, fillColor: '#6b7280', fillOpacity: 0.3, color: '#fff', weight: 0.5, opacity: 0.2
@@ -1653,6 +1655,7 @@
   }
 
   function drawAnimatedLine(from, to, color, onComplete, overrideOpacity) {
+    if (!animLayer || !pathsLayer) { if (onComplete) onComplete(); return; }
     const steps = 20;
     const latStep = (to[0] - from[0]) / steps;
     const lonStep = (to[1] - from[1]) / steps;
