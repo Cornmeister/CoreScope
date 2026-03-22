@@ -78,6 +78,12 @@
       .alab-hex .playing { background: #ff6b6b !important; color: #fff !important; border-radius: 2px; padding: 0 2px; transition: background 0.1s; }
       .alab-note-table tr.playing { background: var(--accent) !important; color: #fff; }
       .alab-note-table tr.playing td { color: #fff; }
+      .alab-map-table { width: 100%; font-size: 13px; border-collapse: collapse; }
+      .alab-map-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+      .alab-map-table .map-param { font-weight: 600; white-space: nowrap; width: 110px; }
+      .alab-map-table .map-value { font-family: var(--mono); font-weight: 700; white-space: nowrap; width: 120px; }
+      .alab-map-table .map-why { font-size: 11px; color: var(--text-muted); font-family: var(--mono); }
+      .map-why-inline { display: block; font-size: 10px; color: var(--text-muted); font-family: var(--mono); margin-top: 2px; }
       .alab-empty { text-align: center; padding: 60px 20px; color: var(--text-muted); font-size: 15px; }
       .alab-slider-group { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); }
       .alab-slider-group input[type=range] { width: 80px; }
@@ -133,10 +139,21 @@
     const volume = Math.min(0.6, 0.15 + (obsCount - 1) * 0.02);
     const voiceCount = Math.min(Math.max(1, Math.ceil(Math.log2(obsCount + 1))), 8);
     let panValue = 0;
+    let panSource = 'no location data → center';
     try {
       const d = JSON.parse(pkt.decoded_json || '{}');
-      if (d.lon != null) panValue = Math.max(-1, Math.min(1, mapRange(d.lon, -125, -65, -1, 1)));
+      if (d.lon != null) {
+        panValue = Math.max(-1, Math.min(1, mapRange(d.lon, -125, -65, -1, 1)));
+        panSource = `lon ${d.lon.toFixed(1)}° → map(-125...-65) → ${panValue.toFixed(2)}`;
+      }
     } catch {}
+
+    // Detune description
+    const detuneDesc = [];
+    for (let v = 0; v < voiceCount; v++) {
+      const d = v === 0 ? 0 : (v % 2 === 0 ? 1 : -1) * (v * 5 + 3);
+      detuneDesc.push((d >= 0 ? '+' : '') + d + '¢');
+    }
 
     const bpm = MeshAudio.getBPM ? MeshAudio.getBPM() : 120;
     const tm = 60 / bpm * speedMult;
@@ -159,6 +176,7 @@
       oscType, scaleName, hopCount, obsCount,
       totalSize: allBytes.length, payloadSize: payloadBytes.length,
       color: TYPE_COLORS[typeName] || TYPE_COLORS.UNKNOWN,
+      panSource, detuneDesc,
     };
   }
 
@@ -193,29 +211,68 @@
 
       <div class="alab-section">
         <h3>🎵 Sound Mapping</h3>
-        <div class="alab-grid">
-          <div class="alab-stat"><span class="label">Instrument</span><br><span class="value">${m.oscType}</span></div>
-          <div class="alab-stat"><span class="label">Scale</span><br><span class="value">${m.scaleName}</span></div>
-          <div class="alab-stat"><span class="label">Notes</span><br><span class="value">${m.noteCount} (√${m.payloadSize})</span></div>
-          <div class="alab-stat"><span class="label">Filter Cutoff</span><br><span class="value">${m.filterHz} Hz</span></div>
-          <div class="alab-stat"><span class="label">Volume</span><br><span class="value">${m.volume} (${m.obsCount} obs)</span></div>
-          <div class="alab-stat"><span class="label">Voices</span><br><span class="value">${m.voiceCount}</span></div>
-          <div class="alab-stat"><span class="label">Pan</span><br><span class="value">${m.panValue}</span></div>
-        </div>
+        <table class="alab-map-table">
+          <tr>
+            <td class="map-param">Instrument</td>
+            <td class="map-value">${m.oscType}</td>
+            <td class="map-why">payload_type = ${m.typeName} → ${m.oscType} oscillator</td>
+          </tr>
+          <tr>
+            <td class="map-param">Scale</td>
+            <td class="map-value">${m.scaleName}</td>
+            <td class="map-why">payload_type = ${m.typeName} → ${m.scaleName} (root MIDI ${SCALE_INTERVALS[m.typeName]?.root || 48})</td>
+          </tr>
+          <tr>
+            <td class="map-param">Notes</td>
+            <td class="map-value">${m.noteCount}</td>
+            <td class="map-why">⌈√${m.payloadSize}⌉ = ⌈${Math.sqrt(m.payloadSize).toFixed(1)}⌉ = ${m.noteCount} bytes sampled evenly across payload</td>
+          </tr>
+          <tr>
+            <td class="map-param">Filter Cutoff</td>
+            <td class="map-value">${m.filterHz} Hz</td>
+            <td class="map-why">${m.hopCount} hops → map(1...10 → 8000...800 Hz) = ${m.filterHz} Hz lowpass — more hops = more muffled</td>
+          </tr>
+          <tr>
+            <td class="map-param">Volume</td>
+            <td class="map-value">${m.volume}</td>
+            <td class="map-why">min(0.6, 0.15 + (${m.obsCount} obs − 1) × 0.02) = ${m.volume} — more observers = louder</td>
+          </tr>
+          <tr>
+            <td class="map-param">Voices</td>
+            <td class="map-value">${m.voiceCount}</td>
+            <td class="map-why">min(⌈log₂(${m.obsCount} + 1)⌉, 8) = ${m.voiceCount} — more observers = richer chord</td>
+          </tr>
+          <tr>
+            <td class="map-param">Detune</td>
+            <td class="map-value">${m.detuneDesc.join(', ')}</td>
+            <td class="map-why">${m.voiceCount} voices detuned for shimmer — wider spread with more voices</td>
+          </tr>
+          <tr>
+            <td class="map-param">Pan</td>
+            <td class="map-value">${m.panValue}</td>
+            <td class="map-why">${m.panSource}</td>
+          </tr>
+        </table>
       </div>
 
       <div class="alab-section">
         <h3>🎹 Note Sequence</h3>
         <table class="alab-note-table">
-          <tr><th>#</th><th>Byte</th><th>MIDI</th><th>Freq</th><th>Duration</th><th>Gap</th></tr>
-          ${m.notes.map((n, i) => `<tr id="noteRow${i}">
+          <tr><th>#</th><th>Payload Index</th><th>Byte</th><th>→ MIDI</th><th>→ Freq</th><th>Duration (why)</th><th>Gap (why)</th></tr>
+          ${m.notes.map((n, i) => {
+            const durWhy = `byte ${n.byte} → map(0...255 → 50...400ms) × tempo`;
+            const gapWhy = i < m.notes.length - 1
+              ? `|${n.byte} − ${m.notes[i+1].byte}| = ${Math.abs(m.notes[i+1].byte - n.byte)} → map(0...255 → 30...300ms) × tempo`
+              : '';
+            return `<tr id="noteRow${i}">
             <td>${i + 1}</td>
+            <td>[${n.index}]</td>
             <td>0x${n.byte.toString(16).padStart(2, '0').toUpperCase()} (${n.byte})</td>
             <td>${n.midi}</td>
             <td>${n.freq} Hz</td>
-            <td>${n.duration} ms</td>
-            <td>${i < m.notes.length - 1 ? n.gap + ' ms' : '—'}</td>
-          </tr>`).join('')}
+            <td>${n.duration} ms <span class="map-why-inline">${durWhy}</span></td>
+            <td>${i < m.notes.length - 1 ? n.gap + ' ms <span class="map-why-inline">' + gapWhy + '</span>' : '—'}</td>
+          </tr>`;}).join('')}
         </table>
       </div>
 
