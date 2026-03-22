@@ -127,7 +127,9 @@
     html += '<label class="region-dropdown-item"><input type="checkbox" data-region="__all__"' +
       (allSelected ? ' checked' : '') + '> <strong>All</strong></label>';
     codes.forEach(function (code) {
-      var label = _regions[code] ? (code + ' - ' + _regions[code]) : code;
+      var configLabel = _regions[code];
+      var cityName = configLabel || (window.IATA_CITIES && window.IATA_CITIES[code]);
+      var label = cityName ? (code + ' - ' + cityName) : code;
       var active = allSelected || (_selected && _selected.has(code));
       html += '<label class="region-dropdown-item"><input type="checkbox" data-region="' + code + '"' +
         (active ? ' checked' : '') + '> ' + label + '</label>';
