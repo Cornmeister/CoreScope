@@ -245,8 +245,17 @@
   }
 
   function applyTypeColorCSS() {
-    // Now handled by syncBadgeColors in roles.js
     if (window.syncBadgeColors) window.syncBadgeColors();
+  }
+
+  // Auto-save to localStorage on every change
+  let _autoSaveTimer = null;
+  function autoSave() {
+    if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
+    _autoSaveTimer = setTimeout(function() {
+      _autoSaveTimer = null;
+      try { localStorage.setItem('meshcore-user-theme', JSON.stringify(buildExport())); } catch {}
+    }, 500);
   }
 
   function resetPreview() {
@@ -608,6 +617,7 @@
         var parts = inp.dataset.key.split('.');
         if (parts.length === 2) {
           state[parts[0]][parts[1]] = inp.value;
+          autoSave();
         }
         // Live DOM updates for branding
         if (inp.dataset.key === 'branding.siteName') {
@@ -637,7 +647,7 @@
         state[themeKey][key] = inp.value;
         var hex = container.querySelector('[data-hex="' + key + '"]');
         if (hex) hex.textContent = inp.value;
-        applyThemePreview();
+        applyThemePreview(); autoSave();
       });
     });
 
@@ -647,7 +657,7 @@
         var key = btn.dataset.resetTheme;
         var themeKey = isDarkMode() ? 'themeDark' : 'theme';
         state[themeKey][key] = activeDefaults()[key];
-        applyThemePreview();
+        applyThemePreview(); autoSave();
         render(container);
       });
     });
@@ -671,7 +681,7 @@
         if (window.ROLE_COLORS) window.ROLE_COLORS[key] = inp.value;
         if (window.ROLE_STYLE && window.ROLE_STYLE[key]) window.ROLE_STYLE[key].color = inp.value;
         // Trigger re-render of current page
-        window.dispatchEvent(new CustomEvent('theme-changed'));
+        window.dispatchEvent(new CustomEvent('theme-changed')); autoSave();
         var dot = container.querySelector('[data-dot="' + key + '"]');
         if (dot) dot.style.background = inp.value;
         var hex = container.querySelector('[data-nhex="' + key + '"]');
@@ -697,7 +707,7 @@
         state.typeColors[key] = inp.value;
         if (window.TYPE_COLORS) window.TYPE_COLORS[key] = inp.value;
         if (window.syncBadgeColors) window.syncBadgeColors();
-        window.dispatchEvent(new CustomEvent('theme-changed'));
+        window.dispatchEvent(new CustomEvent('theme-changed')); autoSave();
         var dot = container.querySelector('[data-tdot="' + key + '"]');
         if (dot) dot.style.background = inp.value;
         var hex = container.querySelector('[data-thex="' + key + '"]');
@@ -717,7 +727,7 @@
     container.querySelectorAll('[data-step-field]').forEach(function (inp) {
       inp.addEventListener('input', function () {
         var i = parseInt(inp.dataset.idx);
-        state.home.steps[i][inp.dataset.stepField] = inp.value;
+        state.home.steps[i][inp.dataset.stepField] = inp.value; autoSave();
       });
     });
     container.querySelectorAll('[data-move-step]').forEach(function (btn) {
@@ -748,7 +758,7 @@
     container.querySelectorAll('[data-check-field]').forEach(function (inp) {
       inp.addEventListener('input', function () {
         var i = parseInt(inp.dataset.idx);
-        state.home.checklist[i][inp.dataset.checkField] = inp.value;
+        state.home.checklist[i][inp.dataset.checkField] = inp.value; autoSave();
       });
     });
     container.querySelectorAll('[data-rm-check]').forEach(function (btn) {
@@ -767,7 +777,7 @@
     container.querySelectorAll('[data-link-field]').forEach(function (inp) {
       inp.addEventListener('input', function () {
         var i = parseInt(inp.dataset.idx);
-        state.home.footerLinks[i][inp.dataset.linkField] = inp.value;
+        state.home.footerLinks[i][inp.dataset.linkField] = inp.value; autoSave();
       });
     });
     container.querySelectorAll('[data-rm-link]').forEach(function (btn) {
@@ -827,7 +837,7 @@
       resetPreview();
       initState();
       render(container);
-      applyThemePreview();
+      applyThemePreview(); autoSave();
     });
   }
 
@@ -871,7 +881,7 @@
     });
 
     render(panelEl.querySelector('.cust-inner'));
-    applyThemePreview();
+    applyThemePreview(); autoSave();
   }
 
   // Wire up toggle button
@@ -902,6 +912,7 @@
         }
         if (userTheme.typeColors && window.TYPE_COLORS) {
           Object.assign(window.TYPE_COLORS, userTheme.typeColors);
+          if (window.syncBadgeColors) window.syncBadgeColors();
         }
       }
     } catch {}
