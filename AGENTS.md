@@ -77,6 +77,18 @@ Never use `git add -A` or `git add .`. Always list files explicitly: `git add fi
 ### 10. Don't regress performance
 The packets page loads 30K+ packets. Don't add per-packet API calls. Don't add O(n²) loops. Client-side filtering is preferred over server-side. If you need data from the server, fetch it once and cache it.
 
+## MeshCore Firmware — Source of Truth
+
+The MeshCore firmware source is cloned at `firmware/` (gitignored — not part of this repo). This is THE authoritative reference for anything related to the protocol, packet format, device behavior, advert structure, flags, hash sizes, route types, or how repeaters/companions/rooms/sensors behave.
+
+**Before implementing any feature that touches protocol behavior:**
+1. Check the firmware source in `firmware/src/` and `firmware/docs/`
+2. Key files: `Mesh.h` (constants, packet structure), `Packet.cpp` (encoding/decoding), `helpers/AdvertDataHelpers.h` (advert flags/types), `helpers/CommonCLI.cpp` (CLI commands), `docs/packet_format.md`, `docs/payloads.md`
+3. If `firmware/` doesn't exist, clone it: `git clone --depth 1 https://github.com/meshcore-dev/MeshCore.git firmware`
+4. To update: `cd firmware && git pull`
+
+**Do NOT guess at protocol behavior.** The hash_size saga (21 commits) and the advert flags bug (room servers misclassified as repeaters) both happened because we assumed instead of reading the firmware source. The firmware is C++ — read it.
+
 ## MeshCore Protocol
 
 ### Advert Flags
