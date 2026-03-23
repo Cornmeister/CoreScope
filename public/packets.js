@@ -1418,13 +1418,16 @@
       rows += fieldRow(off + 32, 'Timestamp (4B)', decoded.timestampISO || '', 'Unix: ' + (decoded.timestamp || ''));
       rows += fieldRow(off + 36, 'Signature (64B)', truncate(decoded.signature || '', 24), '');
       if (decoded.flags) {
-        rows += fieldRow(off + 100, 'App Flags', '0x' + (decoded.flags.raw?.toString(16) || '??'),
-          [decoded.flags.chat && 'chat', decoded.flags.repeater && 'repeater', decoded.flags.room && 'room',
-           decoded.flags.sensor && 'sensor', decoded.flags.hasLocation && 'location', decoded.flags.hasName && 'name'].filter(Boolean).join(', '));
+        const _typeLabels = {1:'Companion',2:'Repeater',3:'Room Server',4:'Sensor'};
+        const _typeName = _typeLabels[decoded.flags.type] || ('Unknown(' + decoded.flags.type + ')');
+        const _boolFlags = [decoded.flags.hasLocation && 'location', decoded.flags.hasName && 'name'].filter(Boolean);
+        const _flagDesc = _typeName + (_boolFlags.length ? ' + ' + _boolFlags.join(', ') : '');
+        rows += fieldRow(off + 100, 'App Flags', '0x' + (decoded.flags.raw?.toString(16).padStart(2,'0') || '??'), _flagDesc);
         let fOff = off + 101;
         if (decoded.flags.hasLocation) {
+          const _mapUrl = `https://www.google.com/maps?q=${decoded.lat},${decoded.lon}`;
           rows += fieldRow(fOff, 'Latitude', decoded.lat?.toFixed(6) || '', '');
-          rows += fieldRow(fOff + 4, 'Longitude', decoded.lon?.toFixed(6) || '', '');
+          rows += fieldRow(fOff + 4, 'Longitude', (decoded.lon?.toFixed(6) || '') + ` <a href="${_mapUrl}" target="_blank" rel="noopener" class="detail-map-link" style="margin-left:8px;padding:2px 8px;font-size:11px">📍 Map</a>`, '');
           fOff += 8;
         }
         if (decoded.flags.hasName) {
