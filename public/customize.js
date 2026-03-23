@@ -159,9 +159,10 @@
       .cust-close { background: none; border: none; font-size: 18px; cursor: pointer; color: var(--text-muted); padding: 4px 8px; border-radius: 4px; }
       .cust-close:hover { background: var(--surface-3); color: var(--text); }
       .cust-body { flex: 1; overflow-y: auto; padding: 0; }
-      .cust-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); flex-shrink: 0; overflow-x: auto; }
-      .cust-tab { padding: 8px 12px; cursor: pointer; border: none; background: none; color: var(--text-muted);
-        font-size: 12px; font-weight: 500; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
+      .cust-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+      .cust-tab { padding: 8px 10px; cursor: pointer; border: none; background: none; color: var(--text-muted);
+        font-size: 12px; font-weight: 500; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; flex: 1; text-align: center; }
+      .cust-tab-text { font-size: 10px; display: block; }
       .cust-tab:hover { color: var(--text); }
       .cust-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
       .cust-panel { display: none; padding: 12px 16px; }
@@ -233,15 +234,15 @@
 
   function renderTabs() {
     var tabs = [
-      { id: 'branding', label: '🏷️ Branding' },
-      { id: 'theme', label: '🎨 Theme' },
-      { id: 'nodes', label: '📡 Nodes' },
-      { id: 'home', label: '🏠 Home Page' },
-      { id: 'export', label: '📤 Export' }
+      { id: 'branding', label: '🏷️', title: 'Branding' },
+      { id: 'theme', label: '🎨', title: 'Theme Colors' },
+      { id: 'nodes', label: '📡', title: 'Node Colors' },
+      { id: 'home', label: '🏠', title: 'Home Page' },
+      { id: 'export', label: '📤', title: 'Export / Save' }
     ];
     return '<div class="cust-tabs">' +
       tabs.map(function (t) {
-        return '<button class="cust-tab' + (t.id === activeTab ? ' active' : '') + '" data-tab="' + t.id + '">' + t.label + '</button>';
+        return '<button class="cust-tab' + (t.id === activeTab ? ' active' : '') + '" data-tab="' + t.id + '" title="' + t.title + '">' + t.label + ' <span class="cust-tab-text">' + t.title + '</span></button>';
       }).join('') + '</div>';
   }
 
