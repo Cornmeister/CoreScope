@@ -47,15 +47,18 @@ const _hashSizeMap = new Map();
 function _rebuildHashSizeMap() {
   _hashSizeMap.clear();
   // Pass 1: from ADVERT packets (most authoritative — path byte bits 7-6)
-  // packets array is sorted newest-first, so first-match = newest ADVERT
+  // Take the MAXIMUM hash_size seen across all adverts (nodes can change config)
   for (const p of pktStore.packets) {
     if (p.payload_type === 4 && p.raw_hex) {
       try {
         const d = JSON.parse(p.decoded_json || '{}');
         const pk = d.pubKey || d.public_key;
-        if (pk && !_hashSizeMap.has(pk)) {
+        if (pk) {
           const pathByte = parseInt(p.raw_hex.slice(2, 4), 16);
-          _hashSizeMap.set(pk, ((pathByte >> 6) & 0x3) + 1);
+          const hs = ((pathByte >> 6) & 0x3) + 1;
+          if (!_hashSizeMap.has(pk) || hs > _hashSizeMap.get(pk)) {
+            _hashSizeMap.set(pk, hs);
+          }
         }
       } catch {}
     }
