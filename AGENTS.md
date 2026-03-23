@@ -163,6 +163,7 @@ After pushing, verify in the browser:
 - No build step, no transpilation — write ES2020 for server, ES5/6 for frontend (broad browser support)
 
 ## What NOT to Do
+- **Don't check in private information** — no names, API keys, tokens, passwords, IP addresses, personal data, or any identifying information. This is a PUBLIC repo.
 - Don't add npm dependencies without asking
 - Don't create a build step
 - Don't add framework abstractions (React, Vue, etc.)
