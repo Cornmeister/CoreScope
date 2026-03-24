@@ -90,6 +90,9 @@ jobs:
             meshcore-analyzer
           echo "Deployed $(git rev-parse --short HEAD)"
 
+      - name: Install dependencies for E2E
+        run: npm ci --production=false
+
       - name: Install Playwright browser
         run: npx playwright install chromium --with-deps 2>/dev/null || true
 
