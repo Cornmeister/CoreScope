@@ -1,0 +1,274 @@
+syntax = "proto3";
+
+package meshcore.v1;
+
+option go_package = "github.com/meshcore-analyzer/proto/v1";
+
+import "common.proto";
+import "decoded.proto";
+
+// ─── Core Data Types ───────────────────────────────────────────────────────────
+
+// A transmission (deduplicated packet) as stored and returned by most endpoints.
+// This is the "Packet Object" in the API spec.
+message Transmission {
+  // Transmission ID (auto-increment).
+  int64 id = 1;
+  // Raw hex-encoded packet bytes. Null if unavailable.
+  optional string raw_hex = 2 [json_name = "raw_hex"];
+  // Content hash — deduplication key.
+  string hash = 3;
+  // When this transmission was first observed (ISO 8601).
+  string first_seen = 4 [json_name = "first_seen"];
+  // Display timestamp, same as first_seen (ISO 8601).
+  string timestamp = 5;
+  // Route type: 0=DIRECT, 1=FLOOD, 2=reserved, 3=TRANSPORT.
+  int32 route_type = 6 [json_name = "route_type"];
+  // Payload type: 0=REQ .. 11=CONTROL.
+  int32 payload_type = 7 [json_name = "payload_type"];
+  // Payload format version.
+  optional int32 payload_version = 8 [json_name = "payload_version"];
+  // JSON-stringified decoded payload (for storage/transfer).
+  optional string decoded_json = 9 [json_name = "decoded_json"];
+  // Number of times this transmission was observed.
+  int32 observation_count = 10 [json_name = "observation_count"];
+  // Observer ID from "best" observation.
+  optional string observer_id = 11 [json_name = "observer_id"];
+  // Observer display name from "best" observation.
+  optional string observer_name = 12 [json_name = "observer_name"];
+  // Signal-to-noise ratio (dB) from best observation.
+  optional double snr = 13;
+  // Received signal strength (dBm) from best observation.
+  optional double rssi = 14;
+  // JSON-stringified hop array.
+  optional string path_json = 15 [json_name = "path_json"];
+  // Packet direction indicator.
+  optional string direction = 16;
+  // Observation quality score.
+  optional double score = 17;
+  // Per-observer observations. Stripped by default on list endpoints;
+  // included when expand=observations or on detail endpoints.
+  repeated Observation observations = 18;
+}
+
+// A single observation of a transmission by an observer.
+message Observation {
+  // Observation ID (auto-increment).
+  int64 id = 1;
+  // Parent transmission ID.
+  int64 transmission_id = 2 [json_name = "transmission_id"];
+  // Content hash (matches parent transmission).
+  string hash = 3;
+  // Observer device ID.
+  optional string observer_id = 4 [json_name = "observer_id"];
+  // Observer display name.
+  optional string observer_name = 5 [json_name = "observer_name"];
+  // Packet direction indicator.
+  optional string direction = 6;
+  // Signal-to-noise ratio (dB).
+  optional double snr = 7;
+  // Received signal strength (dBm).
+  optional double rssi = 8;
+  // Observation quality score.
+  optional double score = 9;
+  // JSON-stringified hop array.
+  optional string path_json = 10 [json_name = "path_json"];
+  // Observation timestamp (ISO 8601 or unix epoch).
+  string timestamp = 11;
+  // --- Enriched fields (denormalized from parent transmission) ---
+  // Raw hex-encoded packet bytes.
+  optional string raw_hex = 12 [json_name = "raw_hex"];
+  // Payload type from parent transmission.
+  int32 payload_type = 13 [json_name = "payload_type"];
+  // JSON-stringified decoded payload from parent transmission.
+  optional string decoded_json = 14 [json_name = "decoded_json"];
+  // Route type from parent transmission.
+  int32 route_type = 15 [json_name = "route_type"];
+}
+
+// ─── Grouped Packet ────────────────────────────────────────────────────────────
+
+// Packet summary when grouped by hash (groupByHash=true).
+// Different shape from Transmission — fields come from aggregate queries.
+message GroupedPacket {
+  // Content hash.
+  string hash = 1;
+  // When first observed (ISO 8601).
+  string first_seen = 2 [json_name = "first_seen"];
+  // Observation count for this hash.
+  int32 count = 3;
+  // Unique observers that saw this hash.
+  int32 observer_count = 4 [json_name = "observer_count"];
+  // Most recent observation timestamp (ISO 8601).
+  string latest = 5;
+  // Observer ID from latest observation.
+  optional string observer_id = 6 [json_name = "observer_id"];
+  // Observer name from latest observation.
+  optional string observer_name = 7 [json_name = "observer_name"];
+  // JSON-stringified hop array.
+  optional string path_json = 8 [json_name = "path_json"];
+  // Payload type number.
+  int32 payload_type = 9 [json_name = "payload_type"];
+  // Route type number.
+  int32 route_type = 10 [json_name = "route_type"];
+  // Raw hex-encoded packet bytes.
+  string raw_hex = 11 [json_name = "raw_hex"];
+  // JSON-stringified decoded payload.
+  optional string decoded_json = 12 [json_name = "decoded_json"];
+  // Observation count (same as count, backward compat).
+  int32 observation_count = 13 [json_name = "observation_count"];
+  // Best SNR across observations.
+  optional double snr = 14;
+  // Best RSSI across observations.
+  optional double rssi = 15;
+}
+
+// ─── Byte Breakdown ────────────────────────────────────────────────────────────
+
+// Single range in a packet byte-level breakdown.
+message ByteRange {
+  // Start byte offset.
+  int32 start = 1;
+  // End byte offset (exclusive).
+  int32 end = 2;
+  // Human-readable label for this range.
+  string label = 3;
+  // Hex representation of the bytes.
+  string hex = 4;
+  // Interpreted value (may be string, number, or absent).
+  optional string value = 5;
+}
+
+// Byte-level packet structure breakdown.
+message PacketBreakdown {
+  repeated ByteRange ranges = 1;
+}
+
+// ─── API Responses ─────────────────────────────────────────────────────────────
+
+// GET /api/packets (default, non-grouped).
+message PacketListResponse {
+  repeated Transmission packets = 1;
+  // Total matching count before pagination.
+  int32 total = 2;
+  int32 limit = 3;
+  int32 offset = 4;
+}
+
+// GET /api/packets?groupByHash=true
+message GroupedPacketListResponse {
+  repeated GroupedPacket packets = 1;
+  // Total unique hashes matching filters.
+  int32 total = 2;
+}
+
+// GET /api/packets/timestamps — lightweight timestamp array for sparklines.
+message PacketTimestampsResponse {
+  // ISO 8601 timestamp strings.
+  repeated string timestamps = 1;
+}
+
+// GET /api/packets/:id — single packet detail.
+message PacketDetailResponse {
+  // Full transmission object with observations populated.
+  Transmission packet = 1;
+  // Parsed path hops (from packet.paths or []).
+  repeated string path = 2;
+  // Byte-level packet structure (null if raw_hex unavailable).
+  optional PacketBreakdown breakdown = 3;
+  // Total observation count.
+  int32 observation_count = 4 [json_name = "observation_count"];
+  // All observations of this transmission.
+  repeated Observation observations = 5;
+}
+
+// POST /api/packets — ingest a raw packet.
+message PacketIngestRequest {
+  // Raw hex-encoded packet (required).
+  string hex = 1;
+  // Observer device ID.
+  optional string observer = 2;
+  // Signal-to-noise ratio (dB).
+  optional double snr = 3;
+  // Received signal strength (dBm).
+  optional double rssi = 4;
+  // IATA region code.
+  optional string region = 5;
+  // Pre-computed content hash.
+  optional string hash = 6;
+}
+
+// POST /api/packets — response.
+message PacketIngestResponse {
+  // Observation or transmission ID.
+  int64 id = 1;
+  // Full structured decode result.
+  DecodedResult decoded = 2;
+}
+
+// POST /api/decode — decode without storing.
+message DecodeRequest {
+  // Raw hex-encoded packet (required).
+  string hex = 1;
+}
+
+// POST /api/decode — response.
+message DecodeResponse {
+  DecodedResult decoded = 1;
+}
+
+// ─── Traces ────────────────────────────────────────────────────────────────────
+
+// Single trace entry — one observer's sighting of a hash.
+message TraceEntry {
+  // Observer device ID.
+  optional string observer = 1;
+  // Observer display name.
+  optional string observer_name = 2 [json_name = "observer_name"];
+  // Observation timestamp (ISO 8601).
+  string time = 3;
+  // Signal-to-noise ratio (dB).
+  optional double snr = 4;
+  // Received signal strength (dBm).
+  optional double rssi = 5;
+  // JSON-stringified hop array.
+  optional string path_json = 6 [json_name = "path_json"];
+}
+
+// GET /api/traces/:hash — all observations of a packet hash.
+message TraceResponse {
+  repeated TraceEntry traces = 1;
+}
+
+// ─── Audio Lab ─────────────────────────────────────────────────────────────────
+
+// Single packet in an audio-lab bucket.
+message AudioLabPacket {
+  // Content hash.
+  string hash = 1;
+  // Raw hex-encoded packet bytes.
+  string raw_hex = 2 [json_name = "raw_hex"];
+  // JSON-stringified decoded payload.
+  optional string decoded_json = 3 [json_name = "decoded_json"];
+  // Observation count.
+  int32 observation_count = 4 [json_name = "observation_count"];
+  // Payload type number.
+  int32 payload_type = 5 [json_name = "payload_type"];
+  // JSON-stringified hop array.
+  optional string path_json = 6 [json_name = "path_json"];
+  // Observer device ID.
+  optional string observer_id = 7 [json_name = "observer_id"];
+  // Observation timestamp (ISO 8601).
+  string timestamp = 8;
+}
+
+// Wrapper for a list of packets in one audio-lab bucket.
+message AudioLabBucket {
+  repeated AudioLabPacket packets = 1;
+}
+
+// GET /api/audio-lab/buckets — packets bucketed by payload type name.
+message AudioLabBucketsResponse {
+  // Keyed by payload type name (e.g. "ADVERT", "GRP_TXT").
+  map<string, AudioLabBucket> buckets = 1;
+}

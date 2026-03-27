@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package meshcore.v1;
+
+option go_package = "github.com/meshcore-analyzer/proto/v1";
+
+import "decoded.proto";
+import "packet.proto";
+
+// ─── WebSocket Messages ────────────────────────────────────────────────────────
+// All WS messages use the WSMessage envelope.
+// Connection: ws://<host> (or wss://). No authentication.
+
+// Top-level WebSocket message envelope.
+message WSMessage {
+  // Message type discriminator: "packet" or "message".
+  // "packet" = new packet ingestion broadcast.
+  // "message" = GRP_TXT channel message broadcast (same data shape as "packet").
+  string type = 1;
+  // Payload data (shape depends on type).
+  WSPacketData data = 2;
+}
+
+// WebSocket packet broadcast payload.
+// Sent for both "packet" and "message" type WS messages.
+message WSPacketData {
+  // Observation or transmission ID.
+  int64 id = 1;
+  // Raw hex-encoded packet bytes (null if unavailable).
+  optional string raw = 2;
+  // Structured decoded result (always present with at least header.payloadTypeName).
+  DecodedResult decoded = 3;
+  // Signal-to-noise ratio (dB).
+  optional double snr = 4;
+  // Received signal strength (dBm).
+  optional double rssi = 5;
+  // Content hash.
+  optional string hash = 6;
+  // Observer device ID.
+  optional string observer = 7;
+  // Observer display name.
+  optional string observer_name = 8 [json_name = "observer_name"];
+  // JSON-stringified hops array (redundant with decoded.path.hops).
+  optional string path_json = 9 [json_name = "path_json"];
+  // Full packet object (present for MQTT/raw ingestion, may be absent for bridge messages).
+  optional Transmission packet = 10;
+  // Observation count (present when packet is included).
+  optional int32 observation_count = 11 [json_name = "observation_count"];
+}

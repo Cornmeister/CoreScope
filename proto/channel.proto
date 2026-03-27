@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package meshcore.v1;
+
+option go_package = "github.com/meshcore-analyzer/proto/v1";
+
+// ─── Core Channel Type ─────────────────────────────────────────────────────────
+
+// A decoded channel with message summary.
+message Channel {
+  // Channel identifier (used as key, e.g. channel name hash).
+  string hash = 1;
+  // Decoded channel display name.
+  string name = 2;
+  // Text of the most recent message (null if no messages).
+  optional string last_message = 3 [json_name = "lastMessage"];
+  // Sender of the most recent message.
+  optional string last_sender = 4 [json_name = "lastSender"];
+  // Total deduplicated message count.
+  int32 message_count = 5 [json_name = "messageCount"];
+  // Most recent activity timestamp (ISO 8601).
+  string last_activity = 6 [json_name = "lastActivity"];
+}
+
+// ─── Channel Message ───────────────────────────────────────────────────────────
+
+// A single deduplicated channel message.
+message ChannelMessage {
+  // Sender node name.
+  string sender = 1;
+  // Message text content.
+  string text = 2;
+  // Server-side observation timestamp (ISO 8601).
+  string timestamp = 3;
+  // Device-side timestamp (unreliable, may be null).
+  optional int64 sender_timestamp = 4 [json_name = "sender_timestamp"];
+  // Packet ID of the first observation.
+  int64 packet_id = 5 [json_name = "packetId"];
+  // Content hash of the packet.
+  string packet_hash = 6 [json_name = "packetHash"];
+  // Deduplication repeat count.
+  int32 repeats = 7;
+  // Observer names that saw this message.
+  repeated string observers = 8;
+  // Hop count from path.
+  int32 hops = 9;
+  // Best SNR across observations (null if unavailable).
+  optional double snr = 10;
+}
+
+// ─── API Responses ─────────────────────────────────────────────────────────────
+
+// GET /api/channels — list decoded channels.
+message ChannelListResponse {
+  repeated Channel channels = 1;
+}
+
+// GET /api/channels/:hash/messages — messages for a specific channel.
+message ChannelMessagesResponse {
+  repeated ChannelMessage messages = 1;
+  // Total deduplicated messages (before pagination).
+  int32 total = 2;
+}

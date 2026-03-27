@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+package meshcore.v1;
+
+option go_package = "github.com/meshcore-analyzer/proto/v1";
+
+import "common.proto";
+import "packet.proto";
+
+// ─── Core Observer Type ────────────────────────────────────────────────────────
+
+// Observer device — a gateway that receives and reports mesh packets.
+// Used in GET /api/observers list and GET /api/observers/:id detail.
+message Observer {
+  // Unique observer device identifier.
+  string id = 1;
+  // Display name (null if not configured).
+  optional string name = 2;
+  // IATA region code (e.g. "SFO").
+  optional string iata = 3;
+  // Last time this observer reported a packet (ISO 8601).
+  string last_seen = 4 [json_name = "last_seen"];
+  // When this observer was first seen (ISO 8601).
+  string first_seen = 5 [json_name = "first_seen"];
+  // Total packets reported by this observer.
+  int32 packet_count = 6 [json_name = "packet_count"];
+  // Hardware model identifier.
+  optional string model = 7;
+  // Firmware version string.
+  optional string firmware = 8;
+  // Client software version.
+  optional string client_version = 9 [json_name = "client_version"];
+  // Radio module identifier.
+  optional string radio = 10;
+  // Battery voltage in millivolts.
+  optional int32 battery_mv = 11 [json_name = "battery_mv"];
+  // Device uptime in seconds.
+  optional int64 uptime_secs = 12 [json_name = "uptime_secs"];
+  // Measured noise floor (dBm).
+  optional double noise_floor = 13 [json_name = "noise_floor"];
+  // Packets received in the last hour (computed, not stored).
+  int32 packets_last_hour = 14 [json_name = "packetsLastHour"];
+  // Latitude from matched node (null if no match).
+  optional double lat = 15;
+  // Longitude from matched node (null if no match).
+  optional double lon = 16;
+  // Role from matched node (null if no match).
+  optional string node_role = 17 [json_name = "nodeRole"];
+}
+
+// ─── API Responses ─────────────────────────────────────────────────────────────
+
+// GET /api/observers — list all observers.
+message ObserverListResponse {
+  repeated Observer observers = 1;
+  // Server's current time (ISO 8601) for client-side staleness checks.
+  string server_time = 2 [json_name = "server_time"];
+}
+
+// GET /api/observers/:id — single observer detail.
+// Same shape as Observer but without the list-only computed fields (lat, lon, nodeRole).
+// Uses the same Observer message — those fields will be absent (zero-value).
+// No wrapper object: the Observer fields are the top-level response.
+message ObserverDetailResponse {
+  // Observer device identifier.
+  string id = 1;
+  optional string name = 2;
+  optional string iata = 3;
+  string last_seen = 4 [json_name = "last_seen"];
+  string first_seen = 5 [json_name = "first_seen"];
+  int32 packet_count = 6 [json_name = "packet_count"];
+  optional string model = 7;
+  optional string firmware = 8;
+  optional string client_version = 9 [json_name = "client_version"];
+  optional string radio = 10;
+  optional int32 battery_mv = 11 [json_name = "battery_mv"];
+  optional int64 uptime_secs = 12 [json_name = "uptime_secs"];
+  optional double noise_floor = 13 [json_name = "noise_floor"];
+  int32 packets_last_hour = 14 [json_name = "packetsLastHour"];
+}
+
+// ─── Observer Analytics ────────────────────────────────────────────────────────
+
+// SNR distribution entry (e.g. "6 to 8").
+message SnrDistributionEntry {
+  // Range label (e.g. "6 to 8", "-10 to -8").
+  string range = 1;
+  // Packet count in this range.
+  int32 count = 2;
+}
+
+// GET /api/observers/:id/analytics — per-observer analytics.
+message ObserverAnalyticsResponse {
+  // Packet count over time (bucketed by hours or days).
+  repeated TimeBucket timeline = 1;
+  // Packet counts keyed by payload_type number (as string key).
+  map<string, int32> packet_types = 2 [json_name = "packetTypes"];
+  // Unique nodes seen per time bucket.
+  repeated TimeBucket nodes_timeline = 3 [json_name = "nodesTimeline"];
+  // SNR distribution in labeled ranges.
+  repeated SnrDistributionEntry snr_distribution = 4 [json_name = "snrDistribution"];
+  // Last 20 enriched observations.
+  repeated Transmission recent_packets = 5 [json_name = "recentPackets"];
+}

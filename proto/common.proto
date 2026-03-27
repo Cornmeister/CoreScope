@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package meshcore.v1;
+
+option go_package = "github.com/meshcore-analyzer/proto/v1";
+
+// ─── Pagination ────────────────────────────────────────────────────────────────
+
+// Pagination metadata returned by paginated list endpoints.
+message PaginationInfo {
+  // Total matching count before pagination.
+  int32 total = 1;
+  // Requested page size.
+  int32 limit = 2;
+  // Requested offset.
+  int32 offset = 3;
+}
+
+// ─── Error / OK ────────────────────────────────────────────────────────────────
+
+// Standard error envelope (400, 404).
+message ErrorResponse {
+  // Human-readable error description.
+  string error = 1;
+}
+
+// Generic success response (e.g. POST /api/perf/reset).
+message OkResponse {
+  bool ok = 1;
+}
+
+// ─── Role Counts ───────────────────────────────────────────────────────────────
+
+// Per-role node counts. Used in StatsResponse and NodeListResponse.
+message RoleCounts {
+  int32 repeaters = 1;
+  int32 rooms = 2;
+  int32 companions = 3;
+  int32 sensors = 4;
+}
+
+// ─── Histogram ─────────────────────────────────────────────────────────────────
+
+// Single bin in a histogram.
+message HistogramBin {
+  // Bin start value.
+  double x = 1;
+  // Bin width.
+  double w = 2;
+  // Number of samples in bin.
+  int32 count = 3;
+}
+
+// Pre-computed histogram with bins and value range.
+// Used in RF analytics (SNR, RSSI, packet sizes) and distance analytics.
+message Histogram {
+  repeated HistogramBin bins = 1;
+  // Minimum value across all data points.
+  double min = 2;
+  // Maximum value across all data points.
+  double max = 3;
+}
+
+// ─── Signal Statistics ─────────────────────────────────────────────────────────
+
+// Aggregate signal quality stats (min/max/avg/median/stddev).
+// Used for SNR and RSSI blocks in RF analytics.
+message SignalStats {
+  double min = 1;
+  double max = 2;
+  double avg = 3;
+  double median = 4;
+  double stddev = 5;
+}
+
+// ─── Time-bucketed count ───────────────────────────────────────────────────────
+
+// Generic label + count pair for time-series and distribution charts.
+// Used in activity timelines, observer analytics timelines, etc.
+message TimeBucket {
+  // Time label (ISO timestamp, hour string, or category label).
+  string label = 1;
+  // Count in this bucket.
+  int32 count = 2;
+}

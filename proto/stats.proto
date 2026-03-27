@@ -1,0 +1,258 @@
+syntax = "proto3";
+
+package meshcore.v1;
+
+option go_package = "github.com/meshcore-analyzer/proto/v1";
+
+import "common.proto";
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET /api/stats — Server-wide statistics
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// GET /api/stats — response. Lightweight, cached 10s.
+message StatsResponse {
+  // Observation count (legacy name, same as totalObservations).
+  int32 total_packets = 1 [json_name = "totalPackets"];
+  // Unique transmission count (null during startup).
+  optional int32 total_transmissions = 2 [json_name = "totalTransmissions"];
+  // Total observation records.
+  int32 total_observations = 3 [json_name = "totalObservations"];
+  // Active nodes (seen in last 7 days).
+  int32 total_nodes = 4 [json_name = "totalNodes"];
+  // All nodes ever seen.
+  int32 total_nodes_all_time = 5 [json_name = "totalNodesAllTime"];
+  // Observer device count.
+  int32 total_observers = 6 [json_name = "totalObservers"];
+  // Observations in the last hour.
+  int32 packets_last_hour = 7 [json_name = "packetsLastHour"];
+  // Backend engine identifier (always "node" for Node.js, "go" for Go).
+  string engine = 8;
+  // Application version from package.json (e.g. "2.6.0").
+  string version = 9;
+  // Git short SHA or "unknown".
+  string commit = 10;
+  // Per-role active node counts.
+  RoleCounts counts = 11;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET /api/health — Server health and telemetry
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Process memory usage in megabytes.
+message MemoryStats {
+  // Resident set size (MB).
+  double rss = 1;
+  // Used heap memory (MB).
+  double heap_used = 2 [json_name = "heapUsed"];
+  // Total heap size (MB).
+  double heap_total = 3 [json_name = "heapTotal"];
+  // External memory (MB).
+  double external = 4;
+}
+
+// Event loop latency percentiles.
+message EventLoopStats {
+  // Current event loop lag in milliseconds.
+  double current_lag_ms = 1 [json_name = "currentLagMs"];
+  // Maximum recorded lag (ms).
+  double max_lag_ms = 2 [json_name = "maxLagMs"];
+  // 50th percentile lag (ms).
+  double p50_ms = 3 [json_name = "p50Ms"];
+  // 95th percentile lag (ms).
+  double p95_ms = 4 [json_name = "p95Ms"];
+  // 99th percentile lag (ms).
+  double p99_ms = 5 [json_name = "p99Ms"];
+}
+
+// Cache performance counters.
+message CacheStats {
+  // Number of cached entries.
+  int32 entries = 1;
+  // Cache hit count.
+  int32 hits = 2;
+  // Cache miss count.
+  int32 misses = 3;
+  // Stale cache hit count.
+  int32 stale_hits = 4 [json_name = "staleHits"];
+  // Recomputation count.
+  int32 recomputes = 5;
+  // Hit rate percentage (0–100).
+  double hit_rate = 6 [json_name = "hitRate"];
+}
+
+// Cache stats for perf endpoint (slightly different field names).
+message PerfCacheStats {
+  // Cache size (entry count).
+  int32 size = 1;
+  int32 hits = 2;
+  int32 misses = 3;
+  int32 stale_hits = 4 [json_name = "staleHits"];
+  int32 recomputes = 5;
+  double hit_rate = 6 [json_name = "hitRate"];
+}
+
+// WebSocket connection stats.
+message WebSocketStats {
+  // Connected WebSocket clients.
+  int32 clients = 1;
+}
+
+// In-memory packet store stats (health endpoint version).
+message HealthPacketStoreStats {
+  // Loaded transmissions.
+  int32 packets = 1;
+  // Estimated memory usage (MB).
+  double estimated_mb = 2 [json_name = "estimatedMB"];
+}
+
+// Health endpoint performance summary.
+message HealthPerfStats {
+  int32 total_requests = 1 [json_name = "totalRequests"];
+  double avg_ms = 2 [json_name = "avgMs"];
+  int32 slow_queries = 3 [json_name = "slowQueries"];
+  // Last 5 slow queries.
+  repeated SlowQuery recent_slow = 4 [json_name = "recentSlow"];
+}
+
+// A slow query record.
+message SlowQuery {
+  // Request path (e.g. "/api/packets").
+  string path = 1;
+  // Response time in milliseconds.
+  double ms = 2;
+  // When the query occurred (ISO 8601).
+  string time = 3;
+  // HTTP response status code.
+  int32 status = 4;
+}
+
+// GET /api/health — response.
+message HealthResponse {
+  // Always "ok".
+  string status = 1;
+  // Backend engine identifier.
+  string engine = 2;
+  // Application version.
+  string version = 3;
+  // Git short SHA.
+  string commit = 4;
+  // Server uptime in seconds.
+  double uptime = 5;
+  // Human-readable uptime (e.g. "4h 32m").
+  string uptime_human = 6 [json_name = "uptimeHuman"];
+  // Process memory usage.
+  MemoryStats memory = 7;
+  // Event loop latency.
+  EventLoopStats event_loop = 8 [json_name = "eventLoop"];
+  // Cache performance.
+  CacheStats cache = 9;
+  // WebSocket connections.
+  WebSocketStats websocket = 10;
+  // Packet store info.
+  HealthPacketStoreStats packet_store = 11 [json_name = "packetStore"];
+  // Performance summary.
+  HealthPerfStats perf = 12;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET /api/perf — Detailed performance metrics per endpoint
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Per-endpoint performance stats.
+message EndpointStats {
+  // Number of requests.
+  int32 count = 1;
+  // Average response time (ms).
+  double avg_ms = 2 [json_name = "avgMs"];
+  // 50th percentile (ms).
+  double p50_ms = 3 [json_name = "p50Ms"];
+  // 95th percentile (ms).
+  double p95_ms = 4 [json_name = "p95Ms"];
+  // Maximum response time (ms).
+  double max_ms = 5 [json_name = "maxMs"];
+}
+
+// In-memory packet store stats (perf endpoint version — more detail).
+message PerfPacketStoreStats {
+  // Total loaded transmissions.
+  int32 total_loaded = 1 [json_name = "totalLoaded"];
+  // Total observation records.
+  int32 total_observations = 2 [json_name = "totalObservations"];
+  // Evicted packet count.
+  int32 evicted = 3;
+  // Insert operation count.
+  int32 inserts = 4;
+  // Query operation count.
+  int32 queries = 5;
+  // Currently in-memory packet count.
+  int32 in_memory = 6 [json_name = "inMemory"];
+  // Whether only SQLite is used (no in-memory store).
+  bool sqlite_only = 7 [json_name = "sqliteOnly"];
+  // Maximum packet capacity.
+  int32 max_packets = 8 [json_name = "maxPackets"];
+  // Estimated memory usage (MB).
+  double estimated_mb = 9 [json_name = "estimatedMB"];
+  // Maximum memory budget (MB).
+  double max_mb = 10 [json_name = "maxMB"];
+  // Index sizes.
+  PacketStoreIndexes indexes = 11;
+}
+
+// Packet store index counts.
+message PacketStoreIndexes {
+  int32 by_hash = 1 [json_name = "byHash"];
+  int32 by_observer = 2 [json_name = "byObserver"];
+  int32 by_node = 3 [json_name = "byNode"];
+  int32 advert_by_observer = 4 [json_name = "advertByObserver"];
+}
+
+// WAL page counts.
+message WalPages {
+  int32 total = 1;
+  int32 checkpointed = 2;
+  int32 busy = 3;
+}
+
+// SQLite database stats.
+message SqliteStats {
+  // Database file size (MB).
+  double db_size_mb = 1 [json_name = "dbSizeMB"];
+  // WAL file size (MB).
+  double wal_size_mb = 2 [json_name = "walSizeMB"];
+  // Freelist size (MB).
+  double freelist_mb = 3 [json_name = "freelistMB"];
+  // WAL page counts (null if unavailable).
+  optional WalPages wal_pages = 4 [json_name = "walPages"];
+  // Row counts per table.
+  SqliteRowCounts rows = 5;
+}
+
+// Row counts by table.
+message SqliteRowCounts {
+  int32 transmissions = 1;
+  int32 observations = 2;
+  int32 nodes = 3;
+  int32 observers = 4;
+}
+
+// GET /api/perf — response.
+message PerfResponse {
+  // Seconds since perf stats were last reset.
+  double uptime = 1;
+  // Total requests since reset.
+  int32 total_requests = 2 [json_name = "totalRequests"];
+  // Average response time (ms).
+  double avg_ms = 3 [json_name = "avgMs"];
+  // Per-endpoint stats, keyed by route path (e.g. "/api/packets").
+  map<string, EndpointStats> endpoints = 4;
+  // Last 20 queries exceeding 100ms.
+  repeated SlowQuery slow_queries = 5 [json_name = "slowQueries"];
+  // Cache performance.
+  PerfCacheStats cache = 6;
+  // Packet store detailed stats.
+  PerfPacketStoreStats packet_store = 7 [json_name = "packetStore"];
+  // SQLite database stats.
+  SqliteStats sqlite = 8;
+}

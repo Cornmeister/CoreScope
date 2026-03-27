@@ -1,0 +1,150 @@
+syntax = "proto3";
+
+package meshcore.v1;
+
+option go_package = "github.com/meshcore-analyzer/proto/v1";
+
+// ─── Decoded Packet Structure ──────────────────────────────────────────────────
+// Returned by POST /api/decode, POST /api/packets, and WS broadcast.
+// See firmware source (firmware/docs/packet_format.md) for authoritative format.
+
+// Full decoded result: header + path + payload.
+message DecodedResult {
+  DecodedHeader header = 1;
+  DecodedPath path = 2;
+  // Type-specific decoded payload.
+  // NOTE: Proto3 JSON serializes oneof with a wrapper key (e.g. {"advert":{...}}).
+  // Go serialization layer must flatten this to match the spec's flat payload shape.
+  DecodedPayload payload = 3;
+}
+
+// Parsed packet header (first byte).
+message DecodedHeader {
+  // Route type: 0=DIRECT, 1=FLOOD, 2=reserved, 3=TRANSPORT.
+  int32 route_type = 1 [json_name = "routeType"];
+  // Payload type: 0=REQ .. 11=CONTROL (see Payload Type Reference).
+  int32 payload_type = 2 [json_name = "payloadType"];
+  // Payload format version.
+  int32 payload_version = 3 [json_name = "payloadVersion"];
+  // Human-readable type name: "ADVERT", "GRP_TXT", "TXT_MSG", etc.
+  string payload_type_name = 4 [json_name = "payloadTypeName"];
+}
+
+// Parsed path field (hop hash prefixes).
+message DecodedPath {
+  // Hex hop prefixes, e.g. ["a1b2", "c3d4"].
+  repeated string hops = 1;
+  // Bytes per hop hash (1–3).
+  int32 hash_size = 2 [json_name = "hashSize"];
+  // Number of hops in path field.
+  int32 hash_count = 3 [json_name = "hashCount"];
+}
+
+// ─── Payload Oneof ─────────────────────────────────────────────────────────────
+
+// Type-discriminated decoded payload.
+message DecodedPayload {
+  oneof payload {
+    AdvertPayload advert = 1;
+    TxtMsgPayload txt_msg = 2;
+    GrpTxtPayload grp_txt = 3;
+    AckPayload ack = 4;
+    ReqPayload req = 5;
+    ResponsePayload response = 6;
+    AnonReqPayload anon_req = 7;
+    PathPayload path_payload = 8;
+    TracePayload trace = 9;
+    ControlPayload control = 10;
+  }
+}
+
+// ─── Individual Payload Types ──────────────────────────────────────────────────
+// Field definitions are based on firmware source:
+//   firmware/src/helpers/AdvertDataHelpers.h
+//   firmware/docs/payloads.md
+
+// ADVERT (payload_type=4) — Node advertisement broadcast.
+message AdvertPayload {
+  // Advertised node name.
+  string name = 1;
+  // GPS latitude (null if no fix).
+  optional double lat = 2;
+  // GPS longitude (null if no fix).
+  optional double lon = 3;
+  // Advert flags bitmask (see AdvertDataHelpers.h).
+  int32 flags = 4;
+  // Derived role: "repeater", "room", "companion", "sensor".
+  string role = 5;
+}
+
+// TXT_MSG (payload_type=2) — Direct text message.
+message TxtMsgPayload {
+  // Message text content.
+  string text = 1;
+  // Sender node name.
+  string sender = 2;
+  // Device-side timestamp (may be unreliable).
+  optional int64 sender_timestamp = 3 [json_name = "sender_timestamp"];
+}
+
+// GRP_TXT (payload_type=5) — Group/channel text message.
+message GrpTxtPayload {
+  // Message text content.
+  string text = 1;
+  // Sender node name.
+  string sender = 2;
+  // Channel name or hash.
+  string channel = 3;
+  // Device-side timestamp (may be unreliable).
+  optional int64 sender_timestamp = 4 [json_name = "sender_timestamp"];
+}
+
+// ACK (payload_type=3) — Acknowledgement.
+message AckPayload {
+  // Raw acknowledgement data.
+  bytes ack_data = 1 [json_name = "ack_data"];
+}
+
+// REQ (payload_type=0) — Request.
+message ReqPayload {
+  // Request sub-type identifier.
+  int32 request_type = 1 [json_name = "request_type"];
+  // Raw request payload bytes.
+  bytes request_data = 2 [json_name = "request_data"];
+}
+
+// RESPONSE (payload_type=1) — Response to a request.
+message ResponsePayload {
+  // Response sub-type identifier.
+  int32 response_type = 1 [json_name = "response_type"];
+  // Raw response payload bytes.
+  bytes response_data = 2 [json_name = "response_data"];
+}
+
+// ANON_REQ (payload_type=7) — Anonymous request.
+message AnonReqPayload {
+  // Request sub-type identifier.
+  int32 request_type = 1 [json_name = "request_type"];
+  // Raw request payload bytes.
+  bytes request_data = 2 [json_name = "request_data"];
+}
+
+// PATH (payload_type=8) — Path / traceroute.
+message PathPayload {
+  // Hop prefixes in the path.
+  repeated string hops = 1;
+}
+
+// TRACE (payload_type=9) — Trace response.
+message TracePayload {
+  // Hop prefixes in the trace.
+  repeated string hops = 1;
+}
+
+// CONTROL (payload_type=11) — Control message.
+message ControlPayload {
+  // Control sub-type identifier.
+  int32 control_type = 1 [json_name = "control_type"];
+  // Raw control payload bytes.
+  bytes control_data = 2 [json_name = "control_data"];
+}

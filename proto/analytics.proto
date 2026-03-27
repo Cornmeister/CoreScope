@@ -1,0 +1,545 @@
+syntax = "proto3";
+
+package meshcore.v1;
+
+option go_package = "github.com/meshcore-analyzer/proto/v1";
+
+import "common.proto";
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET /api/analytics/rf — RF signal analytics
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Payload type with signal stats.
+message PayloadTypeSignal {
+  // Payload type name (e.g. "ADVERT", "GRP_TXT").
+  string name = 1;
+  // Packet count for this type.
+  int32 count = 2;
+  // Average SNR.
+  double avg = 3;
+  // Minimum SNR.
+  double min = 4;
+  // Maximum SNR.
+  double max = 5;
+}
+
+// Hourly signal trend data point.
+message SignalOverTimeEntry {
+  // Hour label (e.g. "2025-07-17T04").
+  string hour = 1;
+  // Packet count in this hour.
+  int32 count = 2;
+  // Average SNR in this hour.
+  double avg_snr = 3 [json_name = "avgSnr"];
+}
+
+// SNR vs RSSI scatter data point.
+message ScatterPoint {
+  double snr = 1;
+  double rssi = 2;
+}
+
+// Payload type name + count entry.
+message PayloadTypeEntry {
+  // Payload type number.
+  int32 type = 1;
+  // Human-readable type name.
+  string name = 2;
+  // Observation count.
+  int32 count = 3;
+}
+
+// Hourly packet count entry.
+message HourlyCount {
+  // Hour label (e.g. "2025-07-17T04").
+  string hour = 1;
+  // Packet count.
+  int32 count = 2;
+}
+
+// GET /api/analytics/rf — response.
+message RFAnalyticsResponse {
+  // Observations with SNR data.
+  int32 total_packets = 1 [json_name = "totalPackets"];
+  // All regional observations.
+  int32 total_all_packets = 2 [json_name = "totalAllPackets"];
+  // Unique transmission hashes.
+  int32 total_transmissions = 3 [json_name = "totalTransmissions"];
+  // SNR aggregate statistics.
+  SignalStats snr = 4;
+  // RSSI aggregate statistics.
+  SignalStats rssi = 5;
+  // SNR distribution histogram (20 bins).
+  Histogram snr_values = 6 [json_name = "snrValues"];
+  // RSSI distribution histogram (20 bins).
+  Histogram rssi_values = 7 [json_name = "rssiValues"];
+  // Packet size distribution histogram (25 bins).
+  Histogram packet_sizes = 8 [json_name = "packetSizes"];
+  // Minimum packet size in bytes.
+  int32 min_packet_size = 9 [json_name = "minPacketSize"];
+  // Maximum packet size in bytes.
+  int32 max_packet_size = 10 [json_name = "maxPacketSize"];
+  // Average packet size in bytes.
+  double avg_packet_size = 11 [json_name = "avgPacketSize"];
+  // Hourly packet counts.
+  repeated HourlyCount packets_per_hour = 12 [json_name = "packetsPerHour"];
+  // Breakdown by payload type.
+  repeated PayloadTypeEntry payload_types = 13 [json_name = "payloadTypes"];
+  // SNR stats per payload type.
+  repeated PayloadTypeSignal snr_by_type = 14 [json_name = "snrByType"];
+  // Signal quality over time.
+  repeated SignalOverTimeEntry signal_over_time = 15 [json_name = "signalOverTime"];
+  // SNR vs RSSI scatter data (max 500 points).
+  repeated ScatterPoint scatter_data = 16 [json_name = "scatterData"];
+  // Time span covered by the data in hours.
+  double time_span_hours = 17 [json_name = "timeSpanHours"];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET /api/analytics/topology — Network topology analytics
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Hop count distribution entry.
+message TopologyHopDist {
+  // Hop count.
+  int32 hops = 1;
+  // Number of packets at this distance.
+  int32 count = 2;
+}
+
+// Repeater ranked by relay frequency.
+message TopRepeater {
+  // Raw hex hop prefix.
+  string hop = 1;
+  // Times this node appeared as a relay.
+  int32 count = 2;
+  // Resolved node name (null if unresolved).
+  optional string name = 3;
+  // Resolved public key (null if unresolved).
+  optional string pubkey = 4;
+}
+
+// Frequently co-occurring relay pair.
+message TopPair {
+  // First hop in the pair.
+  string hop_a = 1 [json_name = "hopA"];
+  // Second hop in the pair.
+  string hop_b = 2 [json_name = "hopB"];
+  // Co-occurrence count.
+  int32 count = 3;
+  // Resolved names and keys.
+  optional string name_a = 4 [json_name = "nameA"];
+  optional string name_b = 5 [json_name = "nameB"];
+  optional string pubkey_a = 6 [json_name = "pubkeyA"];
+  optional string pubkey_b = 7 [json_name = "pubkeyB"];
+}
+
+// Hop count vs average SNR data point.
+message HopsVsSnr {
+  int32 hops = 1;
+  int32 count = 2;
+  double avg_snr = 3 [json_name = "avgSnr"];
+}
+
+// Lightweight observer reference (id + name).
+message ObserverRef {
+  string id = 1;
+  string name = 2;
+}
+
+// Node in an observer's reach ring.
+message ReachNode {
+  // Raw hex hop prefix.
+  string hop = 1;
+  // Resolved name (null if unresolved).
+  optional string name = 2;
+  // Resolved public key.
+  optional string pubkey = 3;
+  // Times seen at this distance.
+  int32 count = 4;
+  // Distance range label (e.g. "1-3", null if constant).
+  optional string dist_range = 5 [json_name = "distRange"];
+}
+
+// Ring of nodes at a given hop distance from an observer.
+message ReachRing {
+  // Hop distance from observer.
+  int32 hops = 1;
+  // Nodes at this distance.
+  repeated ReachNode nodes = 2;
+}
+
+// Observer reach data (rings of nodes by hop distance).
+message ObserverReach {
+  // Observer display name.
+  string observer_name = 1 [json_name = "observer_name"];
+  // Concentric rings by hop distance.
+  repeated ReachRing rings = 2;
+}
+
+// Observer entry in a multi-observer node.
+message MultiObsObserver {
+  string observer_id = 1 [json_name = "observer_id"];
+  string observer_name = 2 [json_name = "observer_name"];
+  // Minimum hop distance from this observer.
+  int32 min_dist = 3 [json_name = "minDist"];
+  // Times seen by this observer.
+  int32 count = 4;
+}
+
+// Node seen by multiple observers.
+message MultiObsNode {
+  // Raw hex hop prefix.
+  string hop = 1;
+  // Resolved name.
+  optional string name = 2;
+  // Resolved public key.
+  optional string pubkey = 3;
+  // Observers that see this node.
+  repeated MultiObsObserver observers = 4;
+}
+
+// Best path entry for a node across observers.
+message BestPathEntry {
+  // Raw hex hop prefix.
+  string hop = 1;
+  // Resolved name.
+  optional string name = 2;
+  // Resolved public key.
+  optional string pubkey = 3;
+  // Minimum hop distance across all observations.
+  int32 min_dist = 4 [json_name = "minDist"];
+  // Best observer ID.
+  string observer_id = 5 [json_name = "observer_id"];
+  // Best observer name.
+  string observer_name = 6 [json_name = "observer_name"];
+}
+
+// GET /api/analytics/topology — response.
+message TopologyResponse {
+  // Number of unique nodes observed.
+  int32 unique_nodes = 1 [json_name = "uniqueNodes"];
+  // Average hop count.
+  double avg_hops = 2 [json_name = "avgHops"];
+  // Median hop count.
+  double median_hops = 3 [json_name = "medianHops"];
+  // Maximum hop count observed.
+  int32 max_hops = 4 [json_name = "maxHops"];
+  // Distribution of packets by hop count (capped at 25).
+  repeated TopologyHopDist hop_distribution = 5 [json_name = "hopDistribution"];
+  // Top repeater nodes by relay frequency.
+  repeated TopRepeater top_repeaters = 6 [json_name = "topRepeaters"];
+  // Top co-occurring relay pairs.
+  repeated TopPair top_pairs = 7 [json_name = "topPairs"];
+  // Hop count vs average SNR.
+  repeated HopsVsSnr hops_vs_snr = 8 [json_name = "hopsVsSnr"];
+  // All observers referenced in this analysis.
+  repeated ObserverRef observers = 9;
+  // Per-observer reach rings, keyed by observer_id.
+  map<string, ObserverReach> per_observer_reach = 10 [json_name = "perObserverReach"];
+  // Nodes seen by multiple observers.
+  repeated MultiObsNode multi_obs_nodes = 11 [json_name = "multiObsNodes"];
+  // Best path entries per node.
+  repeated BestPathEntry best_path_list = 12 [json_name = "bestPathList"];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET /api/analytics/channels — Channel analytics
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Channel summary in analytics context.
+message ChannelAnalyticsSummary {
+  // Channel identifier.
+  string hash = 1;
+  // Channel display name.
+  string name = 2;
+  // Total messages.
+  int32 messages = 3;
+  // Unique sender count.
+  int32 senders = 4;
+  // Most recent activity (ISO 8601).
+  string last_activity = 5 [json_name = "lastActivity"];
+  // Whether the channel is encrypted.
+  bool encrypted = 6;
+}
+
+// Top sender by message count.
+message TopSender {
+  // Sender display name.
+  string name = 1;
+  // Total messages sent.
+  int32 count = 2;
+}
+
+// Hourly channel activity entry.
+message ChannelTimelineEntry {
+  // Hour label.
+  string hour = 1;
+  // Channel name.
+  string channel = 2;
+  // Message count in this hour.
+  int32 count = 3;
+}
+
+// GET /api/analytics/channels — response.
+message ChannelAnalyticsResponse {
+  // Number of active channels.
+  int32 active_channels = 1 [json_name = "activeChannels"];
+  // Number of decryptable channels.
+  int32 decryptable = 2;
+  // Per-channel summaries.
+  repeated ChannelAnalyticsSummary channels = 3;
+  // Top senders by message count.
+  repeated TopSender top_senders = 4 [json_name = "topSenders"];
+  // Hourly activity per channel.
+  repeated ChannelTimelineEntry channel_timeline = 5 [json_name = "channelTimeline"];
+  // Raw array of message character lengths.
+  repeated int32 msg_lengths = 6 [json_name = "msgLengths"];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET /api/analytics/distance — Hop distance analytics
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Distance summary statistics.
+message DistanceSummary {
+  // Total hop segments analyzed.
+  int32 total_hops = 1 [json_name = "totalHops"];
+  // Total paths analyzed.
+  int32 total_paths = 2 [json_name = "totalPaths"];
+  // Average hop distance in km (2 decimal places).
+  double avg_dist = 3 [json_name = "avgDist"];
+  // Maximum hop distance in km.
+  double max_dist = 4 [json_name = "maxDist"];
+}
+
+// Single hop distance record (longest hops table).
+message DistanceHop {
+  // Source node name.
+  string from_name = 1 [json_name = "fromName"];
+  // Source node public key.
+  string from_pk = 2 [json_name = "fromPk"];
+  // Destination node name.
+  string to_name = 3 [json_name = "toName"];
+  // Destination node public key.
+  string to_pk = 4 [json_name = "toPk"];
+  // Distance in km.
+  double dist = 5;
+  // Hop category: "R↔R", "C↔R", "C↔C".
+  string type = 6;
+  // SNR at this hop (null if unavailable).
+  optional double snr = 7;
+  // Packet hash.
+  string hash = 8;
+  // Observation timestamp (ISO 8601).
+  string timestamp = 9;
+}
+
+// Longest path record.
+message DistancePath {
+  // Packet hash.
+  string hash = 1;
+  // Total path distance in km.
+  double total_dist = 2 [json_name = "totalDist"];
+  // Number of hops.
+  int32 hop_count = 3 [json_name = "hopCount"];
+  // Observation timestamp (ISO 8601).
+  string timestamp = 4;
+  // Individual hops in this path.
+  repeated DistancePathHop hops = 5;
+}
+
+// Single hop within a distance path.
+message DistancePathHop {
+  string from_name = 1 [json_name = "fromName"];
+  string from_pk = 2 [json_name = "fromPk"];
+  string to_name = 3 [json_name = "toName"];
+  string to_pk = 4 [json_name = "toPk"];
+  // Hop distance in km.
+  double dist = 5;
+}
+
+// Per-category (R↔R, C↔R, C↔C) distance stats.
+message CategoryDistStats {
+  int32 count = 1;
+  double avg = 2;
+  double median = 3;
+  double min = 4;
+  double max = 5;
+}
+
+// Hourly average distance trend.
+message DistOverTimeEntry {
+  // Hour label.
+  string hour = 1;
+  // Average distance in km.
+  double avg = 2;
+  // Hop count in this hour.
+  int32 count = 3;
+}
+
+// GET /api/analytics/distance — response.
+message DistanceAnalyticsResponse {
+  // Aggregate distance stats.
+  DistanceSummary summary = 1;
+  // Top individual hops by distance.
+  repeated DistanceHop top_hops = 2 [json_name = "topHops"];
+  // Top paths by total distance.
+  repeated DistancePath top_paths = 3 [json_name = "topPaths"];
+  // Per-category statistics, keyed by category string ("R↔R", "C↔R", "C↔C").
+  map<string, CategoryDistStats> cat_stats = 4 [json_name = "catStats"];
+  // Distance distribution histogram (empty array if no data).
+  optional Histogram dist_histogram = 5 [json_name = "distHistogram"];
+  // Hourly average distance trend.
+  repeated DistOverTimeEntry dist_over_time = 6 [json_name = "distOverTime"];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET /api/analytics/hash-sizes — Hash size analysis
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Hourly hash size distribution entry.
+message HashSizeHourly {
+  // Hour label.
+  string hour = 1;
+  // Count of 1-byte hashes.
+  int32 size_1 = 2 [json_name = "1"];
+  // Count of 2-byte hashes.
+  int32 size_2 = 3 [json_name = "2"];
+  // Count of 3-byte hashes.
+  int32 size_3 = 4 [json_name = "3"];
+}
+
+// Hop with hash size info.
+message HashSizeHop {
+  // Raw hex hop prefix.
+  string hex = 1;
+  // Hash size in bytes (ceil(hex.length/2)).
+  int32 size = 2;
+  // Times this hop was seen.
+  int32 count = 3;
+  // Resolved name (null if unresolved).
+  optional string name = 4;
+  // Resolved public key.
+  optional string pubkey = 5;
+}
+
+// Node using multi-byte hashes.
+message MultiByteNode {
+  // Node display name.
+  string name = 1;
+  // Hash size in bytes.
+  int32 hash_size = 2 [json_name = "hashSize"];
+  // Packet count.
+  int32 packets = 3;
+  // Last seen timestamp (ISO 8601).
+  string last_seen = 4 [json_name = "lastSeen"];
+  // Public key (null if unresolved).
+  optional string pubkey = 5;
+}
+
+// GET /api/analytics/hash-sizes — response.
+message HashSizeAnalyticsResponse {
+  // Total packets analyzed.
+  int32 total = 1;
+  // Hash size distribution keyed by byte size ("1", "2", "3").
+  map<string, int32> distribution = 2;
+  // Hourly hash size trends.
+  repeated HashSizeHourly hourly = 3;
+  // Top hop prefixes by frequency.
+  repeated HashSizeHop top_hops = 4 [json_name = "topHops"];
+  // Nodes using multi-byte hashes.
+  repeated MultiByteNode multi_byte_nodes = 5 [json_name = "multiByteNodes"];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET /api/analytics/subpaths — Subpath frequency analysis
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Single subpath with frequency info.
+message Subpath {
+  // Human-readable path (e.g. "Node A → Node B → Node C").
+  string path = 1;
+  // Raw hex hop prefixes.
+  repeated string raw_hops = 2 [json_name = "rawHops"];
+  // Times this subpath was seen.
+  int32 count = 3;
+  // Number of hops in subpath.
+  int32 hops = 4;
+  // Percentage of totalPaths (0–100).
+  double pct = 5;
+}
+
+// GET /api/analytics/subpaths — response.
+message SubpathsResponse {
+  repeated Subpath subpaths = 1;
+  // Total paths analyzed.
+  int32 total_paths = 2 [json_name = "totalPaths"];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET /api/analytics/subpath-detail — Detailed stats for a specific subpath
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Resolved node in a subpath detail response.
+message SubpathNode {
+  // Raw hex hop prefix.
+  string hop = 1;
+  // Resolved node name.
+  string name = 2;
+  // GPS latitude (null if unknown).
+  optional double lat = 3;
+  // GPS longitude (null if unknown).
+  optional double lon = 4;
+  // Resolved public key.
+  optional string pubkey = 5;
+}
+
+// Signal quality stats for a subpath.
+message SubpathSignal {
+  // Average SNR (null if no samples).
+  optional double avg_snr = 1 [json_name = "avgSnr"];
+  // Average RSSI (null if no samples).
+  optional double avg_rssi = 2 [json_name = "avgRssi"];
+  // Number of signal samples.
+  int32 samples = 3;
+}
+
+// Parent path containing this subpath.
+message ParentPath {
+  // Human-readable path string.
+  string path = 1;
+  // Times this parent path was seen.
+  int32 count = 2;
+}
+
+// Observer count for subpath detail.
+message SubpathObserver {
+  // Observer display name.
+  string name = 1;
+  // Packet count from this observer.
+  int32 count = 2;
+}
+
+// GET /api/analytics/subpath-detail — response.
+message SubpathDetailResponse {
+  // Input hops echoed back.
+  repeated string hops = 1;
+  // Resolved node info for each hop.
+  repeated SubpathNode nodes = 2;
+  // Total matching path occurrences.
+  int32 total_matches = 3 [json_name = "totalMatches"];
+  // Earliest match (ISO 8601).
+  optional string first_seen = 4 [json_name = "firstSeen"];
+  // Latest match (ISO 8601).
+  optional string last_seen = 5 [json_name = "lastSeen"];
+  // Signal quality across matches.
+  SubpathSignal signal = 6;
+  // 24-element array: packet count per UTC hour (index = hour).
+  repeated int32 hour_distribution = 7 [json_name = "hourDistribution"];
+  // Longer paths that contain this subpath.
+  repeated ParentPath parent_paths = 8 [json_name = "parentPaths"];
+  // Observers that saw this subpath.
+  repeated SubpathObserver observers = 9;
+}

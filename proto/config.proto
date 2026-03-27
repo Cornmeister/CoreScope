@@ -1,0 +1,165 @@
+syntax = "proto3";
+
+package meshcore.v1;
+
+option go_package = "github.com/meshcore-analyzer/proto/v1";
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET /api/config/theme — Theme and branding configuration
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Site branding configuration.
+message Branding {
+  // Site name (default: "MeshCore Analyzer").
+  string site_name = 1 [json_name = "siteName"];
+  // Site tagline.
+  string tagline = 2;
+  // Additional branding key-value overrides from config/theme files.
+  map<string, string> extra = 3;
+}
+
+// CSS theme variables.
+message ThemeColors {
+  // Primary accent color (hex).
+  string accent = 1;
+  // Accent hover color (hex).
+  string accent_hover = 2 [json_name = "accentHover"];
+  // Navigation background color (hex).
+  string nav_bg = 3 [json_name = "navBg"];
+  // Navigation secondary background (hex).
+  string nav_bg2 = 4 [json_name = "navBg2"];
+  // Additional theme CSS variables as key-value pairs.
+  map<string, string> extra = 5;
+}
+
+// Per-role node colors.
+message NodeColors {
+  // Repeater node color (hex).
+  string repeater = 1;
+  // Companion node color (hex).
+  string companion = 2;
+  // Room node color (hex).
+  string room = 3;
+  // Sensor node color (hex).
+  string sensor = 4;
+  // Observer device color (hex).
+  string observer = 5;
+}
+
+// GET /api/config/theme — response.
+message ThemeResponse {
+  // Site branding.
+  Branding branding = 1;
+  // Light mode theme colors.
+  ThemeColors theme = 2;
+  // Dark mode overrides (may be empty).
+  ThemeColors theme_dark = 3 [json_name = "themeDark"];
+  // Per-role node marker colors.
+  NodeColors node_colors = 4 [json_name = "nodeColors"];
+  // Payload type → color overrides, keyed by type name or number.
+  map<string, string> type_colors = 5 [json_name = "typeColors"];
+  // Home page customization (null if not configured).
+  // Opaque object — structure varies by deployment.
+  optional string home_json = 6 [json_name = "home"];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET /api/config/regions — Available regions
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// GET /api/config/regions — response.
+// Flat map of IATA code → display name (e.g. "SFO" → "San Francisco").
+message RegionsResponse {
+  map<string, string> regions = 1;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET /api/config/client — Client-side configuration
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// GET /api/config/client — response.
+// All fields are optional — absent means "use client defaults".
+message ClientConfigResponse {
+  // Custom role definitions (opaque JSON).
+  optional string roles_json = 1 [json_name = "roles"];
+  // Health threshold overrides (opaque JSON).
+  optional string health_thresholds_json = 2 [json_name = "healthThresholds"];
+  // Map tile configuration (opaque JSON).
+  optional string tiles_json = 3 [json_name = "tiles"];
+  // SNR threshold configuration (opaque JSON).
+  optional string snr_thresholds_json = 4 [json_name = "snrThresholds"];
+  // Distance threshold configuration (opaque JSON).
+  optional string dist_thresholds_json = 5 [json_name = "distThresholds"];
+  // Maximum hop distance (km).
+  optional double max_hop_dist = 6 [json_name = "maxHopDist"];
+  // UI limit overrides (opaque JSON).
+  optional string limits_json = 7 [json_name = "limits"];
+  // Slow query threshold (ms).
+  optional double perf_slow_ms = 8 [json_name = "perfSlowMs"];
+  // WebSocket reconnection delay (ms).
+  optional double ws_reconnect_ms = 9 [json_name = "wsReconnectMs"];
+  // Cache invalidation delay (ms).
+  optional double cache_invalidate_ms = 10 [json_name = "cacheInvalidateMs"];
+  // External URL overrides (opaque JSON).
+  optional string external_urls_json = 11 [json_name = "externalUrls"];
+  // WebSocket propagation buffer (ms, default 5000).
+  double propagation_buffer_ms = 12 [json_name = "propagationBufferMs"];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET /api/config/cache — Cache TTL configuration
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// GET /api/config/cache — response.
+// All fields optional — absent means "use server default TTL".
+// Values are in seconds.
+message CacheConfigResponse {
+  optional int32 stats = 1;
+  optional int32 node_detail = 2 [json_name = "nodeDetail"];
+  optional int32 node_health = 3 [json_name = "nodeHealth"];
+  optional int32 node_list = 4 [json_name = "nodeList"];
+  optional int32 bulk_health = 5 [json_name = "bulkHealth"];
+  optional int32 network_status = 6 [json_name = "networkStatus"];
+  optional int32 observers = 7;
+  optional int32 channels = 8;
+  optional int32 channel_messages = 9 [json_name = "channelMessages"];
+  optional int32 analytics_rf = 10 [json_name = "analyticsRF"];
+  optional int32 analytics_topology = 11 [json_name = "analyticsTopology"];
+  optional int32 analytics_channels = 12 [json_name = "analyticsChannels"];
+  optional int32 analytics_hash_sizes = 13 [json_name = "analyticsHashSizes"];
+  optional int32 analytics_subpaths = 14 [json_name = "analyticsSubpaths"];
+  optional int32 analytics_subpath_detail = 15 [json_name = "analyticsSubpathDetail"];
+  optional int32 node_analytics = 16 [json_name = "nodeAnalytics"];
+  optional int32 node_search = 17 [json_name = "nodeSearch"];
+  optional int32 invalidation_debounce = 18 [json_name = "invalidationDebounce"];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET /api/config/map — Map default settings
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// GET /api/config/map — response.
+message MapConfigResponse {
+  // Default center [lat, lon]. Exactly 2 elements.
+  repeated double center = 1;
+  // Default zoom level.
+  int32 zoom = 2;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET /api/iata-coords — IATA coordinate lookup
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Single IATA coordinate entry.
+message IataCoord {
+  double lat = 1;
+  double lon = 2;
+  // Coverage radius in km.
+  double radius_km = 3 [json_name = "radiusKm"];
+}
+
+// GET /api/iata-coords — response.
+message IataCoordsResponse {
+  // Keyed by IATA code (e.g. "SFO").
+  map<string, IataCoord> coords = 1;
+}

@@ -1,0 +1,361 @@
+syntax = "proto3";
+
+package meshcore.v1;
+
+option go_package = "github.com/meshcore-analyzer/proto/v1";
+
+import "common.proto";
+import "packet.proto";
+
+// ─── Core Node Type ────────────────────────────────────────────────────────────
+
+// A mesh network node. Defined ONCE, reused across all node-related endpoints.
+// Fields that are absent/inapplicable remain at proto3 default (zero) or unset (optional).
+message Node {
+  // 64-character hex public key — unique node identifier.
+  string public_key = 1 [json_name = "public_key"];
+  // Display name (null if never advertised).
+  optional string name = 2;
+  // Node role: "repeater", "room", "companion", "sensor".
+  string role = 3;
+  // GPS latitude (null if no fix or unknown).
+  optional double lat = 4;
+  // GPS longitude (null if no fix or unknown).
+  optional double lon = 5;
+  // Last advert/upsert timestamp from DB (ISO 8601).
+  string last_seen = 6 [json_name = "last_seen"];
+  // When this node was first observed (ISO 8601).
+  string first_seen = 7 [json_name = "first_seen"];
+  // Total advertisement packets received.
+  int32 advert_count = 8 [json_name = "advert_count"];
+  // Latest observed hash size (1–3 bytes). Null if unknown.
+  optional int32 hash_size = 9 [json_name = "hash_size"];
+  // True if the node has been seen with different hash sizes.
+  bool hash_size_inconsistent = 10 [json_name = "hash_size_inconsistent"];
+  // All unique hash sizes seen (empty if only one or unknown).
+  repeated int32 hash_sizes_seen = 11 [json_name = "hash_sizes_seen"];
+  // Most recent timestamp from in-memory packets (ISO 8601).
+  // More current than last_seen; absent if no in-memory data.
+  optional string last_heard = 12 [json_name = "last_heard"];
+}
+
+// ─── Observer Stats (per-node context) ─────────────────────────────────────────
+
+// How a specific observer sees a specific node.
+// Used in bulk-health, node health, and node analytics observer coverage.
+message NodeObserverStats {
+  // Observer device identifier.
+  string observer_id = 1 [json_name = "observer_id"];
+  // Observer display name.
+  optional string observer_name = 2 [json_name = "observer_name"];
+  // Packets from this node seen by this observer.
+  int32 packet_count = 3 [json_name = "packetCount"];
+  // Average SNR for packets from this node.
+  optional double avg_snr = 4 [json_name = "avgSnr"];
+  // Average RSSI for packets from this node.
+  optional double avg_rssi = 5 [json_name = "avgRssi"];
+  // IATA region code of observer (present in node-health, absent in bulk-health).
+  optional string iata = 6;
+  // First time this observer saw this node (ISO 8601, present in analytics).
+  optional string first_seen = 7 [json_name = "firstSeen"];
+  // Last time this observer saw this node (ISO 8601, present in analytics).
+  optional string last_seen = 8 [json_name = "lastSeen"];
+}
+
+// ─── Node Stats ────────────────────────────────────────────────────────────────
+
+// Aggregate packet statistics for a node.
+// Used in bulk-health entries and node health responses.
+message NodeStats {
+  // Unique transmissions involving this node.
+  int32 total_transmissions = 1 [json_name = "totalTransmissions"];
+  // Total observations (may exceed transmissions due to multi-observer).
+  int32 total_observations = 2 [json_name = "totalObservations"];
+  // Same as totalTransmissions (backward compat alias).
+  int32 total_packets = 3 [json_name = "totalPackets"];
+  // Transmissions in the last 24 hours.
+  int32 packets_today = 4 [json_name = "packetsToday"];
+  // Average SNR across all observations.
+  optional double avg_snr = 5 [json_name = "avgSnr"];
+  // Most recent packet timestamp (ISO 8601).
+  optional string last_heard = 6 [json_name = "lastHeard"];
+  // Average hop count (rounded integer, present in node health).
+  optional double avg_hops = 7 [json_name = "avgHops"];
+}
+
+// ─── API Responses ─────────────────────────────────────────────────────────────
+
+// GET /api/nodes — paginated node list.
+message NodeListResponse {
+  repeated Node nodes = 1;
+  // Total matching count before pagination.
+  int32 total = 2;
+  // Global role counts (not filtered by current query).
+  RoleCounts counts = 3;
+}
+
+// GET /api/nodes/search — quick search for autocomplete.
+message NodeSearchResponse {
+  // Matching nodes (subset of Node fields populated).
+  repeated Node nodes = 1;
+}
+
+// GET /api/nodes/bulk-health — bulk health summary for analytics dashboard.
+// NOTE: The API currently returns a bare JSON array with flat node fields.
+// Go serialization should flatten node fields to top level for backward compat.
+message BulkHealthEntry {
+  // Node identification and location (reuses Node — DO NOT duplicate fields).
+  Node node = 1;
+  // Aggregate packet stats.
+  NodeStats stats = 2;
+  // Per-observer signal quality.
+  repeated NodeObserverStats observers = 3;
+}
+
+// Wrapper for the bulk-health array response.
+message BulkHealthResponse {
+  repeated BulkHealthEntry entries = 1;
+}
+
+// GET /api/nodes/network-status — aggregate health status counts.
+message NetworkStatusResponse {
+  // Total nodes considered.
+  int32 total = 1;
+  // Nodes within degradedMs threshold.
+  int32 active = 2;
+  // Nodes between degradedMs and silentMs.
+  int32 degraded = 3;
+  // Nodes beyond silentMs.
+  int32 silent = 4;
+  // Per-role counts (may include "unknown" key).
+  map<string, int32> role_counts = 5 [json_name = "roleCounts"];
+}
+
+// GET /api/nodes/:pubkey — node detail page.
+message NodeDetailResponse {
+  // Full node record.
+  Node node = 1;
+  // Last 20 packets involving this node, newest first.
+  repeated Transmission recent_adverts = 2 [json_name = "recentAdverts"];
+}
+
+// GET /api/nodes/:pubkey/health — detailed health for one node.
+message NodeHealthResponse {
+  // Full node record.
+  Node node = 1;
+  // Per-observer signal stats.
+  repeated NodeObserverStats observers = 2;
+  // Aggregate packet statistics.
+  NodeStats stats = 3;
+  // Last 20 packets (observations stripped, observation_count added).
+  repeated Transmission recent_packets = 4 [json_name = "recentPackets"];
+}
+
+// ─── Path Analysis ─────────────────────────────────────────────────────────────
+
+// Single hop in a resolved path.
+message PathHop {
+  // Raw hex hop prefix.
+  string prefix = 1;
+  // Resolved node name.
+  string name = 2;
+  // Full public key (null if unresolved).
+  optional string pubkey = 3;
+  // GPS latitude (null if unknown).
+  optional double lat = 4;
+  // GPS longitude (null if unknown).
+  optional double lon = 5;
+}
+
+// A unique path signature with usage stats.
+message PathEntry {
+  // Ordered hops in this path.
+  repeated PathHop hops = 1;
+  // Number of times this path was seen.
+  int32 count = 2;
+  // Most recent usage (ISO 8601).
+  optional string last_seen = 3 [json_name = "lastSeen"];
+  // Hash of a sample packet using this path.
+  string sample_hash = 4 [json_name = "sampleHash"];
+}
+
+// GET /api/nodes/:pubkey/paths — path analysis for a node.
+message NodePathsResponse {
+  // Lightweight node identification.
+  Node node = 1;
+  // All unique paths containing this node.
+  repeated PathEntry paths = 2;
+  // Number of unique path signatures.
+  int32 total_paths = 3 [json_name = "totalPaths"];
+  // Total transmissions with this node in path.
+  int32 total_transmissions = 4 [json_name = "totalTransmissions"];
+}
+
+// ─── Node Analytics ────────────────────────────────────────────────────────────
+
+// Time range for analytics query.
+message TimeRange {
+  // Start of range (ISO 8601).
+  string from = 1;
+  // End of range (ISO 8601).
+  string to = 2;
+  // Number of days in range.
+  int32 days = 3;
+}
+
+// SNR trend data point.
+message SnrTrendEntry {
+  // Observation timestamp (ISO 8601).
+  string timestamp = 1;
+  // Signal-to-noise ratio (dB).
+  double snr = 2;
+  // Received signal strength (dBm).
+  optional double rssi = 3;
+  // Observer that recorded this data point.
+  optional string observer_id = 4 [json_name = "observer_id"];
+  optional string observer_name = 5 [json_name = "observer_name"];
+}
+
+// Payload type breakdown entry.
+message PayloadTypeCount {
+  // Payload type number.
+  int32 payload_type = 1 [json_name = "payload_type"];
+  // Number of packets of this type.
+  int32 count = 2;
+}
+
+// Hop distribution entry (e.g. "0", "1", "4+").
+message HopDistEntry {
+  // Hop count label.
+  string hops = 1;
+  // Number of packets at this hop distance.
+  int32 count = 2;
+}
+
+// Peer interaction summary.
+message PeerInteraction {
+  // Peer node public key.
+  string peer_key = 1 [json_name = "peer_key"];
+  // Peer node display name.
+  string peer_name = 2 [json_name = "peer_name"];
+  // Number of messages exchanged.
+  int32 message_count = 3 [json_name = "messageCount"];
+  // Most recent interaction (ISO 8601).
+  string last_contact = 4 [json_name = "lastContact"];
+}
+
+// Uptime heatmap cell (day-of-week × hour-of-day).
+message HeatmapCell {
+  // Day of week (0=Sunday).
+  int32 day_of_week = 1 [json_name = "dayOfWeek"];
+  // Hour of day (0–23 UTC).
+  int32 hour = 2;
+  // Packet count in this cell.
+  int32 count = 3;
+}
+
+// Computed analytics statistics for a node.
+message ComputedNodeStats {
+  // Availability percentage (0–100).
+  double availability_pct = 1 [json_name = "availabilityPct"];
+  // Longest silence gap in milliseconds.
+  double longest_silence_ms = 2 [json_name = "longestSilenceMs"];
+  // When the longest silence started (ISO 8601).
+  optional string longest_silence_start = 3 [json_name = "longestSilenceStart"];
+  // Overall signal grade: "A", "A-", "B+", "B", "C", "D".
+  string signal_grade = 4 [json_name = "signalGrade"];
+  // Mean SNR across all observations.
+  double snr_mean = 5 [json_name = "snrMean"];
+  // SNR standard deviation.
+  double snr_std_dev = 6 [json_name = "snrStdDev"];
+  // Percentage of packets with >1 hop.
+  double relay_pct = 7 [json_name = "relayPct"];
+  // Total packets in analytics window.
+  int32 total_packets = 8 [json_name = "totalPackets"];
+  // Unique observers that saw this node.
+  int32 unique_observers = 9 [json_name = "uniqueObservers"];
+  // Unique peer nodes interacted with.
+  int32 unique_peers = 10 [json_name = "uniquePeers"];
+  // Average packets per day.
+  double avg_packets_per_day = 11 [json_name = "avgPacketsPerDay"];
+}
+
+// GET /api/nodes/:pubkey/analytics — per-node analytics.
+message NodeAnalyticsResponse {
+  // Full node record.
+  Node node = 1;
+  // Query time range.
+  TimeRange time_range = 2 [json_name = "timeRange"];
+  // Hourly activity buckets.
+  repeated TimeBucket activity_timeline = 3 [json_name = "activityTimeline"];
+  // SNR over time with observer attribution.
+  repeated SnrTrendEntry snr_trend = 4 [json_name = "snrTrend"];
+  // Packet count by payload type.
+  repeated PayloadTypeCount packet_type_breakdown = 5 [json_name = "packetTypeBreakdown"];
+  // Per-observer coverage with signal stats and time range.
+  repeated NodeObserverStats observer_coverage = 6 [json_name = "observerCoverage"];
+  // Distribution of hop counts.
+  repeated HopDistEntry hop_distribution = 7 [json_name = "hopDistribution"];
+  // Peer interaction summaries.
+  repeated PeerInteraction peer_interactions = 8 [json_name = "peerInteractions"];
+  // Day×hour activity heatmap.
+  repeated HeatmapCell uptime_heatmap = 9 [json_name = "uptimeHeatmap"];
+  // Derived statistics.
+  ComputedNodeStats computed_stats = 10 [json_name = "computedStats"];
+}
+
+// ─── Hop Resolution ────────────────────────────────────────────────────────────
+
+// Candidate node for an ambiguous hop prefix.
+message HopCandidate {
+  // Node display name.
+  string name = 1;
+  // Node public key.
+  string pubkey = 2;
+  // GPS latitude (null if unknown).
+  optional double lat = 3;
+  // GPS longitude (null if unknown).
+  optional double lon = 4;
+  // Whether this candidate is in the regional filter set.
+  bool regional = 5;
+  // How this candidate was selected: "geo", "observer", etc.
+  string filter_method = 6 [json_name = "filterMethod"];
+  // Distance in km from origin (null if no coordinates).
+  optional double dist_km = 7 [json_name = "distKm"];
+}
+
+// Resolution result for a single hop prefix.
+message HopResolution {
+  // Resolved node name (null if unresolvable).
+  optional string name = 1;
+  // Resolved node public key (null if unresolvable).
+  optional string pubkey = 2;
+  // True if multiple candidates matched.
+  optional bool ambiguous = 3;
+  // True if resolution failed sanity checks.
+  optional bool unreliable = 4;
+  // Candidate nodes that matched.
+  repeated HopCandidate candidates = 5;
+  // Conflicting candidates (different from chosen).
+  repeated HopCandidate conflicts = 6;
+  // True if fell back to global (non-regional) resolution.
+  optional bool global_fallback = 7 [json_name = "globalFallback"];
+  // Method used for filtering: "geo", "observer".
+  optional string filter_method = 8 [json_name = "filterMethod"];
+  // Hop hash size in bytes (for ambiguous entries).
+  optional int32 hop_bytes = 9 [json_name = "hopBytes"];
+  // Total global candidates before filtering.
+  optional int32 total_global = 10 [json_name = "totalGlobal"];
+  // Total regional candidates after filtering.
+  optional int32 total_regional = 11 [json_name = "totalRegional"];
+  // All filter methods attempted.
+  repeated string filter_methods = 12 [json_name = "filterMethods"];
+}
+
+// GET /api/resolve-hops — resolve hop prefixes to node identities.
+message ResolveHopsResponse {
+  // Map of hop prefix → resolution result.
+  map<string, HopResolution> resolved = 1;
+  // Regional context used for resolution (null if no region).
+  optional string region = 2;
+}
