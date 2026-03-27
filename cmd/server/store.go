@@ -48,30 +48,32 @@ type StoreObs struct {
 
 // PacketStore holds all transmissions in memory with indexes for fast queries.
 type PacketStore struct {
-	mu         sync.RWMutex
-	db         *DB
-	packets    []*StoreTx              // sorted by first_seen DESC
-	byHash     map[string]*StoreTx     // hash → *StoreTx
-	byTxID     map[int]*StoreTx        // transmission_id → *StoreTx
-	byObsID    map[int]*StoreObs       // observation_id → *StoreObs
-	byObserver map[string][]*StoreObs  // observer_id → observations
-	byNode     map[string][]*StoreTx   // pubkey → transmissions
-	nodeHashes map[string]map[string]bool // pubkey → Set<hash>
-	loaded     bool
-	totalObs   int
+	mu            sync.RWMutex
+	db            *DB
+	packets       []*StoreTx              // sorted by first_seen DESC
+	byHash        map[string]*StoreTx     // hash → *StoreTx
+	byTxID        map[int]*StoreTx        // transmission_id → *StoreTx
+	byObsID       map[int]*StoreObs       // observation_id → *StoreObs
+	byObserver    map[string][]*StoreObs  // observer_id → observations
+	byNode        map[string][]*StoreTx   // pubkey → transmissions
+	nodeHashes    map[string]map[string]bool // pubkey → Set<hash>
+	byPayloadType map[int][]*StoreTx      // payload_type → transmissions
+	loaded        bool
+	totalObs      int
 }
 
 // NewPacketStore creates a new empty packet store backed by db.
 func NewPacketStore(db *DB) *PacketStore {
 	return &PacketStore{
-		db:         db,
-		packets:    make([]*StoreTx, 0, 65536),
-		byHash:     make(map[string]*StoreTx, 65536),
-		byTxID:     make(map[int]*StoreTx, 65536),
-		byObsID:    make(map[int]*StoreObs, 65536),
-		byObserver: make(map[string][]*StoreObs),
-		byNode:     make(map[string][]*StoreTx),
-		nodeHashes: make(map[string]map[string]bool),
+		db:            db,
+		packets:       make([]*StoreTx, 0, 65536),
+		byHash:        make(map[string]*StoreTx, 65536),
+		byTxID:        make(map[int]*StoreTx, 65536),
+		byObsID:       make(map[int]*StoreObs, 65536),
+		byObserver:    make(map[string][]*StoreObs),
+		byNode:        make(map[string][]*StoreTx),
+		nodeHashes:    make(map[string]map[string]bool),
+		byPayloadType: make(map[int][]*StoreTx),
 	}
 }
 
@@ -141,6 +143,10 @@ func (s *PacketStore) Load() error {
 			s.packets = append(s.packets, tx)
 			s.byTxID[txID] = tx
 			s.indexByNode(tx)
+			if tx.PayloadType != nil {
+				pt := *tx.PayloadType
+				s.byPayloadType[pt] = append(s.byPayloadType[pt], tx)
+			}
 		}
 
 		if obsID.Valid {
@@ -663,6 +669,10 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 			s.packets = append([]*StoreTx{tx}, s.packets...)
 			s.byTxID[r.txID] = tx
 			s.indexByNode(tx)
+			if tx.PayloadType != nil {
+				pt := *tx.PayloadType
+				s.byPayloadType[pt] = append(s.byPayloadType[pt], tx)
+			}
 
 			if _, exists := broadcastTxs[r.txID]; !exists {
 				broadcastTxs[r.txID] = tx
@@ -986,15 +996,16 @@ func (s *PacketStore) GetChannels(region string) []map[string]interface{} {
 		MessageCount int
 		LastActivity string
 	}
+	type decodedGrp struct {
+		Type    string `json:"type"`
+		Channel string `json:"channel"`
+		Text    string `json:"text"`
+		Sender  string `json:"sender"`
+	}
 	channelMap := map[string]*chanInfo{}
 
-	for _, tx := range s.packets {
-		if tx.PayloadType == nil || *tx.PayloadType != 5 {
-			continue
-		}
-		if tx.DecodedJSON == "" {
-			continue
-		}
+	grpTxts := s.byPayloadType[5]
+	for _, tx := range grpTxts {
 
 		// Region filter: check if any observation is from a regional observer
 		if regionObs != nil {
@@ -1010,16 +1021,15 @@ func (s *PacketStore) GetChannels(region string) []map[string]interface{} {
 			}
 		}
 
-		var decoded map[string]interface{}
+		var decoded decodedGrp
 		if json.Unmarshal([]byte(tx.DecodedJSON), &decoded) != nil {
 			continue
 		}
-		dtype, _ := decoded["type"].(string)
-		if dtype != "CHAN" {
+		if decoded.Type != "CHAN" {
 			continue
 		}
 
-		channelName, _ := decoded["channel"].(string)
+		channelName := decoded.Channel
 		if channelName == "" {
 			channelName = "unknown"
 		}
@@ -1036,15 +1046,15 @@ func (s *PacketStore) GetChannels(region string) []map[string]interface{} {
 		ch.MessageCount++
 		if tx.FirstSeen >= ch.LastActivity {
 			ch.LastActivity = tx.FirstSeen
-			if text, ok := decoded["text"].(string); ok && text != "" {
-				idx := strings.Index(text, ": ")
+			if decoded.Text != "" {
+				idx := strings.Index(decoded.Text, ": ")
 				if idx > 0 {
-					ch.LastMessage = text[idx+2:]
+					ch.LastMessage = decoded.Text[idx+2:]
 				} else {
-					ch.LastMessage = text
+					ch.LastMessage = decoded.Text
 				}
-				if sender, ok := decoded["sender"].(string); ok {
-					ch.LastSender = sender
+				if decoded.Sender != "" {
+					ch.LastSender = decoded.Sender
 				}
 			}
 		}
@@ -1078,22 +1088,31 @@ func (s *PacketStore) GetChannelMessages(channelHash string, limit, offset int) 
 	msgMap := map[string]*msgEntry{}
 	var msgOrder []string
 
-	// Iterate oldest-first (packets stored newest-first, so reverse)
-	for i := len(s.packets) - 1; i >= 0; i-- {
-		tx := s.packets[i]
-		if tx.PayloadType == nil || *tx.PayloadType != 5 || tx.DecodedJSON == "" {
+	// Iterate type-5 packets oldest-first (byPayloadType is in load order = newest first)
+	type decodedMsg struct {
+		Type            string      `json:"type"`
+		Channel         string      `json:"channel"`
+		Text            string      `json:"text"`
+		Sender          string      `json:"sender"`
+		SenderTimestamp interface{} `json:"sender_timestamp"`
+		PathLen         int         `json:"path_len"`
+	}
+
+	grpTxts := s.byPayloadType[5]
+	for i := len(grpTxts) - 1; i >= 0; i-- {
+		tx := grpTxts[i]
+		if tx.DecodedJSON == "" {
 			continue
 		}
 
-		var decoded map[string]interface{}
+		var decoded decodedMsg
 		if json.Unmarshal([]byte(tx.DecodedJSON), &decoded) != nil {
 			continue
 		}
-		dtype, _ := decoded["type"].(string)
-		if dtype != "CHAN" {
+		if decoded.Type != "CHAN" {
 			continue
 		}
-		ch, _ := decoded["channel"].(string)
+		ch := decoded.Channel
 		if ch == "" {
 			ch = "unknown"
 		}
@@ -1101,8 +1120,8 @@ func (s *PacketStore) GetChannelMessages(channelHash string, limit, offset int) 
 			continue
 		}
 
-		text, _ := decoded["text"].(string)
-		sender, _ := decoded["sender"].(string)
+		text := decoded.Text
+		sender := decoded.Sender
 		if sender == "" && text != "" {
 			idx := strings.Index(text, ": ")
 			if idx > 0 && idx < 50 {
@@ -1151,7 +1170,7 @@ func (s *PacketStore) GetChannelMessages(channelHash string, limit, offset int) 
 				snrVal = *tx.SNR
 			}
 
-			senderTs, _ := decoded["sender_timestamp"]
+			senderTs := decoded.SenderTimestamp
 
 			observers := []string{}
 			obsName := tx.ObserverName
@@ -1217,10 +1236,15 @@ func (s *PacketStore) GetAnalyticsRF(region string) map[string]interface{} {
 	}
 
 	// Collect all observations matching the region
-	var snrVals, rssiVals []float64
-	var packetSizes []int
-	seenSizeHashes := map[string]bool{}
-	seenTypeHashes := map[string]bool{}
+	estCap := s.totalObs
+	if estCap > 2000000 {
+		estCap = 2000000
+	}
+	snrVals := make([]float64, 0, estCap/2)
+	rssiVals := make([]float64, 0, estCap/2)
+	packetSizes := make([]int, 0, len(s.packets))
+	seenSizeHashes := make(map[string]bool, len(s.packets))
+	seenTypeHashes := make(map[string]bool, len(s.packets))
 	typeBuckets := map[int]int{}
 	hourBuckets := map[string]int{}
 	snrByType := map[string]*struct{ vals []float64 }{}
@@ -1228,9 +1252,10 @@ func (s *PacketStore) GetAnalyticsRF(region string) map[string]interface{} {
 		snrs  []float64
 		count int
 	}{}
-	var scatterAll []struct{ snr, rssi float64 }
+	scatterAll := make([]struct{ snr, rssi float64 }, 0, estCap/4)
 	totalObs := 0
-	regionalHashes := map[string]bool{}
+	regionalHashes := make(map[string]bool, len(s.packets))
+	var minTimestamp, maxTimestamp string
 
 	if regionObs != nil {
 		// Regional: iterate observations from matching observers
@@ -1248,6 +1273,14 @@ func (s *PacketStore) GetAnalyticsRF(region string) map[string]interface{} {
 				}
 
 				ts := obs.Timestamp
+				if ts != "" {
+					if minTimestamp == "" || ts < minTimestamp {
+						minTimestamp = ts
+					}
+					if ts > maxTimestamp {
+						maxTimestamp = ts
+					}
+				}
 
 				// SNR/RSSI
 				if obs.SNR != nil {
@@ -1315,6 +1348,14 @@ func (s *PacketStore) GetAnalyticsRF(region string) map[string]interface{} {
 						regionalHashes[tx.Hash] = true
 					}
 					ts := obs.Timestamp
+					if ts != "" {
+						if minTimestamp == "" || ts < minTimestamp {
+							minTimestamp = ts
+						}
+						if ts > maxTimestamp {
+							maxTimestamp = ts
+						}
+					}
 
 					if obs.SNR != nil {
 						snrVals = append(snrVals, *obs.SNR)
@@ -1377,6 +1418,14 @@ func (s *PacketStore) GetAnalyticsRF(region string) map[string]interface{} {
 					rssiVals = append(rssiVals, *tx.RSSI)
 				}
 				ts := tx.FirstSeen
+				if ts != "" {
+					if minTimestamp == "" || ts < minTimestamp {
+						minTimestamp = ts
+					}
+					if ts > maxTimestamp {
+						maxTimestamp = ts
+					}
+				}
 				if len(ts) >= 13 {
 					hourBuckets[ts[:13]]++
 				}
@@ -1627,37 +1676,24 @@ func (s *PacketStore) GetAnalyticsRF(region string) map[string]interface{} {
 	rssiHistogram := buildHistogramF64(rssiVals, 20)
 	sizeHistogram := buildHistogramInt(packetSizes, 25)
 
-	// Time span
+	// Time span from min/max timestamps tracked during first pass
 	timeSpanHours := 0.0
-	if totalObs > 0 {
-		var minT, maxT int64
-		first := true
-		// Scan a representative set for time bounds
-		for _, tx := range s.packets {
-			for _, obs := range tx.Observations {
-				t, err := time.Parse("2006-01-02 15:04:05", obs.Timestamp)
-				if err != nil {
-					t, err = time.Parse(time.RFC3339, obs.Timestamp)
-				}
-				if err != nil {
-					continue
-				}
-				ms := t.UnixMilli()
-				if first {
-					minT, maxT = ms, ms
-					first = false
-				} else {
-					if ms < minT {
-						minT = ms
-					}
-					if ms > maxT {
-						maxT = ms
-					}
-				}
+	if minTimestamp != "" && maxTimestamp != "" && minTimestamp != maxTimestamp {
+		// Parse only 2 timestamps instead of 1.2M
+		parseTS := func(ts string) (time.Time, bool) {
+			t, err := time.Parse("2006-01-02 15:04:05", ts)
+			if err != nil {
+				t, err = time.Parse(time.RFC3339, ts)
 			}
+			if err != nil {
+				return time.Time{}, false
+			}
+			return t, true
 		}
-		if !first {
-			timeSpanHours = float64(maxT-minT) / 3600000.0
+		if tMin, ok := parseTS(minTimestamp); ok {
+			if tMax, ok := parseTS(maxTimestamp); ok {
+				timeSpanHours = float64(tMax.UnixMilli()-tMin.UnixMilli()) / 3600000.0
+			}
 		}
 	}
 
