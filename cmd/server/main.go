@@ -7,13 +7,43 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/gorilla/mux"
 )
+
+// Set via -ldflags at build time
+var Version string
+var Commit string
+
+func resolveCommit() string {
+	if Commit != "" {
+		return Commit
+	}
+	// Try .git-commit file (baked by Docker / CI)
+	if data, err := os.ReadFile(".git-commit"); err == nil {
+		if c := strings.TrimSpace(string(data)); c != "" && c != "unknown" {
+			return c
+		}
+	}
+	// Try git rev-parse at runtime
+	if out, err := exec.Command("git", "rev-parse", "--short", "HEAD").Output(); err == nil {
+		return strings.TrimSpace(string(out))
+	}
+	return "unknown"
+}
+
+func resolveVersion() string {
+	if Version != "" {
+		return Version
+	}
+	return "unknown"
+}
 
 func main() {
 	var (

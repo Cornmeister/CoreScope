@@ -172,6 +172,8 @@ seedTestData();
     const r = await request(app).get('/api/health').expect(200);
     assert(r.body.status, 'should have status');
     assert(r.body.engine === 'node', 'health should include engine=node');
+    assert(typeof r.body.version === 'string', 'health should include version');
+    assert(typeof r.body.commit === 'string', 'health should include commit');
   });
 
   // --- Stats ---
@@ -179,6 +181,8 @@ seedTestData();
     const r = await request(app).get('/api/stats').expect(200);
     assert(typeof r.body === 'object', 'should return stats');
     assert(r.body.engine === 'node', 'stats should include engine=node');
+    assert(typeof r.body.version === 'string', 'stats should include version');
+    assert(typeof r.body.commit === 'string', 'stats should include commit');
   });
 
   // --- Perf ---

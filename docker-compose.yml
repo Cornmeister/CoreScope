@@ -49,6 +49,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.go
+      args:
+        APP_VERSION: ${APP_VERSION:-unknown}
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     image: meshcore-go:latest
     container_name: meshcore-staging-go
     restart: unless-stopped

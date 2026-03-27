@@ -19,6 +19,22 @@ const config = loadConfigFile();
 const decoder = require('./decoder');
 const PAYLOAD_TYPES = decoder.PAYLOAD_TYPES;
 const { nodeNearRegion, IATA_COORDS } = require('./iata-coords');
+const { execSync } = require('child_process');
+
+// Version + git commit for /api/stats and /api/health
+const APP_VERSION = (() => {
+  try { return require('./package.json').version; } catch { return 'unknown'; }
+})();
+const GIT_COMMIT = (() => {
+  // 1. .git-commit file (baked by Docker / CI)
+  try {
+    const c = fs.readFileSync(path.join(__dirname, '.git-commit'), 'utf8').trim();
+    if (c && c !== 'unknown') return c;
+  } catch { /* ignore */ }
+  // 2. git rev-parse at runtime
+  try { return execSync('git rev-parse --short HEAD', { encoding: 'utf8', timeout: 3000 }).trim(); } catch { /* ignore */ }
+  return 'unknown';
+})();
 
 // Health thresholds — configurable with sensible defaults
 const HEALTH = buildHealthConfig(config);
@@ -472,6 +488,8 @@ app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     engine: 'node',
+    version: APP_VERSION,
+    commit: GIT_COMMIT,
     uptime: Math.round(uptime),
     uptimeHuman: `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m`,
     memory: {
@@ -886,7 +904,7 @@ app.get('/api/stats', (req, res) => {
     const r = db.db.prepare(`SELECT COUNT(*) as count FROM nodes WHERE role = ? AND last_seen > ?`).get(role, sevenDaysAgo);
     counts[role + 's'] = r.count;
   }
-  res.json({ ...stats, engine: 'node', counts });
+  res.json({ ...stats, engine: 'node', version: APP_VERSION, commit: GIT_COMMIT, counts });
 });
 
 app.get('/api/packets', (req, res) => {

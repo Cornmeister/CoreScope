@@ -38,6 +38,12 @@ func TestHealthEndpoint(t *testing.T) {
 	if body["engine"] != "go" {
 		t.Errorf("expected engine go, got %v", body["engine"])
 	}
+	if _, ok := body["version"]; !ok {
+		t.Error("expected version field in health response")
+	}
+	if _, ok := body["commit"]; !ok {
+		t.Error("expected commit field in health response")
+	}
 }
 
 func TestStatsEndpoint(t *testing.T) {
@@ -59,6 +65,12 @@ func TestStatsEndpoint(t *testing.T) {
 	}
 	if body["engine"] != "go" {
 		t.Errorf("expected engine go, got %v", body["engine"])
+	}
+	if _, ok := body["version"]; !ok {
+		t.Error("expected version field in stats response")
+	}
+	if _, ok := body["commit"]; !ok {
+		t.Error("expected commit field in stats response")
 	}
 }
 

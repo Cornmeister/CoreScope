@@ -12,6 +12,10 @@ RUN npm ci --production
 COPY *.js config.example.json channel-rainbow.json ./
 COPY public/ ./public/
 
+# Bake git commit SHA (CI writes .git-commit before build; fallback to "unknown")
+COPY .git-commi[t] ./
+RUN if [ ! -f .git-commit ]; then echo "unknown" > .git-commit; fi
+
 # Supervisor + Mosquitto + Caddy config
 COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY docker/mosquitto.conf /etc/mosquitto/mosquitto.conf

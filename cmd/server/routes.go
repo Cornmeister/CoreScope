@@ -23,6 +23,8 @@ type Server struct {
 	store     *PacketStore // in-memory packet store (nil = fallback to DB)
 	startedAt time.Time
 	perfStats *PerfStats
+	version   string
+	commit    string
 }
 
 // PerfStats tracks request performance.
@@ -56,6 +58,8 @@ func NewServer(db *DB, cfg *Config, hub *Hub) *Server {
 		hub:       hub,
 		startedAt: time.Now(),
 		perfStats: NewPerfStats(),
+		version:   resolveVersion(),
+		commit:    resolveCommit(),
 	}
 }
 
@@ -265,6 +269,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{
 		"status":      "ok",
 		"engine":      "go",
+		"version":     s.version,
+		"commit":      s.commit,
 		"uptime":      int(uptime),
 		"uptimeHuman": fmt.Sprintf("%dh %dm", int(uptime)/3600, (int(uptime)%3600)/60),
 		"memory": map[string]interface{}{
@@ -316,6 +322,8 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"totalObservers":     stats.TotalObservers,
 		"packetsLastHour":    stats.PacketsLastHour,
 		"engine":             "go",
+		"version":            s.version,
+		"commit":             s.commit,
 		"counts":             counts,
 	}
 	writeJSON(w, result)

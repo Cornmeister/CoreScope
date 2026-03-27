@@ -2,12 +2,15 @@ FROM golang:1.22-alpine AS builder
 
 RUN apk add --no-cache build-base
 
+ARG APP_VERSION=unknown
+ARG GIT_COMMIT=unknown
+
 # Build server
 WORKDIR /build/server
 COPY cmd/server/go.mod cmd/server/go.sum ./
 RUN go mod download
 COPY cmd/server/ ./
-RUN go build -o /meshcore-server .
+RUN go build -ldflags "-X main.Version=${APP_VERSION} -X main.Commit=${GIT_COMMIT}" -o /meshcore-server .
 
 # Build ingestor
 WORKDIR /build/ingestor
@@ -29,6 +32,10 @@ COPY --from=builder /meshcore-server /meshcore-ingestor /app/
 # Frontend assets + config
 COPY public/ ./public/
 COPY config.example.json channel-rainbow.json ./
+
+# Bake git commit SHA (CI writes .git-commit before build; fallback for non-ldflags usage)
+COPY .git-commi[t] ./
+RUN if [ ! -f .git-commit ]; then echo "unknown" > .git-commit; fi
 
 # Supervisor + Mosquitto + Caddy config
 COPY docker/supervisord-go.conf /etc/supervisor/conf.d/supervisord.conf

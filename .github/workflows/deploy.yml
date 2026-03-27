@@ -176,6 +176,7 @@ jobs:
 
       - name: Build image
         run: |
+          echo "${GITHUB_SHA::7}" > .git-commit
           docker build -t meshcore-analyzer:latest .
           echo "Built $(git rev-parse --short HEAD)"
 
@@ -249,6 +250,9 @@ jobs:
       - name: Deploy Go staging
         run: |
           echo "Building Go staging image..."
+          echo "${GITHUB_SHA::7}" > .git-commit
+          APP_VERSION=$(node -p "require('./package.json').version") \
+          GIT_COMMIT="${GITHUB_SHA::7}" \
           docker compose --profile staging-go build staging-go
 
           echo "Replacing Go staging container..."
