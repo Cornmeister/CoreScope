@@ -46,6 +46,11 @@
 
 **Rationale:** Staging needs real data (prod-like conditions) to be useful for testing.
 
+### 2026-03-27T17:13 — Scribe Auto-Run After Agent Batches
+**By:** User (via Copilot)  
+**Decision:** Scribe must run after EVERY batch of agent work automatically. No manual triggers. No reminders needed. This is a process guarantee, not a suggestion.  
+**Rationale:** Coordinator has been forgetting to spawn Scribe after agent batches complete. This is a process failure. Scribe auto-spawn ends the forgetfulness.
+
 ---
 
 ## Decision: Technical Fixes
