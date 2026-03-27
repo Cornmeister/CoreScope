@@ -304,6 +304,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"totalTransmissions": stats.TotalTransmissions,
 		"totalObservations":  stats.TotalObservations,
 		"totalNodes":         stats.TotalNodes,
+		"totalNodesAllTime":  stats.TotalNodesAllTime,
 		"totalObservers":     stats.TotalObservers,
 		"packetsLastHour":    stats.PacketsLastHour,
 		"counts":             counts,
@@ -339,6 +340,36 @@ func (s *Server) handlePerf(w http.ResponseWriter, r *http.Request) {
 // --- Packet Handlers ---
 
 func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
+	// Multi-node filter: comma-separated pubkeys (Node.js parity)
+	if nodesParam := r.URL.Query().Get("nodes"); nodesParam != "" {
+		pubkeys := strings.Split(nodesParam, ",")
+		var cleaned []string
+		for _, pk := range pubkeys {
+			pk = strings.TrimSpace(pk)
+			if pk != "" {
+				cleaned = append(cleaned, pk)
+			}
+		}
+		order := "DESC"
+		if r.URL.Query().Get("order") == "asc" {
+			order = "ASC"
+		}
+		result, err := s.db.QueryMultiNodePackets(cleaned,
+			queryInt(r, "limit", 50), queryInt(r, "offset", 0),
+			order, r.URL.Query().Get("since"), r.URL.Query().Get("until"))
+		if err != nil {
+			writeError(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, map[string]interface{}{
+			"packets": result.Packets,
+			"total":   result.Total,
+			"limit":   queryInt(r, "limit", 50),
+			"offset":  queryInt(r, "offset", 0),
+		})
+		return
+	}
+
 	q := PacketQuery{
 		Limit:    queryInt(r, "limit", 50),
 		Offset:   queryInt(r, "offset", 0),
@@ -434,9 +465,20 @@ func (s *Server) handlePacketDetail(w http.ResponseWriter, r *http.Request) {
 		observationCount = 1
 	}
 
+	// Parse path from path_json
+	var pathHops []interface{}
+	if pj, ok := packet["path_json"]; ok && pj != nil {
+		if pjStr, ok := pj.(string); ok && pjStr != "" {
+			json.Unmarshal([]byte(pjStr), &pathHops)
+		}
+	}
+	if pathHops == nil {
+		pathHops = []interface{}{}
+	}
+
 	writeJSON(w, map[string]interface{}{
 		"packet":            packet,
-		"path":              []interface{}{},
+		"path":              pathHops,
 		"breakdown":         map[string]interface{}{},
 		"observation_count": observationCount,
 		"observations":      observations,
@@ -517,26 +559,81 @@ func (s *Server) handleBulkHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	results := make([]map[string]interface{}, 0)
+	type nodeInfo struct {
+		pk, name, role, lastSeen string
+		lat, lon                 interface{}
+	}
+	var nodes []nodeInfo
 	for rows.Next() {
 		var pk string
 		var name, role, lastSeen sql.NullString
 		var lat, lon sql.NullFloat64
 		rows.Scan(&pk, &name, &role, &lat, &lon, &lastSeen)
+		nodes = append(nodes, nodeInfo{
+			pk: pk, name: nullStrVal(name), role: nullStrVal(role),
+			lastSeen: nullStrVal(lastSeen),
+			lat:      nullFloat(lat), lon: nullFloat(lon),
+		})
+	}
+
+	// Batch query: per-node transmission stats
+	todayStart := time.Now().UTC().Truncate(24 * time.Hour).Format(time.RFC3339)
+	results := make([]map[string]interface{}, 0, len(nodes))
+	for _, n := range nodes {
+		pk := "%" + n.pk + "%"
+		np := "%" + n.name + "%"
+
+		var txCount, obsCount, packetsToday int
+		var avgSnr sql.NullFloat64
+		var lastHeard sql.NullString
+
+		whereClause := "t.decoded_json LIKE ?"
+		queryArgs := []interface{}{pk}
+		if n.name != "" {
+			whereClause = "(t.decoded_json LIKE ? OR t.decoded_json LIKE ?)"
+			queryArgs = []interface{}{pk, np}
+		}
+
+		s.db.conn.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM transmissions t WHERE %s", whereClause), queryArgs...).Scan(&txCount)
+
+		if txCount > 0 {
+			// Observation count
+			s.db.conn.QueryRow(fmt.Sprintf(`SELECT COALESCE(SUM(
+				(SELECT COUNT(*) FROM observations oi WHERE oi.transmission_id = t.id)
+			), 0) FROM transmissions t WHERE %s`, whereClause), queryArgs...).Scan(&obsCount)
+
+			// Packets today
+			todayArgs := append(queryArgs, todayStart)
+			s.db.conn.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM transmissions t WHERE %s AND t.first_seen > ?", whereClause), todayArgs...).Scan(&packetsToday)
+
+			// Avg SNR from best observation per transmission
+			s.db.conn.QueryRow(fmt.Sprintf(`SELECT AVG(o.snr) FROM transmissions t
+				LEFT JOIN observations o ON o.id = (
+					SELECT id FROM observations WHERE transmission_id = t.id AND snr IS NOT NULL LIMIT 1
+				) WHERE %s AND o.snr IS NOT NULL`, whereClause), queryArgs...).Scan(&avgSnr)
+
+			// Last heard
+			s.db.conn.QueryRow(fmt.Sprintf("SELECT MAX(t.first_seen) FROM transmissions t WHERE %s", whereClause), queryArgs...).Scan(&lastHeard)
+		}
+
+		lh := n.lastSeen
+		if lastHeard.Valid && lastHeard.String > lh {
+			lh = lastHeard.String
+		}
 
 		results = append(results, map[string]interface{}{
-			"public_key": pk,
-			"name":       nullStr(name),
-			"role":       nullStr(role),
-			"lat":        nullFloat(lat),
-			"lon":        nullFloat(lon),
+			"public_key": n.pk,
+			"name":       nilIfEmpty(n.name),
+			"role":       nilIfEmpty(n.role),
+			"lat":        n.lat,
+			"lon":        n.lon,
 			"stats": map[string]interface{}{
-				"totalTransmissions": 0,
-				"totalObservations":  0,
-				"totalPackets":       0,
-				"packetsToday":       0,
-				"avgSnr":             nil,
-				"lastHeard":          nullStr(lastSeen),
+				"totalTransmissions": txCount,
+				"totalObservations":  obsCount,
+				"totalPackets":       txCount,
+				"packetsToday":       packetsToday,
+				"avgSnr":             nullFloat(avgSnr),
+				"lastHeard":          nilIfEmpty(lh),
 			},
 			"observers": []interface{}{},
 		})
@@ -913,8 +1010,27 @@ func (s *Server) handleObservers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
+
+	// Batch lookup: packetsLastHour per observer
+	oneHourAgo := time.Now().Add(-1 * time.Hour).Unix()
+	pktCounts := s.db.GetObserverPacketCounts(oneHourAgo)
+
+	// Batch lookup: node locations (observer ID may match a node public_key)
+	nodeLocations := s.db.GetNodeLocations()
+
 	result := make([]map[string]interface{}, 0, len(observers))
 	for _, o := range observers {
+		plh := 0
+		if c, ok := pktCounts[o.ID]; ok {
+			plh = c
+		}
+		var lat, lon, nodeRole interface{}
+		if nodeLoc, ok := nodeLocations[strings.ToLower(o.ID)]; ok {
+			lat = nodeLoc["lat"]
+			lon = nodeLoc["lon"]
+			nodeRole = nodeLoc["role"]
+		}
+
 		m := map[string]interface{}{
 			"id": o.ID, "name": o.Name, "iata": o.IATA,
 			"last_seen": o.LastSeen, "first_seen": o.FirstSeen,
@@ -923,8 +1039,8 @@ func (s *Server) handleObservers(w http.ResponseWriter, r *http.Request) {
 			"client_version": o.ClientVersion, "radio": o.Radio,
 			"battery_mv": o.BatteryMv, "uptime_secs": o.UptimeSecs,
 			"noise_floor": o.NoiseFloor,
-			"packetsLastHour": 0,
-			"lat": nil, "lon": nil, "nodeRole": nil,
+			"packetsLastHour": plh,
+			"lat": lat, "lon": lon, "nodeRole": nodeRole,
 		}
 		result = append(result, m)
 	}
@@ -941,6 +1057,15 @@ func (s *Server) handleObserverDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "Observer not found")
 		return
 	}
+
+	// Compute packetsLastHour from observations
+	oneHourAgo := time.Now().Add(-1 * time.Hour).Unix()
+	pktCounts := s.db.GetObserverPacketCounts(oneHourAgo)
+	plh := 0
+	if c, ok := pktCounts[id]; ok {
+		plh = c
+	}
+
 	writeJSON(w, map[string]interface{}{
 		"id": obs.ID, "name": obs.Name, "iata": obs.IATA,
 		"last_seen": obs.LastSeen, "first_seen": obs.FirstSeen,
@@ -949,7 +1074,7 @@ func (s *Server) handleObserverDetail(w http.ResponseWriter, r *http.Request) {
 		"client_version": obs.ClientVersion, "radio": obs.Radio,
 		"battery_mv": obs.BatteryMv, "uptime_secs": obs.UptimeSecs,
 		"noise_floor": obs.NoiseFloor,
-		"packetsLastHour": 0,
+		"packetsLastHour": plh,
 	})
 }
 

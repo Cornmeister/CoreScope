@@ -184,11 +184,12 @@ type Stats struct {
 	TotalTransmissions int `json:"totalTransmissions"`
 	TotalObservations  int `json:"totalObservations"`
 	TotalNodes         int `json:"totalNodes"`
+	TotalNodesAllTime  int `json:"totalNodesAllTime"`
 	TotalObservers     int `json:"totalObservers"`
 	PacketsLastHour    int `json:"packetsLastHour"`
 }
 
-// GetStats returns aggregate counts.
+// GetStats returns aggregate counts (matches Node.js db.getStats shape).
 func (db *DB) GetStats() (*Stats, error) {
 	s := &Stats{}
 	err := db.conn.QueryRow("SELECT COUNT(*) FROM transmissions").Scan(&s.TotalTransmissions)
@@ -198,7 +199,10 @@ func (db *DB) GetStats() (*Stats, error) {
 	s.TotalPackets = s.TotalTransmissions
 
 	db.conn.QueryRow("SELECT COUNT(*) FROM observations").Scan(&s.TotalObservations)
-	db.conn.QueryRow("SELECT COUNT(*) FROM nodes").Scan(&s.TotalNodes)
+	// Node.js uses 7-day active nodes for totalNodes
+	sevenDaysAgo := time.Now().Add(-7 * 24 * time.Hour).Format(time.RFC3339)
+	db.conn.QueryRow("SELECT COUNT(*) FROM nodes WHERE last_seen > ?", sevenDaysAgo).Scan(&s.TotalNodes)
+	db.conn.QueryRow("SELECT COUNT(*) FROM nodes").Scan(&s.TotalNodesAllTime)
 	db.conn.QueryRow("SELECT COUNT(*) FROM observers").Scan(&s.TotalObservers)
 
 	oneHourAgo := time.Now().Add(-1 * time.Hour).Unix()
@@ -207,8 +211,20 @@ func (db *DB) GetStats() (*Stats, error) {
 	return s, nil
 }
 
-// GetRoleCounts returns count per role.
+// GetRoleCounts returns count per role (7-day active, matching Node.js /api/stats).
 func (db *DB) GetRoleCounts() map[string]int {
+	sevenDaysAgo := time.Now().Add(-7 * 24 * time.Hour).Format(time.RFC3339)
+	counts := map[string]int{}
+	for _, role := range []string{"repeater", "room", "companion", "sensor"} {
+		var c int
+		db.conn.QueryRow("SELECT COUNT(*) FROM nodes WHERE role = ? AND last_seen > ?", role, sevenDaysAgo).Scan(&c)
+		counts[role+"s"] = c
+	}
+	return counts
+}
+
+// GetAllRoleCounts returns count per role (all nodes, no time filter — matching Node.js /api/nodes).
+func (db *DB) GetAllRoleCounts() map[string]int {
 	counts := map[string]int{}
 	for _, role := range []string{"repeater", "room", "companion", "sensor"} {
 		var c int
@@ -288,27 +304,62 @@ func (db *DB) QueryPackets(q PacketQuery) (*PacketResult, error) {
 	return &PacketResult{Packets: packets, Total: total}, nil
 }
 
-// QueryGroupedPackets groups by hash (transmissions).
+// QueryGroupedPackets groups by hash (transmissions) — queries transmissions table directly for performance.
 func (db *DB) QueryGroupedPackets(q PacketQuery) (*PacketResult, error) {
 	if q.Limit <= 0 {
 		q.Limit = 50
 	}
-	where, args := db.buildPacketWhere(q)
+
+	where, args := db.buildTransmissionWhere(q)
 	w := ""
 	if len(where) > 0 {
 		w = "WHERE " + strings.Join(where, " AND ")
 	}
 
-	qry := fmt.Sprintf(`SELECT hash, COUNT(*) as count, COUNT(DISTINCT observer_id) as observer_count,
-		MAX(timestamp) as latest,
-		(SELECT first_seen FROM transmissions WHERE hash = packets_v.hash LIMIT 1) as first_seen,
-		MIN(observer_id) as observer_id, MIN(observer_name) as observer_name,
-		MIN(path_json) as path_json, MIN(payload_type) as payload_type, MIN(route_type) as route_type,
-		MIN(raw_hex) as raw_hex, MIN(decoded_json) as decoded_json, MIN(snr) as snr, MIN(rssi) as rssi
-		FROM packets_v %s GROUP BY hash ORDER BY latest DESC LIMIT ? OFFSET ?`, w)
-	args = append(args, q.Limit, q.Offset)
+	// Count total transmissions (fast — queries transmissions directly, not packets_v)
+	var total int
+	if len(where) == 0 {
+		db.conn.QueryRow("SELECT COUNT(*) FROM transmissions").Scan(&total)
+	} else {
+		db.conn.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM transmissions t %s", w), args...).Scan(&total)
+	}
 
-	rows, err := db.conn.Query(qry, args...)
+	// Build grouped query using transmissions table with correlated subqueries
+	var querySQL string
+	if db.isV3 {
+		querySQL = fmt.Sprintf(`SELECT t.hash, t.first_seen, t.raw_hex, t.decoded_json, t.payload_type, t.route_type,
+			COALESCE((SELECT COUNT(*) FROM observations oi WHERE oi.transmission_id = t.id), 0) AS count,
+			COALESCE((SELECT COUNT(DISTINCT oi.observer_idx) FROM observations oi WHERE oi.transmission_id = t.id), 0) AS observer_count,
+			COALESCE((SELECT MAX(datetime(oi.timestamp, 'unixepoch')) FROM observations oi WHERE oi.transmission_id = t.id), t.first_seen) AS latest,
+			obs.id AS observer_id, obs.name AS observer_name,
+			o.snr, o.rssi, o.path_json
+		FROM transmissions t
+		LEFT JOIN observations o ON o.id = (
+			SELECT id FROM observations WHERE transmission_id = t.id
+			ORDER BY length(COALESCE(path_json,'')) DESC LIMIT 1
+		)
+		LEFT JOIN observers obs ON obs.rowid = o.observer_idx
+		%s ORDER BY latest DESC LIMIT ? OFFSET ?`, w)
+	} else {
+		querySQL = fmt.Sprintf(`SELECT t.hash, t.first_seen, t.raw_hex, t.decoded_json, t.payload_type, t.route_type,
+			COALESCE((SELECT COUNT(*) FROM observations oi WHERE oi.transmission_id = t.id), 0) AS count,
+			COALESCE((SELECT COUNT(DISTINCT oi.observer_id) FROM observations oi WHERE oi.transmission_id = t.id), 0) AS observer_count,
+			COALESCE((SELECT MAX(oi.timestamp) FROM observations oi WHERE oi.transmission_id = t.id), t.first_seen) AS latest,
+			o.observer_id, o.observer_name,
+			o.snr, o.rssi, o.path_json
+		FROM transmissions t
+		LEFT JOIN observations o ON o.id = (
+			SELECT id FROM observations WHERE transmission_id = t.id
+			ORDER BY length(COALESCE(path_json,'')) DESC LIMIT 1
+		)
+		%s ORDER BY latest DESC LIMIT ? OFFSET ?`, w)
+	}
+
+	qArgs := make([]interface{}, len(args))
+	copy(qArgs, args)
+	qArgs = append(qArgs, q.Limit, q.Offset)
+
+	rows, err := db.conn.Query(querySQL, qArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -316,20 +367,24 @@ func (db *DB) QueryGroupedPackets(q PacketQuery) (*PacketResult, error) {
 
 	packets := make([]map[string]interface{}, 0)
 	for rows.Next() {
-		var hash, latest, firstSeen, observerID, observerName, pathJSON, rawHex, decodedJSON sql.NullString
-		var count, observerCount int
+		var hash, firstSeen, rawHex, decodedJSON, latest, observerID, observerName, pathJSON sql.NullString
 		var payloadType, routeType sql.NullInt64
+		var count, observerCount int
 		var snr, rssi sql.NullFloat64
-		if err := rows.Scan(&hash, &count, &observerCount, &latest, &firstSeen, &observerID, &observerName, &pathJSON, &payloadType, &routeType, &rawHex, &decodedJSON, &snr, &rssi); err != nil {
+
+		if err := rows.Scan(&hash, &firstSeen, &rawHex, &decodedJSON, &payloadType, &routeType,
+			&count, &observerCount, &latest,
+			&observerID, &observerName, &snr, &rssi, &pathJSON); err != nil {
 			continue
 		}
-		p := map[string]interface{}{
+
+		packets = append(packets, map[string]interface{}{
 			"hash":              nullStr(hash),
+			"first_seen":        nullStr(firstSeen),
 			"count":             count,
 			"observer_count":    observerCount,
 			"observation_count": count,
 			"latest":            nullStr(latest),
-			"first_seen":        nullStr(firstSeen),
 			"observer_id":       nullStr(observerID),
 			"observer_name":     nullStr(observerName),
 			"path_json":         nullStr(pathJSON),
@@ -339,14 +394,8 @@ func (db *DB) QueryGroupedPackets(q PacketQuery) (*PacketResult, error) {
 			"decoded_json":      nullStr(decodedJSON),
 			"snr":               nullFloat(snr),
 			"rssi":              nullFloat(rssi),
-		}
-		packets = append(packets, p)
+		})
 	}
-
-	var total int
-	countSQL := fmt.Sprintf("SELECT COUNT(DISTINCT hash) FROM packets_v %s", w)
-	baseArgs := args[:len(args)-2] // remove LIMIT/OFFSET
-	db.conn.QueryRow(countSQL, baseArgs...).Scan(&total)
 
 	return &PacketResult{Packets: packets, Total: total}, nil
 }
@@ -580,7 +629,7 @@ func (db *DB) GetNodes(limit, offset int, role, search, before, lastHeard, sortB
 		}
 	}
 
-	counts := db.GetRoleCounts()
+	counts := db.GetAllRoleCounts()
 	return nodes, total, counts, nil
 }
 
@@ -1181,6 +1230,123 @@ func (db *DB) GetMaxTransmissionID() int {
 	return maxID
 }
 
+// GetObserverPacketCounts returns packetsLastHour for all observers (batch query).
+func (db *DB) GetObserverPacketCounts(sinceEpoch int64) map[string]int {
+	counts := make(map[string]int)
+	var rows *sql.Rows
+	var err error
+	if db.isV3 {
+		rows, err = db.conn.Query(`SELECT obs.id, COUNT(*) as cnt
+			FROM observations o
+			JOIN observers obs ON obs.rowid = o.observer_idx
+			WHERE o.timestamp > ?
+			GROUP BY obs.id`, sinceEpoch)
+	} else {
+		rows, err = db.conn.Query(`SELECT o.observer_id, COUNT(*) as cnt
+			FROM observations o
+			WHERE o.observer_id IS NOT NULL AND o.timestamp > ?
+			GROUP BY o.observer_id`, sinceEpoch)
+	}
+	if err != nil {
+		return counts
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var cnt int
+		rows.Scan(&id, &cnt)
+		counts[id] = cnt
+	}
+	return counts
+}
+
+// GetNodeLocations returns a map of lowercase public_key → {lat, lon, role} for node geo lookups.
+func (db *DB) GetNodeLocations() map[string]map[string]interface{} {
+	result := make(map[string]map[string]interface{})
+	rows, err := db.conn.Query("SELECT public_key, lat, lon, role FROM nodes")
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pk string
+		var role sql.NullString
+		var lat, lon sql.NullFloat64
+		rows.Scan(&pk, &lat, &lon, &role)
+		result[strings.ToLower(pk)] = map[string]interface{}{
+			"lat":  nullFloat(lat),
+			"lon":  nullFloat(lon),
+			"role": nullStr(role),
+		}
+	}
+	return result
+}
+
+// QueryMultiNodePackets returns transmissions referencing any of the given pubkeys.
+func (db *DB) QueryMultiNodePackets(pubkeys []string, limit, offset int, order, since, until string) (*PacketResult, error) {
+	if len(pubkeys) == 0 {
+		return &PacketResult{Packets: []map[string]interface{}{}, Total: 0}, nil
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if order == "" {
+		order = "DESC"
+	}
+
+	// Build OR conditions for decoded_json LIKE %pubkey%
+	var conditions []string
+	var args []interface{}
+	for _, pk := range pubkeys {
+		// Resolve pubkey to also check by name
+		resolved := db.resolveNodePubkey(pk)
+		conditions = append(conditions, "t.decoded_json LIKE ?")
+		args = append(args, "%"+resolved+"%")
+	}
+	jsonWhere := "(" + strings.Join(conditions, " OR ") + ")"
+
+	var timeFilters []string
+	if since != "" {
+		timeFilters = append(timeFilters, "t.first_seen >= ?")
+		args = append(args, since)
+	}
+	if until != "" {
+		timeFilters = append(timeFilters, "t.first_seen <= ?")
+		args = append(args, until)
+	}
+
+	w := "WHERE " + jsonWhere
+	if len(timeFilters) > 0 {
+		w += " AND " + strings.Join(timeFilters, " AND ")
+	}
+
+	var total int
+	db.conn.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM transmissions t %s", w), args...).Scan(&total)
+
+	selectCols, observerJoin := db.transmissionBaseSQL()
+	querySQL := fmt.Sprintf("SELECT %s FROM transmissions t %s %s ORDER BY t.first_seen %s LIMIT ? OFFSET ?",
+		selectCols, observerJoin, w, order)
+
+	qArgs := make([]interface{}, len(args))
+	copy(qArgs, args)
+	qArgs = append(qArgs, limit, offset)
+
+	rows, err := db.conn.Query(querySQL, qArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	packets := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		p := db.scanTransmissionRow(rows)
+		if p != nil {
+			packets = append(packets, p)
+		}
+	}
+	return &PacketResult{Packets: packets, Total: total}, nil
+}
+
 // --- Helpers ---
 
 func scanPacketRow(rows *sql.Rows) map[string]interface{} {
@@ -1241,6 +1407,20 @@ func nullStr(ns sql.NullString) interface{} {
 		return ns.String
 	}
 	return nil
+}
+
+func nullStrVal(ns sql.NullString) string {
+	if ns.Valid {
+		return ns.String
+	}
+	return ""
+}
+
+func nilIfEmpty(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 func nullFloat(nf sql.NullFloat64) interface{} {

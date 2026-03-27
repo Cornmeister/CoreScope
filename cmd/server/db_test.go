@@ -91,33 +91,41 @@ func setupTestDB(t *testing.T) *DB {
 
 func seedTestData(t *testing.T, db *DB) {
 	t.Helper()
+	// Use recent timestamps so 7-day window filters don't exclude test data
+	now := time.Now().UTC()
+	recent := now.Add(-1 * time.Hour).Format(time.RFC3339)
+	yesterday := now.Add(-24 * time.Hour).Format(time.RFC3339)
+	twoDaysAgo := now.Add(-48 * time.Hour).Format(time.RFC3339)
+	recentEpoch := now.Add(-1 * time.Hour).Unix()
+	yesterdayEpoch := now.Add(-24 * time.Hour).Unix()
+
 	// Seed observers
 	db.conn.Exec(`INSERT INTO observers (id, name, iata, last_seen, first_seen, packet_count)
-		VALUES ('obs1', 'Observer One', 'SJC', '2026-01-15T10:00:00Z', '2026-01-01T00:00:00Z', 100)`)
+		VALUES ('obs1', 'Observer One', 'SJC', ?, '2026-01-01T00:00:00Z', 100)`, recent)
 	db.conn.Exec(`INSERT INTO observers (id, name, iata, last_seen, first_seen, packet_count)
-		VALUES ('obs2', 'Observer Two', 'SFO', '2026-01-15T09:00:00Z', '2026-01-01T00:00:00Z', 50)`)
+		VALUES ('obs2', 'Observer Two', 'SFO', ?, '2026-01-01T00:00:00Z', 50)`, yesterday)
 
 	// Seed nodes
 	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen, advert_count)
-		VALUES ('aabbccdd11223344', 'TestRepeater', 'repeater', 37.5, -122.0, '2026-01-15T10:00:00Z', '2026-01-01T00:00:00Z', 50)`)
+		VALUES ('aabbccdd11223344', 'TestRepeater', 'repeater', 37.5, -122.0, ?, '2026-01-01T00:00:00Z', 50)`, recent)
 	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen, advert_count)
-		VALUES ('eeff00112233aabb', 'TestCompanion', 'companion', 37.6, -122.1, '2026-01-15T09:00:00Z', '2026-01-01T00:00:00Z', 10)`)
+		VALUES ('eeff00112233aabb', 'TestCompanion', 'companion', 37.6, -122.1, ?, '2026-01-01T00:00:00Z', 10)`, yesterday)
 	db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen, advert_count)
-		VALUES ('1122334455667788', 'TestRoom', 'room', 37.4, -121.9, '2026-01-14T10:00:00Z', '2026-01-01T00:00:00Z', 5)`)
+		VALUES ('1122334455667788', 'TestRoom', 'room', 37.4, -121.9, ?, '2026-01-01T00:00:00Z', 5)`, twoDaysAgo)
 
 	// Seed transmissions
 	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json)
-		VALUES ('AABB', 'abc123def4567890', '2026-01-15T10:00:00Z', 1, 4, '{"pubKey":"aabbccdd11223344","name":"TestRepeater","type":"ADVERT"}')`)
+		VALUES ('AABB', 'abc123def4567890', ?, 1, 4, '{"pubKey":"aabbccdd11223344","name":"TestRepeater","type":"ADVERT"}')`, recent)
 	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json)
-		VALUES ('CCDD', '1234567890abcdef', '2026-01-15T09:30:00Z', 1, 5, '{"type":"CHAN","channel":"#test","text":"Hello: World","sender":"TestUser"}')`)
+		VALUES ('CCDD', '1234567890abcdef', ?, 1, 5, '{"type":"CHAN","channel":"#test","text":"Hello: World","sender":"TestUser"}')`, yesterday)
 
 	// Seed observations (use unix timestamps)
 	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
-		VALUES (1, 1, 12.5, -90, '["aa","bb"]', 1736935200)`)
+		VALUES (1, 1, 12.5, -90, '["aa","bb"]', ?)`, recentEpoch)
 	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
-		VALUES (1, 2, 8.0, -95, '["aa"]', 1736935100)`)
+		VALUES (1, 2, 8.0, -95, '["aa"]', ?)`, recentEpoch-100)
 	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
-		VALUES (2, 1, 15.0, -85, '[]', 1736933400)`)
+		VALUES (2, 1, 15.0, -85, '[]', ?)`, yesterdayEpoch)
 }
 
 func TestGetStats(t *testing.T) {
