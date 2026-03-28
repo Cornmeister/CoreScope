@@ -1,4 +1,4 @@
-# Volume paths unified with manage.sh — see manage.sh lines 9-12, 55-62, 920, 944
+# All container config lives here. manage.sh is just a wrapper around docker compose.
 # Override defaults via .env or environment variables.
 # CRITICAL: All data mounts use bind mounts (~/path), NOT named volumes.
 # This ensures the DB and theme are visible on the host filesystem for backup.
