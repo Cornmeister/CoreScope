@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 // payloadTypeNames maps payload_type int → human-readable name (firmware-standard).
@@ -1538,6 +1539,25 @@ func filterTxSlice(s []*StoreTx, fn func(*StoreTx) bool) []*StoreTx {
 	return result
 }
 
+// countNonPrintable counts characters that are non-printable (< 0x20 except \n, \t)
+// or invalid UTF-8 replacement characters. Mirrors the heuristic from #197.
+func countNonPrintable(s string) int {
+	count := 0
+	for _, r := range s {
+		if r < 0x20 && r != '\n' && r != '\t' {
+			count++
+		} else if r == utf8.RuneError {
+			count++
+		}
+	}
+	return count
+}
+
+// hasGarbageChars returns true if the string contains garbage (non-printable) data.
+func hasGarbageChars(s string) bool {
+	return s != "" && (!utf8.ValidString(s) || countNonPrintable(s) > 2)
+}
+
 // GetChannels returns channel list from in-memory packets (payload_type 5, decoded type CHAN).
 func (s *PacketStore) GetChannels(region string) []map[string]interface{} {
 	s.mu.RLock()
@@ -1586,6 +1606,10 @@ func (s *PacketStore) GetChannels(region string) []map[string]interface{} {
 			continue
 		}
 		if decoded.Type != "CHAN" {
+			continue
+		}
+		// Filter out garbage-decrypted channel names/messages (pre-#197 data still in DB)
+		if hasGarbageChars(decoded.Channel) || hasGarbageChars(decoded.Text) {
 			continue
 		}
 

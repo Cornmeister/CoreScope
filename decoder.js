@@ -360,7 +360,7 @@ function validateAdvert(advert) {
   return { valid: true };
 }
 
-module.exports = { decodePacket, validateAdvert, ROUTE_TYPES, PAYLOAD_TYPES, VALID_ROLES };
+module.exports = { decodePacket, validateAdvert, hasNonPrintableChars, ROUTE_TYPES, PAYLOAD_TYPES, VALID_ROLES };
 
 // --- Tests ---
 if (require.main === module) {

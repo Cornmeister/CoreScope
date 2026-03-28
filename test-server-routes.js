@@ -121,6 +121,28 @@ function seedTestData() {
   try { pktStore.insert(chanPkt2); } catch {}
   try { db.insertTransmission(chanPkt2); } catch {}
 
+  // Seed a CHAN packet with garbage-decrypted name (pre-#197 data) — should be filtered out
+  const garbageChanPkt = {
+    raw_hex: 'GARBAGE0CHANNEL1',
+    timestamp: now, observer_id: 'test-obs-1', observer_name: 'TestObs', snr: 2, rssi: -95,
+    hash: 'test-hash-garbage-chan', route_type: 0, payload_type: 5, payload_version: 1,
+    path_json: JSON.stringify([]),
+    decoded_json: JSON.stringify({ type: 'CHAN', channel: 'garb\x01\x02\x03age', text: 'SomeUser: hello\x04\x05\x06', sender: 'SomeUser' }),
+  };
+  try { pktStore.insert(garbageChanPkt); } catch {}
+  try { db.insertTransmission(garbageChanPkt); } catch {}
+
+  // Seed a CHAN packet with clean name but garbage text — should also be filtered out
+  const garbageTextPkt = {
+    raw_hex: 'GARBAGE0TEXT0001',
+    timestamp: now, observer_id: 'test-obs-1', observer_name: 'TestObs', snr: 2, rssi: -95,
+    hash: 'test-hash-garbage-text', route_type: 0, payload_type: 5, payload_version: 1,
+    path_json: JSON.stringify([]),
+    decoded_json: JSON.stringify({ type: 'CHAN', channel: 'cleanChan', text: '\x00\x01\x02\x03garbage binary', sender: 'User' }),
+  };
+  try { pktStore.insert(garbageTextPkt); } catch {}
+  try { db.insertTransmission(garbageTextPkt); } catch {}
+
   // Packet with sender_key/recipient_key for peer interaction coverage in db.getNodeAnalytics
   const peerPkt = {
     raw_hex: 'DEADBEEF00112233',
@@ -434,6 +456,17 @@ seedTestData();
   await t('GET /api/channels', async () => {
     const r = await request(app).get('/api/channels').expect(200);
     assert(typeof r.body === 'object', 'should return channels');
+  });
+
+  await t('GET /api/channels filters garbage channel names', async () => {
+    cache.clear();
+    const r = await request(app).get('/api/channels').expect(200);
+    const names = r.body.channels.map(c => c.name);
+    assert(!names.some(n => n.includes('\x01') || n.includes('\x02') || n.includes('\x03')),
+      'garbage channel names should be filtered out');
+    assert(!names.includes('cleanChan'),
+      'channels with garbage text should be filtered out');
+    assert(names.includes('ch01'), 'valid channel ch01 should still be present');
   });
 
   await t('GET /api/channels with region', async () => {

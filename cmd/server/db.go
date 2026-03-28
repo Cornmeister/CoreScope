@@ -1218,6 +1218,12 @@ func (db *DB) GetChannels() ([]map[string]interface{}, error) {
 		if dtype != "CHAN" {
 			continue
 		}
+		// Filter out garbage-decrypted channel names/messages (pre-#197 data still in DB)
+		chanStr, _ := decoded["channel"].(string)
+		textStr, _ := decoded["text"].(string)
+		if hasGarbageChars(chanStr) || hasGarbageChars(textStr) {
+			continue
+		}
 		channelName, _ := decoded["channel"].(string)
 		if channelName == "" {
 			channelName = "unknown"
