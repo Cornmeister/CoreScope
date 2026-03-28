@@ -1101,6 +1101,18 @@ func (s *Server) handleNodeAnalytics(w http.ResponseWriter, r *http.Request) {
 		days = 365
 	}
 
+	// Use in-memory store when available (fast path)
+	if s.store != nil {
+		result, err := s.store.GetNodeAnalytics(pubkey, days)
+		if err != nil || result == nil {
+			writeError(w, 404, "Not found")
+			return
+		}
+		writeJSON(w, result)
+		return
+	}
+
+	// Fallback: SQL path (no in-memory store)
 	node, err := s.db.GetNodeByPubkey(pubkey)
 	if err != nil || node == nil {
 		writeError(w, 404, "Not found")
