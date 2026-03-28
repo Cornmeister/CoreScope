@@ -165,7 +165,8 @@ func NewPoller(db *DB, hub *Hub, interval time.Duration) *Poller {
 
 func (p *Poller) Start() {
 	lastID := p.db.GetMaxTransmissionID()
-	log.Printf("[poller] starting from transmission ID %d, interval %v", lastID, p.interval)
+	lastObsID := p.db.GetMaxObservationID()
+	log.Printf("[poller] starting from transmission ID %d, obs ID %d, interval %v", lastID, lastObsID, p.interval)
 
 	ticker := time.NewTicker(p.interval)
 	defer ticker.Stop()
@@ -174,10 +175,15 @@ func (p *Poller) Start() {
 		select {
 		case <-ticker.C:
 			if p.store != nil {
-				// Ingest into in-memory store and broadcast
+				// Ingest new transmissions into in-memory store and broadcast
 				newTxs, newMax := p.store.IngestNewFromDB(lastID, 100)
 				if newMax > lastID {
 					lastID = newMax
+				}
+				// Ingest new observations for existing transmissions (fixes #174)
+				newObsMax := p.store.IngestNewObservations(lastObsID, 500)
+				if newObsMax > lastObsID {
+					lastObsID = newObsMax
 				}
 				if len(newTxs) > 0 {
 					log.Printf("[broadcast] sending %d packets to %d clients (lastID now %d)", len(newTxs), p.hub.ClientCount(), lastID)

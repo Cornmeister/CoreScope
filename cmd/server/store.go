@@ -991,6 +991,159 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 	return result, newMaxID
 }
 
+// IngestNewObservations loads new observations for transmissions already in the
+// store. This catches observations that arrive after IngestNewFromDB has already
+// advanced past the transmission's ID (fixes #174).
+func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) int {
+	if limit <= 0 {
+		limit = 500
+	}
+
+	var querySQL string
+	if s.db.isV3 {
+		querySQL = `SELECT o.id, o.transmission_id, obs.id, obs.name, o.direction,
+				o.snr, o.rssi, o.score, o.path_json, datetime(o.timestamp, 'unixepoch')
+			FROM observations o
+			LEFT JOIN observers obs ON obs.rowid = o.observer_idx
+			WHERE o.id > ?
+			ORDER BY o.id ASC
+			LIMIT ?`
+	} else {
+		querySQL = `SELECT o.id, o.transmission_id, o.observer_id, o.observer_name, o.direction,
+				o.snr, o.rssi, o.score, o.path_json, o.timestamp
+			FROM observations o
+			WHERE o.id > ?
+			ORDER BY o.id ASC
+			LIMIT ?`
+	}
+
+	rows, err := s.db.conn.Query(querySQL, sinceObsID, limit)
+	if err != nil {
+		log.Printf("[store] ingest observations query error: %v", err)
+		return sinceObsID
+	}
+	defer rows.Close()
+
+	type obsRow struct {
+		obsID        int
+		txID         int
+		observerID   string
+		observerName string
+		direction    string
+		snr, rssi    *float64
+		score        *int
+		pathJSON     string
+		timestamp    string
+	}
+
+	var obsRows []obsRow
+	for rows.Next() {
+		var oid, txID int
+		var observerID, observerName, direction, pathJSON, ts sql.NullString
+		var snr, rssi sql.NullFloat64
+		var score sql.NullInt64
+
+		if err := rows.Scan(&oid, &txID, &observerID, &observerName, &direction,
+			&snr, &rssi, &score, &pathJSON, &ts); err != nil {
+			continue
+		}
+
+		obsRows = append(obsRows, obsRow{
+			obsID:        oid,
+			txID:         txID,
+			observerID:   nullStrVal(observerID),
+			observerName: nullStrVal(observerName),
+			direction:    nullStrVal(direction),
+			snr:          nullFloatPtr(snr),
+			rssi:         nullFloatPtr(rssi),
+			score:        nullIntPtr(score),
+			pathJSON:     nullStrVal(pathJSON),
+			timestamp:    nullStrVal(ts),
+		})
+	}
+
+	if len(obsRows) == 0 {
+		return sinceObsID
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	newMaxObsID := sinceObsID
+	updatedTxs := make(map[int]*StoreTx)
+
+	for _, r := range obsRows {
+		if r.obsID > newMaxObsID {
+			newMaxObsID = r.obsID
+		}
+
+		// Already ingested (e.g. by IngestNewFromDB in same cycle)
+		if _, exists := s.byObsID[r.obsID]; exists {
+			continue
+		}
+
+		tx := s.byTxID[r.txID]
+		if tx == nil {
+			continue // transmission not yet in store
+		}
+
+		// Dedup by observer + path
+		isDupe := false
+		for _, existing := range tx.Observations {
+			if existing.ObserverID == r.observerID && existing.PathJSON == r.pathJSON {
+				isDupe = true
+				break
+			}
+		}
+		if isDupe {
+			continue
+		}
+
+		obs := &StoreObs{
+			ID:             r.obsID,
+			TransmissionID: r.txID,
+			ObserverID:     r.observerID,
+			ObserverName:   r.observerName,
+			Direction:      r.direction,
+			SNR:            r.snr,
+			RSSI:           r.rssi,
+			Score:          r.score,
+			PathJSON:       r.pathJSON,
+			Timestamp:      r.timestamp,
+		}
+		tx.Observations = append(tx.Observations, obs)
+		tx.ObservationCount++
+		s.byObsID[r.obsID] = obs
+		if r.observerID != "" {
+			s.byObserver[r.observerID] = append(s.byObserver[r.observerID], obs)
+		}
+		s.totalObs++
+		updatedTxs[r.txID] = tx
+	}
+
+	// Re-pick best observation for updated transmissions
+	for _, tx := range updatedTxs {
+		pickBestObservation(tx)
+	}
+
+	if len(updatedTxs) > 0 {
+		// Invalidate analytics caches
+		s.cacheMu.Lock()
+		s.rfCache = make(map[string]*cachedResult)
+		s.topoCache = make(map[string]*cachedResult)
+		s.hashCache = make(map[string]*cachedResult)
+		s.chanCache = make(map[string]*cachedResult)
+		s.distCache = make(map[string]*cachedResult)
+		s.subpathCache = make(map[string]*cachedResult)
+		s.cacheMu.Unlock()
+
+		log.Printf("[poller] IngestNewObservations: updated %d existing txs, maxObsID %d->%d",
+			len(updatedTxs), sinceObsID, newMaxObsID)
+	}
+
+	return newMaxObsID
+}
+
 // MaxTransmissionID returns the highest transmission ID in the store.
 func (s *PacketStore) MaxTransmissionID() int {
 	s.mu.RLock()

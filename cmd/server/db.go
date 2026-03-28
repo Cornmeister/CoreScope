@@ -1488,6 +1488,13 @@ func (db *DB) GetMaxTransmissionID() int {
 	return maxID
 }
 
+// GetMaxObservationID returns the current max observation ID for polling.
+func (db *DB) GetMaxObservationID() int {
+	var maxID int
+	db.conn.QueryRow("SELECT COALESCE(MAX(id), 0) FROM observations").Scan(&maxID)
+	return maxID
+}
+
 // GetObserverPacketCounts returns packetsLastHour for all observers (batch query).
 func (db *DB) GetObserverPacketCounts(sinceEpoch int64) map[string]int {
 	counts := make(map[string]int)

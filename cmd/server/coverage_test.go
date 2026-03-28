@@ -3356,6 +3356,128 @@ func TestIngestNewFromDBDuplicateObs(t *testing.T) {
 	}
 }
 
+// --- IngestNewObservations (fixes #174) ---
+
+func TestIngestNewObservations(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	seedTestData(t, db)
+	store := NewPacketStore(db)
+	store.Load()
+
+	// Get initial observation count for transmission 1 (hash abc123def4567890)
+	initialTx := store.byHash["abc123def4567890"]
+	if initialTx == nil {
+		t.Fatal("expected to find transmission abc123def4567890 in store")
+	}
+	initialObsCount := initialTx.ObservationCount
+	if initialObsCount != 2 {
+		t.Fatalf("expected 2 initial observations, got %d", initialObsCount)
+	}
+
+	// Record the max obs ID after initial load
+	maxObsID := db.GetMaxObservationID()
+
+	// Simulate a new observation arriving for the existing transmission AFTER
+	// the poller has already advanced past its transmission ID
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (1, 2, 5.0, -100, '["aa","bb","cc"]', ?)`, time.Now().Unix())
+
+	// Verify IngestNewFromDB does NOT pick up the new observation (tx id hasn't changed)
+	txMax := store.MaxTransmissionID()
+	_, newTxMax := store.IngestNewFromDB(txMax, 100)
+	if initialTx.ObservationCount != initialObsCount {
+		t.Errorf("IngestNewFromDB should not have changed obs count, was %d now %d",
+			initialObsCount, initialTx.ObservationCount)
+	}
+	_ = newTxMax
+
+	// IngestNewObservations should pick it up
+	newObsMax := store.IngestNewObservations(maxObsID, 500)
+	if newObsMax <= maxObsID {
+		t.Errorf("expected newObsMax > %d, got %d", maxObsID, newObsMax)
+	}
+	if initialTx.ObservationCount != initialObsCount+1 {
+		t.Errorf("expected obs count %d, got %d", initialObsCount+1, initialTx.ObservationCount)
+	}
+	if len(initialTx.Observations) != initialObsCount+1 {
+		t.Errorf("expected %d observations slice len, got %d", initialObsCount+1, len(initialTx.Observations))
+	}
+
+	// Best observation should have been re-picked (new obs has longer path)
+	if initialTx.PathJSON != `["aa","bb","cc"]` {
+		t.Errorf("expected best path to be updated to longer path, got %s", initialTx.PathJSON)
+	}
+
+	t.Run("no new observations", func(t *testing.T) {
+		max := store.IngestNewObservations(newObsMax, 500)
+		if max != newObsMax {
+			t.Errorf("expected same max %d, got %d", newObsMax, max)
+		}
+	})
+
+	t.Run("dedup by observer+path", func(t *testing.T) {
+		// Insert duplicate observation (same observer + path as existing)
+		db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+			VALUES (1, 1, 12.5, -90, '["aa","bb"]', ?)`, time.Now().Unix())
+		prevCount := initialTx.ObservationCount
+		newMax2 := store.IngestNewObservations(newObsMax, 500)
+		if initialTx.ObservationCount != prevCount {
+			t.Errorf("duplicate obs should not increase count, was %d now %d",
+				prevCount, initialTx.ObservationCount)
+		}
+		_ = newMax2
+	})
+
+	t.Run("default limit", func(t *testing.T) {
+		_ = store.IngestNewObservations(newObsMax, 0)
+	})
+}
+
+func TestIngestNewObservationsV2(t *testing.T) {
+	db := setupTestDBv2(t)
+	defer db.Close()
+	seedV2Data(t, db)
+	store := NewPacketStore(db)
+	store.Load()
+
+	tx := store.byHash["abc123def4567890"]
+	if tx == nil {
+		t.Fatal("expected to find transmission in store")
+	}
+	initialCount := tx.ObservationCount
+
+	maxObsID := db.GetMaxObservationID()
+
+	// Add new observation for existing transmission
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_id, observer_name, snr, rssi, path_json, timestamp)
+		VALUES (1, 'obs2', 'Obs Two', 6.0, -98, '["dd","ee"]', ?)`, time.Now().Unix())
+
+	newMax := store.IngestNewObservations(maxObsID, 500)
+	if newMax <= maxObsID {
+		t.Errorf("expected newMax > %d, got %d", maxObsID, newMax)
+	}
+	if tx.ObservationCount != initialCount+1 {
+		t.Errorf("expected obs count %d, got %d", initialCount+1, tx.ObservationCount)
+	}
+}
+
+func TestGetMaxObservationID(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	maxID := db.GetMaxObservationID()
+	if maxID != 0 {
+		t.Errorf("expected 0 for empty table, got %d", maxID)
+	}
+
+	seedTestData(t, db)
+	maxID = db.GetMaxObservationID()
+	if maxID <= 0 {
+		t.Errorf("expected positive max obs ID, got %d", maxID)
+	}
+}
+
 // --- perfMiddleware with endpoint normalization ---
 
 func TestPerfMiddlewareEndpointNormalization(t *testing.T) {
