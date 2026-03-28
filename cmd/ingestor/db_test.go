@@ -141,11 +141,11 @@ func TestUpsertNode(t *testing.T) {
 		t.Errorf("after upsert name=%s, want UpdatedNode", name)
 	}
 
-	// Verify advert_count incremented
+	// UpsertNode does not modify advert_count (IncrementAdvertCount is separate)
 	var count int
 	s.db.QueryRow("SELECT advert_count FROM nodes WHERE public_key = 'aabbccdd'").Scan(&count)
-	if count != 2 {
-		t.Errorf("advert_count=%d, want 2", count)
+	if count != 0 {
+		t.Errorf("advert_count=%d, want 0 (UpsertNode does not increment)", count)
 	}
 }
 
