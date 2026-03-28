@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -40,6 +41,13 @@ func main() {
 	}
 	defer store.Close()
 	log.Printf("SQLite opened: %s", cfg.DBPath)
+
+	channelKeys := loadChannelKeys(cfg, *configPath)
+	if len(channelKeys) > 0 {
+		log.Printf("Loaded %d channel keys for GRP_TXT decryption", len(channelKeys))
+	} else {
+		log.Printf("No channel keys loaded — GRP_TXT packets will not be decrypted")
+	}
 
 	// Connect to each MQTT source
 	var clients []mqtt.Client
@@ -91,7 +99,7 @@ func main() {
 		// Capture source for closure
 		src := source
 		opts.SetDefaultPublishHandler(func(c mqtt.Client, m mqtt.Message) {
-			handleMessage(store, tag, src, m)
+			handleMessage(store, tag, src, m, channelKeys)
 		})
 
 		client := mqtt.NewClient(opts)
@@ -122,7 +130,7 @@ func main() {
 	log.Println("Done.")
 }
 
-func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message) {
+func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, channelKeys map[string]string) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("MQTT [%s] panic in handler: %v", tag, r)
@@ -172,7 +180,7 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message) 
 	// Format 1: Raw packet (meshcoretomqtt / Cisien format)
 	rawHex, _ := msg["raw"].(string)
 	if rawHex != "" {
-		decoded, err := DecodePacket(rawHex)
+		decoded, err := DecodePacket(rawHex, channelKeys)
 		if err != nil {
 			log.Printf("MQTT [%s] decode error: %v", tag, err)
 			return
@@ -416,6 +424,41 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// loadChannelKeys loads channel decryption keys from config and/or a JSON file.
+// Priority: CHANNEL_KEYS_PATH env var > cfg.ChannelKeysPath > channel-rainbow.json next to config.
+func loadChannelKeys(cfg *Config, configPath string) map[string]string {
+	keys := make(map[string]string)
+
+	// Determine file path for rainbow keys
+	keysPath := os.Getenv("CHANNEL_KEYS_PATH")
+	if keysPath == "" {
+		keysPath = cfg.ChannelKeysPath
+	}
+	if keysPath == "" {
+		// Default: look for channel-rainbow.json next to config file
+		keysPath = filepath.Join(filepath.Dir(configPath), "channel-rainbow.json")
+	}
+
+	if data, err := os.ReadFile(keysPath); err == nil {
+		var fileKeys map[string]string
+		if err := json.Unmarshal(data, &fileKeys); err == nil {
+			for k, v := range fileKeys {
+				keys[k] = v
+			}
+			log.Printf("Loaded %d channel keys from %s", len(fileKeys), keysPath)
+		} else {
+			log.Printf("Warning: failed to parse channel keys file %s: %v", keysPath, err)
+		}
+	}
+
+	// Merge inline config keys (override file keys)
+	for k, v := range cfg.ChannelKeys {
+		keys[k] = v
+	}
+
+	return keys
 }
 
 // Version info (set via ldflags)

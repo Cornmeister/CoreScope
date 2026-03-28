@@ -214,7 +214,7 @@ func TestEndToEndIngest(t *testing.T) {
 	// Simulate full pipeline: decode + insert
 	rawHex := "120046D62DE27D4C5194D7821FC5A34A45565DCC2537B300B9AB6275255CEFB65D840CE5C169C94C9AED39E8BCB6CB6EB0335497A198B33A1A610CD3B03D8DCFC160900E5244280323EE0B44CACAB8F02B5B38B91CFA18BD067B0B5E63E94CFC85F758A8530B9240933402E0E6B8F84D5252322D52"
 
-	decoded, err := DecodePacket(rawHex)
+	decoded, err := DecodePacket(rawHex, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func TestInsertTransmissionNilSNRRSSI(t *testing.T) {
 
 func TestBuildPacketData(t *testing.T) {
 	rawHex := "0A00D69FD7A5A7475DB07337749AE61FA53A4788E976"
-	decoded, err := DecodePacket(rawHex)
+	decoded, err := DecodePacket(rawHex, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,7 +456,7 @@ func TestBuildPacketData(t *testing.T) {
 func TestBuildPacketDataWithHops(t *testing.T) {
 	// A packet with actual hops in the path
 	raw := "0505AABBCCDDEE" + strings.Repeat("00", 10)
-	decoded, err := DecodePacket(raw)
+	decoded, err := DecodePacket(raw, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +472,7 @@ func TestBuildPacketDataWithHops(t *testing.T) {
 }
 
 func TestBuildPacketDataNilSNRRSSI(t *testing.T) {
-	decoded, _ := DecodePacket("0A00" + strings.Repeat("00", 10))
+	decoded, _ := DecodePacket("0A00", nil + strings.Repeat("00", 10))
 	msg := &MQTTPacketMessage{Raw: "0A00" + strings.Repeat("00", 10)}
 	pkt := BuildPacketData(msg, decoded, "", "")
 

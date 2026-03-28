@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/aes"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -109,6 +111,12 @@ type Payload struct {
 	Lon           *float64     `json:"lon,omitempty"`
 	Name          string       `json:"name,omitempty"`
 	ChannelHash   int          `json:"channelHash,omitempty"`
+	ChannelHashHex   string    `json:"channelHashHex,omitempty"`
+	DecryptionStatus string    `json:"decryptionStatus,omitempty"`
+	Channel          string    `json:"channel,omitempty"`
+	Text             string    `json:"text,omitempty"`
+	Sender           string    `json:"sender,omitempty"`
+	SenderTimestamp  uint32    `json:"sender_timestamp,omitempty"`
 	EphemeralPubKey string     `json:"ephemeralPubKey,omitempty"`
 	PathData      string       `json:"pathData,omitempty"`
 	Tag           uint32       `json:"tag,omitempty"`
@@ -252,15 +260,137 @@ func decodeAdvert(buf []byte) Payload {
 	return p
 }
 
-func decodeGrpTxt(buf []byte) Payload {
+// channelDecryptResult holds the decrypted channel message fields.
+type channelDecryptResult struct {
+	Timestamp uint32
+	Flags     byte
+	Sender    string
+	Message   string
+}
+
+// decryptChannelMessage implements MeshCore channel decryption:
+// HMAC-SHA256 MAC verification followed by AES-128-ECB decryption.
+func decryptChannelMessage(ciphertextHex, macHex, channelKeyHex string) (*channelDecryptResult, error) {
+	channelKey, err := hex.DecodeString(channelKeyHex)
+	if err != nil || len(channelKey) != 16 {
+		return nil, fmt.Errorf("invalid channel key")
+	}
+
+	macBytes, err := hex.DecodeString(macHex)
+	if err != nil || len(macBytes) != 2 {
+		return nil, fmt.Errorf("invalid MAC")
+	}
+
+	ciphertext, err := hex.DecodeString(ciphertextHex)
+	if err != nil || len(ciphertext) == 0 {
+		return nil, fmt.Errorf("invalid ciphertext")
+	}
+
+	// 32-byte channel secret: 16-byte key + 16 zero bytes
+	channelSecret := make([]byte, 32)
+	copy(channelSecret, channelKey)
+
+	// Verify HMAC-SHA256 (first 2 bytes must match provided MAC)
+	h := hmac.New(sha256.New, channelSecret)
+	h.Write(ciphertext)
+	calculatedMac := h.Sum(nil)
+	if calculatedMac[0] != macBytes[0] || calculatedMac[1] != macBytes[1] {
+		return nil, fmt.Errorf("MAC verification failed")
+	}
+
+	// AES-128-ECB decrypt (block-by-block, no padding)
+	if len(ciphertext)%aes.BlockSize != 0 {
+		return nil, fmt.Errorf("ciphertext not aligned to AES block size")
+	}
+	block, err := aes.NewCipher(channelKey)
+	if err != nil {
+		return nil, fmt.Errorf("AES cipher: %w", err)
+	}
+	plaintext := make([]byte, len(ciphertext))
+	for i := 0; i < len(ciphertext); i += aes.BlockSize {
+		block.Decrypt(plaintext[i:i+aes.BlockSize], ciphertext[i:i+aes.BlockSize])
+	}
+
+	// Parse: timestamp(4 LE) + flags(1) + message(UTF-8, null-terminated)
+	if len(plaintext) < 5 {
+		return nil, fmt.Errorf("decrypted content too short")
+	}
+	timestamp := binary.LittleEndian.Uint32(plaintext[0:4])
+	flags := plaintext[4]
+	messageText := string(plaintext[5:])
+	if idx := strings.IndexByte(messageText, 0); idx >= 0 {
+		messageText = messageText[:idx]
+	}
+
+	result := &channelDecryptResult{Timestamp: timestamp, Flags: flags}
+
+	// Parse "sender: message" format
+	colonIdx := strings.Index(messageText, ": ")
+	if colonIdx > 0 && colonIdx < 50 {
+		potentialSender := messageText[:colonIdx]
+		if !strings.ContainsAny(potentialSender, ":[]") {
+			result.Sender = potentialSender
+			result.Message = messageText[colonIdx+2:]
+		} else {
+			result.Message = messageText
+		}
+	} else {
+		result.Message = messageText
+	}
+
+	return result, nil
+}
+
+func decodeGrpTxt(buf []byte, channelKeys map[string]string) Payload {
 	if len(buf) < 3 {
 		return Payload{Type: "GRP_TXT", Error: "too short", RawHex: hex.EncodeToString(buf)}
 	}
+
+	channelHash := int(buf[0])
+	channelHashHex := fmt.Sprintf("%02X", buf[0])
+	mac := hex.EncodeToString(buf[1:3])
+	encryptedData := hex.EncodeToString(buf[3:])
+
+	hasKeys := len(channelKeys) > 0
+	// Match Node.js: only attempt decryption if encrypted data >= 5 bytes (10 hex chars)
+	if hasKeys && len(encryptedData) >= 10 {
+		for name, key := range channelKeys {
+			result, err := decryptChannelMessage(encryptedData, mac, key)
+			if err != nil {
+				continue
+			}
+			text := result.Message
+			if result.Sender != "" && result.Message != "" {
+				text = result.Sender + ": " + result.Message
+			}
+			return Payload{
+				Type:             "CHAN",
+				Channel:          name,
+				ChannelHash:      channelHash,
+				ChannelHashHex:   channelHashHex,
+				DecryptionStatus: "decrypted",
+				Sender:           result.Sender,
+				Text:             text,
+				SenderTimestamp:  result.Timestamp,
+			}
+		}
+		return Payload{
+			Type:             "GRP_TXT",
+			ChannelHash:      channelHash,
+			ChannelHashHex:   channelHashHex,
+			DecryptionStatus: "decryption_failed",
+			MAC:              mac,
+			EncryptedData:    encryptedData,
+		}
+	}
+
 	return Payload{
-		Type:          "GRP_TXT",
-		ChannelHash:   int(buf[0]),
-		MAC:           hex.EncodeToString(buf[1:3]),
-		EncryptedData: hex.EncodeToString(buf[3:]),
+		Type:             "GRP_TXT",
+		ChannelHash:      channelHash,
+		ChannelHashHex:   channelHashHex,
+		DecryptionStatus: "no_key",
+		MAC:              mac,
+		EncryptedData:    encryptedData,
 	}
 }
 
@@ -302,7 +432,7 @@ func decodeTrace(buf []byte) Payload {
 	}
 }
 
-func decodePayload(payloadType int, buf []byte) Payload {
+func decodePayload(payloadType int, buf []byte, channelKeys map[string]string) Payload {
 	switch payloadType {
 	case PayloadREQ:
 		return decodeEncryptedPayload("REQ", buf)
@@ -315,7 +445,7 @@ func decodePayload(payloadType int, buf []byte) Payload {
 	case PayloadADVERT:
 		return decodeAdvert(buf)
 	case PayloadGRP_TXT:
-		return decodeGrpTxt(buf)
+		return decodeGrpTxt(buf, channelKeys)
 	case PayloadANON_REQ:
 		return decodeAnonReq(buf)
 	case PayloadPATH:
@@ -328,7 +458,7 @@ func decodePayload(payloadType int, buf []byte) Payload {
 }
 
 // DecodePacket decodes a hex-encoded MeshCore packet.
-func DecodePacket(hexString string) (*DecodedPacket, error) {
+func DecodePacket(hexString string, channelKeys map[string]string) (*DecodedPacket, error) {
 	hexString = strings.ReplaceAll(hexString, " ", "")
 	hexString = strings.ReplaceAll(hexString, "\n", "")
 	hexString = strings.ReplaceAll(hexString, "\r", "")
@@ -361,7 +491,7 @@ func DecodePacket(hexString string) (*DecodedPacket, error) {
 	offset += bytesConsumed
 
 	payloadBuf := buf[offset:]
-	payload := decodePayload(header.PayloadType, payloadBuf)
+	payload := decodePayload(header.PayloadType, payloadBuf, channelKeys)
 
 	return &DecodedPacket{
 		Header:         header,

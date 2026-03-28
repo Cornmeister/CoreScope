@@ -26,10 +26,12 @@ type MQTTLegacy struct {
 
 // Config holds the ingestor configuration, compatible with the Node.js config.json format.
 type Config struct {
-	DBPath      string       `json:"dbPath"`
-	MQTT        *MQTTLegacy  `json:"mqtt,omitempty"`
-	MQTTSources []MQTTSource `json:"mqttSources,omitempty"`
-	LogLevel    string       `json:"logLevel,omitempty"`
+	DBPath         string            `json:"dbPath"`
+	MQTT           *MQTTLegacy       `json:"mqtt,omitempty"`
+	MQTTSources    []MQTTSource      `json:"mqttSources,omitempty"`
+	LogLevel       string            `json:"logLevel,omitempty"`
+	ChannelKeysPath string           `json:"channelKeysPath,omitempty"`
+	ChannelKeys    map[string]string `json:"channelKeys,omitempty"`
 }
 
 // LoadConfig reads configuration from a JSON file, with env var overrides.

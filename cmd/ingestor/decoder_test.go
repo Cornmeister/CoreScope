@@ -1,6 +1,11 @@
 package main
 
 import (
+	"crypto/aes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"math"
 	"strings"
 	"testing"
@@ -50,7 +55,7 @@ func TestDecodeHeaderPayloadTypes(t *testing.T) {
 
 func TestDecodePathZeroHops(t *testing.T) {
 	// 0x00: 0 hops, 1-byte hashes
-	pkt, err := DecodePacket("0500" + strings.Repeat("00", 10))
+	pkt, err := DecodePacket("0500", nil + strings.Repeat("00", 10))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +72,7 @@ func TestDecodePathZeroHops(t *testing.T) {
 
 func TestDecodePath1ByteHashes(t *testing.T) {
 	// 0x05: 5 hops, 1-byte hashes → 5 path bytes
-	pkt, err := DecodePacket("0505" + "AABBCCDDEE" + strings.Repeat("00", 10))
+	pkt, err := DecodePacket("0505", nil + "AABBCCDDEE" + strings.Repeat("00", 10))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +95,7 @@ func TestDecodePath1ByteHashes(t *testing.T) {
 
 func TestDecodePath2ByteHashes(t *testing.T) {
 	// 0x45: 5 hops, 2-byte hashes
-	pkt, err := DecodePacket("0545" + "AA11BB22CC33DD44EE55" + strings.Repeat("00", 10))
+	pkt, err := DecodePacket("0545", nil + "AA11BB22CC33DD44EE55" + strings.Repeat("00", 10))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +112,7 @@ func TestDecodePath2ByteHashes(t *testing.T) {
 
 func TestDecodePath3ByteHashes(t *testing.T) {
 	// 0x8A: 10 hops, 3-byte hashes
-	pkt, err := DecodePacket("058A" + strings.Repeat("AA11FF", 10) + strings.Repeat("00", 10))
+	pkt, err := DecodePacket("058A", nil + strings.Repeat("AA11FF", 10) + strings.Repeat("00", 10))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +130,7 @@ func TestDecodePath3ByteHashes(t *testing.T) {
 func TestTransportCodes(t *testing.T) {
 	// Route type 0 (TRANSPORT_FLOOD) should have transport codes
 	hex := "1400" + "AABB" + "CCDD" + "1A" + strings.Repeat("00", 10)
-	pkt, err := DecodePacket(hex)
+	pkt, err := DecodePacket(hex, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +148,7 @@ func TestTransportCodes(t *testing.T) {
 	}
 
 	// Route type 1 (FLOOD) should NOT have transport codes
-	pkt2, err := DecodePacket("0500" + strings.Repeat("00", 10))
+	pkt2, err := DecodePacket("0500", nil + strings.Repeat("00", 10))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +168,7 @@ func TestDecodeAdvertFull(t *testing.T) {
 	name := "546573744E6F6465" // "TestNode"
 
 	hex := "1200" + pubkey + timestamp + signature + flags + lat + lon + name
-	pkt, err := DecodePacket(hex)
+	pkt, err := DecodePacket(hex, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +226,7 @@ func TestDecodeAdvertTypeEnums(t *testing.T) {
 	makeAdvert := func(flagsByte byte) *DecodedPacket {
 		hex := "1200" + strings.Repeat("AA", 32) + "00000000" + strings.Repeat("BB", 64) +
 			strings.ToUpper(string([]byte{hexDigit(flagsByte>>4), hexDigit(flagsByte & 0x0f)}))
-		pkt, err := DecodePacket(hex)
+		pkt, err := DecodePacket(hex, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -266,7 +271,7 @@ func hexDigit(v byte) byte {
 
 func TestDecodeAdvertNoLocationNoName(t *testing.T) {
 	hex := "1200" + strings.Repeat("CC", 32) + "00000000" + strings.Repeat("DD", 64) + "02"
-	pkt, err := DecodePacket(hex)
+	pkt, err := DecodePacket(hex, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +290,7 @@ func TestDecodeAdvertNoLocationNoName(t *testing.T) {
 }
 
 func TestGoldenFixtureTxtMsg(t *testing.T) {
-	pkt, err := DecodePacket("0A00D69FD7A5A7475DB07337749AE61FA53A4788E976")
+	pkt, err := DecodePacket("0A00D69FD7A5A7475DB07337749AE61FA53A4788E976", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +313,7 @@ func TestGoldenFixtureTxtMsg(t *testing.T) {
 
 func TestGoldenFixtureAdvert(t *testing.T) {
 	rawHex := "120046D62DE27D4C5194D7821FC5A34A45565DCC2537B300B9AB6275255CEFB65D840CE5C169C94C9AED39E8BCB6CB6EB0335497A198B33A1A610CD3B03D8DCFC160900E5244280323EE0B44CACAB8F02B5B38B91CFA18BD067B0B5E63E94CFC85F758A8530B9240933402E0E6B8F84D5252322D52"
-	pkt, err := DecodePacket(rawHex)
+	pkt, err := DecodePacket(rawHex, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +336,7 @@ func TestGoldenFixtureAdvert(t *testing.T) {
 
 func TestGoldenFixtureUnicodeAdvert(t *testing.T) {
 	rawHex := "120073CFF971E1CB5754A742C152B2D2E0EB108A19B246D663ED8898A72C4A5AD86EA6768E66694B025EDF6939D5C44CFF719C5D5520E5F06B20680A83AD9C2C61C3227BBB977A85EE462F3553445FECF8EDD05C234ECE217272E503F14D6DF2B1B9B133890C923CDF3002F8FDC1F85045414BF09F8CB3"
-	pkt, err := DecodePacket(rawHex)
+	pkt, err := DecodePacket(rawHex, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,14 +353,14 @@ func TestGoldenFixtureUnicodeAdvert(t *testing.T) {
 }
 
 func TestDecodePacketTooShort(t *testing.T) {
-	_, err := DecodePacket("FF")
+	_, err := DecodePacket("FF", nil)
 	if err == nil {
 		t.Error("expected error for 1-byte packet")
 	}
 }
 
 func TestDecodePacketInvalidHex(t *testing.T) {
-	_, err := DecodePacket("ZZZZ")
+	_, err := DecodePacket("ZZZZ", nil)
 	if err == nil {
 		t.Error("expected error for invalid hex")
 	}
@@ -438,7 +443,7 @@ func TestValidateAdvert(t *testing.T) {
 }
 
 func TestDecodeGrpTxtShort(t *testing.T) {
-	p := decodeGrpTxt([]byte{0x01, 0x02})
+	p := decodeGrpTxt([]byte{0x01, 0x02}, nil)
 	if p.Error != "too short" {
 		t.Errorf("expected 'too short' error, got %q", p.Error)
 	}
@@ -448,7 +453,7 @@ func TestDecodeGrpTxtShort(t *testing.T) {
 }
 
 func TestDecodeGrpTxtValid(t *testing.T) {
-	p := decodeGrpTxt([]byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE})
+	p := decodeGrpTxt([]byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE}, nil)
 	if p.Error != "" {
 		t.Errorf("unexpected error: %s", p.Error)
 	}
@@ -587,7 +592,7 @@ func TestDecodeEncryptedPayloadValid(t *testing.T) {
 
 func TestDecodePayloadGRPData(t *testing.T) {
 	buf := []byte{0x01, 0x02, 0x03}
-	p := decodePayload(PayloadGRP_DATA, buf)
+	p := decodePayload(PayloadGRP_DATA, buf, nil)
 	if p.Type != "UNKNOWN" {
 		t.Errorf("type=%s, want UNKNOWN", p.Type)
 	}
@@ -598,7 +603,7 @@ func TestDecodePayloadGRPData(t *testing.T) {
 
 func TestDecodePayloadRAWCustom(t *testing.T) {
 	buf := []byte{0xFF, 0xFE}
-	p := decodePayload(PayloadRAW_CUSTOM, buf)
+	p := decodePayload(PayloadRAW_CUSTOM, buf, nil)
 	if p.Type != "UNKNOWN" {
 		t.Errorf("type=%s, want UNKNOWN", p.Type)
 	}
@@ -606,49 +611,49 @@ func TestDecodePayloadRAWCustom(t *testing.T) {
 
 func TestDecodePayloadAllTypes(t *testing.T) {
 	// REQ
-	p := decodePayload(PayloadREQ, make([]byte, 10))
+	p := decodePayload(PayloadREQ, make([]byte, 10, nil))
 	if p.Type != "REQ" {
 		t.Errorf("REQ: type=%s", p.Type)
 	}
 
 	// RESPONSE
-	p = decodePayload(PayloadRESPONSE, make([]byte, 10))
+	p = decodePayload(PayloadRESPONSE, make([]byte, 10, nil))
 	if p.Type != "RESPONSE" {
 		t.Errorf("RESPONSE: type=%s", p.Type)
 	}
 
 	// TXT_MSG
-	p = decodePayload(PayloadTXT_MSG, make([]byte, 10))
+	p = decodePayload(PayloadTXT_MSG, make([]byte, 10, nil))
 	if p.Type != "TXT_MSG" {
 		t.Errorf("TXT_MSG: type=%s", p.Type)
 	}
 
 	// ACK
-	p = decodePayload(PayloadACK, make([]byte, 10))
+	p = decodePayload(PayloadACK, make([]byte, 10, nil))
 	if p.Type != "ACK" {
 		t.Errorf("ACK: type=%s", p.Type)
 	}
 
 	// GRP_TXT
-	p = decodePayload(PayloadGRP_TXT, make([]byte, 10))
+	p = decodePayload(PayloadGRP_TXT, make([]byte, 10, nil))
 	if p.Type != "GRP_TXT" {
 		t.Errorf("GRP_TXT: type=%s", p.Type)
 	}
 
 	// ANON_REQ
-	p = decodePayload(PayloadANON_REQ, make([]byte, 40))
+	p = decodePayload(PayloadANON_REQ, make([]byte, 40, nil))
 	if p.Type != "ANON_REQ" {
 		t.Errorf("ANON_REQ: type=%s", p.Type)
 	}
 
 	// PATH
-	p = decodePayload(PayloadPATH, make([]byte, 10))
+	p = decodePayload(PayloadPATH, make([]byte, 10, nil))
 	if p.Type != "PATH" {
 		t.Errorf("PATH: type=%s", p.Type)
 	}
 
 	// TRACE
-	p = decodePayload(PayloadTRACE, make([]byte, 20))
+	p = decodePayload(PayloadTRACE, make([]byte, 20, nil))
 	if p.Type != "TRACE" {
 		t.Errorf("TRACE: type=%s", p.Type)
 	}
@@ -887,7 +892,7 @@ func TestComputeContentHashLongFallback(t *testing.T) {
 
 func TestDecodePacketWithWhitespace(t *testing.T) {
 	raw := "0A 00 D6 9F D7 A5 A7 47 5D B0 73 37 74 9A E6 1F A5 3A 47 88 E9 76"
-	pkt, err := DecodePacket(raw)
+	pkt, err := DecodePacket(raw, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -898,7 +903,7 @@ func TestDecodePacketWithWhitespace(t *testing.T) {
 
 func TestDecodePacketWithNewlines(t *testing.T) {
 	raw := "0A00\nD69F\r\nD7A5A7475DB07337749AE61FA53A4788E976"
-	pkt, err := DecodePacket(raw)
+	pkt, err := DecodePacket(raw, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -909,7 +914,7 @@ func TestDecodePacketWithNewlines(t *testing.T) {
 
 func TestDecodePacketTransportRouteTooShort(t *testing.T) {
 	// TRANSPORT_FLOOD (route=0) but only 3 bytes total → too short for transport codes
-	_, err := DecodePacket("140011")
+	_, err := DecodePacket("140011", nil)
 	if err == nil {
 		t.Error("expected error for transport route with too-short buffer")
 	}
@@ -966,7 +971,7 @@ func TestDecodeHeaderUnknownTypes(t *testing.T) {
 
 func TestDecodePayloadMultipart(t *testing.T) {
 	// MULTIPART (0x0A) falls through to default → UNKNOWN
-	p := decodePayload(PayloadMULTIPART, []byte{0x01, 0x02})
+	p := decodePayload(PayloadMULTIPART, []byte{0x01, 0x02}, nil)
 	if p.Type != "UNKNOWN" {
 		t.Errorf("MULTIPART type=%s, want UNKNOWN", p.Type)
 	}
@@ -974,7 +979,7 @@ func TestDecodePayloadMultipart(t *testing.T) {
 
 func TestDecodePayloadControl(t *testing.T) {
 	// CONTROL (0x0B) falls through to default → UNKNOWN
-	p := decodePayload(PayloadCONTROL, []byte{0x01, 0x02})
+	p := decodePayload(PayloadCONTROL, []byte{0x01, 0x02}, nil)
 	if p.Type != "UNKNOWN" {
 		t.Errorf("CONTROL type=%s, want UNKNOWN", p.Type)
 	}
@@ -998,7 +1003,7 @@ func TestDecodePathTruncatedBuffer(t *testing.T) {
 func TestDecodeFloodAdvert5Hops(t *testing.T) {
 	// From test-decoder.js Test 1
 	raw := "11451000D818206D3AAC152C8A91F89957E6D30CA51F36E28790228971C473B755F244F718754CF5EE4A2FD58D944466E42CDED140C66D0CC590183E32BAF40F112BE8F3F2BDF6012B4B2793C52F1D36F69EE054D9A05593286F78453E56C0EC4A3EB95DDA2A7543FCCC00B939CACC009278603902FC12BCF84B706120526F6F6620536F6C6172"
-	pkt, err := DecodePacket(raw)
+	pkt, err := DecodePacket(raw, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1022,5 +1027,274 @@ func TestDecodeFloodAdvert5Hops(t *testing.T) {
 	}
 	if pkt.TransportCodes != nil {
 		t.Error("FLOOD should have no transport codes")
+	}
+}
+
+// --- Channel decryption tests ---
+
+// buildTestCiphertext creates a valid AES-128-ECB encrypted GRP_TXT payload
+// with a matching HMAC-SHA256 MAC for testing.
+func buildTestCiphertext(channelKeyHex, senderMsg string, timestamp uint32) (ciphertextHex, macHex string) {
+	channelKey, _ := hex.DecodeString(channelKeyHex)
+
+	// Build plaintext: timestamp(4 LE) + flags(1) + message
+	plain := make([]byte, 4+1+len(senderMsg))
+	binary.LittleEndian.PutUint32(plain[0:4], timestamp)
+	plain[4] = 0x00 // flags
+	copy(plain[5:], senderMsg)
+
+	// Pad to AES block boundary
+	pad := aes.BlockSize - (len(plain) % aes.BlockSize)
+	if pad != aes.BlockSize {
+		plain = append(plain, make([]byte, pad)...)
+	}
+
+	// AES-128-ECB encrypt
+	block, _ := aes.NewCipher(channelKey)
+	ct := make([]byte, len(plain))
+	for i := 0; i < len(plain); i += aes.BlockSize {
+		block.Encrypt(ct[i:i+aes.BlockSize], plain[i:i+aes.BlockSize])
+	}
+
+	// HMAC-SHA256 MAC (first 2 bytes)
+	secret := make([]byte, 32)
+	copy(secret, channelKey)
+	h := hmac.New(sha256.New, secret)
+	h.Write(ct)
+	mac := h.Sum(nil)
+
+	return hex.EncodeToString(ct), hex.EncodeToString(mac[:2])
+}
+
+func TestDecryptChannelMessageValid(t *testing.T) {
+	key := "2cc3d22840e086105ad73443da2cacb8"
+	ctHex, macHex := buildTestCiphertext(key, "Alice: Hello world", 1700000000)
+
+	result, err := decryptChannelMessage(ctHex, macHex, key)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Sender != "Alice" {
+		t.Errorf("sender=%q, want Alice", result.Sender)
+	}
+	if result.Message != "Hello world" {
+		t.Errorf("message=%q, want 'Hello world'", result.Message)
+	}
+	if result.Timestamp != 1700000000 {
+		t.Errorf("timestamp=%d, want 1700000000", result.Timestamp)
+	}
+}
+
+func TestDecryptChannelMessageMACFail(t *testing.T) {
+	key := "2cc3d22840e086105ad73443da2cacb8"
+	ctHex, _ := buildTestCiphertext(key, "Alice: Hello", 100)
+	wrongMac := "ffff"
+
+	_, err := decryptChannelMessage(ctHex, wrongMac, key)
+	if err == nil {
+		t.Fatal("expected MAC verification failure")
+	}
+	if !strings.Contains(err.Error(), "MAC") {
+		t.Errorf("error should mention MAC: %v", err)
+	}
+}
+
+func TestDecryptChannelMessageWrongKey(t *testing.T) {
+	key := "2cc3d22840e086105ad73443da2cacb8"
+	ctHex, macHex := buildTestCiphertext(key, "Alice: Hello", 100)
+	wrongKey := "deadbeefdeadbeefdeadbeefdeadbeef"
+
+	_, err := decryptChannelMessage(ctHex, macHex, wrongKey)
+	if err == nil {
+		t.Fatal("expected error with wrong key")
+	}
+}
+
+func TestDecryptChannelMessageNoSender(t *testing.T) {
+	key := "aaaabbbbccccddddaaaabbbbccccdddd"
+	ctHex, macHex := buildTestCiphertext(key, "Just a message", 500)
+
+	result, err := decryptChannelMessage(ctHex, macHex, key)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Sender != "" {
+		t.Errorf("sender=%q, want empty", result.Sender)
+	}
+	if result.Message != "Just a message" {
+		t.Errorf("message=%q, want 'Just a message'", result.Message)
+	}
+}
+
+func TestDecryptChannelMessageSenderWithBrackets(t *testing.T) {
+	key := "aaaabbbbccccddddaaaabbbbccccdddd"
+	ctHex, macHex := buildTestCiphertext(key, "[admin]: Not a sender", 500)
+
+	result, err := decryptChannelMessage(ctHex, macHex, key)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Sender != "" {
+		t.Errorf("sender=%q, want empty (brackets disqualify)", result.Sender)
+	}
+	if result.Message != "[admin]: Not a sender" {
+		t.Errorf("message=%q", result.Message)
+	}
+}
+
+func TestDecryptChannelMessageInvalidKey(t *testing.T) {
+	_, err := decryptChannelMessage("aabb", "cc", "ZZZZ")
+	if err == nil {
+		t.Fatal("expected error for invalid key hex")
+	}
+}
+
+func TestDecryptChannelMessageShortKey(t *testing.T) {
+	_, err := decryptChannelMessage("aabb", "cc", "aabb")
+	if err == nil {
+		t.Fatal("expected error for short key")
+	}
+}
+
+func TestDecodeGrpTxtWithDecryption(t *testing.T) {
+	key := "2cc3d22840e086105ad73443da2cacb8"
+	ctHex, macHex := buildTestCiphertext(key, "Bob: Testing 123", 1700000000)
+	macBytes, _ := hex.DecodeString(macHex)
+	ctBytes, _ := hex.DecodeString(ctHex)
+
+	// Build GRP_TXT payload: channelHash(1) + MAC(2) + encrypted
+	buf := []byte{0xAA}
+	buf = append(buf, macBytes...)
+	buf = append(buf, ctBytes...)
+
+	keys := map[string]string{"#test": key}
+	p := decodeGrpTxt(buf, keys)
+
+	if p.Type != "CHAN" {
+		t.Errorf("type=%s, want CHAN", p.Type)
+	}
+	if p.DecryptionStatus != "decrypted" {
+		t.Errorf("decryptionStatus=%s, want decrypted", p.DecryptionStatus)
+	}
+	if p.Channel != "#test" {
+		t.Errorf("channel=%s, want #test", p.Channel)
+	}
+	if p.Sender != "Bob" {
+		t.Errorf("sender=%q, want Bob", p.Sender)
+	}
+	if p.Text != "Bob: Testing 123" {
+		t.Errorf("text=%q, want 'Bob: Testing 123'", p.Text)
+	}
+	if p.ChannelHash != 0xAA {
+		t.Errorf("channelHash=%d, want 0xAA", p.ChannelHash)
+	}
+	if p.ChannelHashHex != "AA" {
+		t.Errorf("channelHashHex=%s, want AA", p.ChannelHashHex)
+	}
+	if p.SenderTimestamp != 1700000000 {
+		t.Errorf("senderTimestamp=%d, want 1700000000", p.SenderTimestamp)
+	}
+}
+
+func TestDecodeGrpTxtDecryptionFailed(t *testing.T) {
+	key := "2cc3d22840e086105ad73443da2cacb8"
+	ctHex, macHex := buildTestCiphertext(key, "Hello", 100)
+	macBytes, _ := hex.DecodeString(macHex)
+	ctBytes, _ := hex.DecodeString(ctHex)
+
+	buf := []byte{0xFF}
+	buf = append(buf, macBytes...)
+	buf = append(buf, ctBytes...)
+
+	wrongKeys := map[string]string{"#wrong": "deadbeefdeadbeefdeadbeefdeadbeef"}
+	p := decodeGrpTxt(buf, wrongKeys)
+
+	if p.Type != "GRP_TXT" {
+		t.Errorf("type=%s, want GRP_TXT", p.Type)
+	}
+	if p.DecryptionStatus != "decryption_failed" {
+		t.Errorf("decryptionStatus=%s, want decryption_failed", p.DecryptionStatus)
+	}
+	if p.ChannelHashHex != "FF" {
+		t.Errorf("channelHashHex=%s, want FF", p.ChannelHashHex)
+	}
+}
+
+func TestDecodeGrpTxtNoKey(t *testing.T) {
+	buf := []byte{0x03, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22}
+	p := decodeGrpTxt(buf, nil)
+
+	if p.Type != "GRP_TXT" {
+		t.Errorf("type=%s, want GRP_TXT", p.Type)
+	}
+	if p.DecryptionStatus != "no_key" {
+		t.Errorf("decryptionStatus=%s, want no_key", p.DecryptionStatus)
+	}
+	if p.ChannelHashHex != "03" {
+		t.Errorf("channelHashHex=%s, want 03", p.ChannelHashHex)
+	}
+}
+
+func TestDecodeGrpTxtEmptyKeys(t *testing.T) {
+	buf := []byte{0xFF, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22}
+	p := decodeGrpTxt(buf, map[string]string{})
+
+	if p.DecryptionStatus != "no_key" {
+		t.Errorf("decryptionStatus=%s, want no_key", p.DecryptionStatus)
+	}
+}
+
+func TestDecodeGrpTxtShortEncryptedNoDecryptAttempt(t *testing.T) {
+	// encryptedData < 5 bytes (10 hex chars) → should not attempt decryption
+	buf := []byte{0xFF, 0xAA, 0xBB, 0xCC, 0xDD}
+	keys := map[string]string{"#test": "2cc3d22840e086105ad73443da2cacb8"}
+	p := decodeGrpTxt(buf, keys)
+
+	if p.DecryptionStatus != "no_key" {
+		t.Errorf("decryptionStatus=%s, want no_key (too short for decryption)", p.DecryptionStatus)
+	}
+}
+
+func TestDecodeGrpTxtMultipleKeysTriesAll(t *testing.T) {
+	correctKey := "2cc3d22840e086105ad73443da2cacb8"
+	ctHex, macHex := buildTestCiphertext(correctKey, "Eve: Found it", 999)
+	macBytes, _ := hex.DecodeString(macHex)
+	ctBytes, _ := hex.DecodeString(ctHex)
+
+	buf := []byte{0x01}
+	buf = append(buf, macBytes...)
+	buf = append(buf, ctBytes...)
+
+	keys := map[string]string{
+		"#wrong1":  "deadbeefdeadbeefdeadbeefdeadbeef",
+		"#correct": correctKey,
+		"#wrong2":  "11111111111111111111111111111111",
+	}
+	p := decodeGrpTxt(buf, keys)
+
+	if p.Type != "CHAN" {
+		t.Errorf("type=%s, want CHAN", p.Type)
+	}
+	if p.Channel != "#correct" {
+		t.Errorf("channel=%s, want #correct", p.Channel)
+	}
+	if p.Sender != "Eve" {
+		t.Errorf("sender=%q, want Eve", p.Sender)
+	}
+}
+
+func TestDecodeGrpTxtChannelHashHexZeroPad(t *testing.T) {
+	buf := []byte{0x03, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE}
+	p := decodeGrpTxt(buf, nil)
+	if p.ChannelHashHex != "03" {
+		t.Errorf("channelHashHex=%s, want 03 (zero-padded)", p.ChannelHashHex)
+	}
+}
+
+func TestDecodeGrpTxtChannelHashHexFF(t *testing.T) {
+	buf := []byte{0xFF, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE}
+	p := decodeGrpTxt(buf, nil)
+	if p.ChannelHashHex != "FF" {
+		t.Errorf("channelHashHex=%s, want FF", p.ChannelHashHex)
 	}
 }
