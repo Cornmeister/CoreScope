@@ -447,6 +447,61 @@ console.log('\nstats exclude phantom nodes:');
   assert(statsAfter.totalNodesAllTime === countBefore, 'phantom removed from totalNodesAllTime');
 }
 
+// --- moveStaleNodes ---
+console.log('\nmoveStaleNodes:');
+{
+  // Verify inactive_nodes table exists
+  const tables = db.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name);
+  assert(tables.includes('inactive_nodes'), 'inactive_nodes table exists');
+
+  // Verify inactive_nodes has same columns as nodes
+  const nodesCols = db.db.pragma('table_info(nodes)').map(c => c.name).sort();
+  const inactiveCols = db.db.pragma('table_info(inactive_nodes)').map(c => c.name).sort();
+  assert(JSON.stringify(nodesCols) === JSON.stringify(inactiveCols), 'inactive_nodes has same columns as nodes');
+
+  // Insert a stale node (last_seen 30 days ago) and a fresh node
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600000).toISOString();
+  const now = new Date().toISOString();
+  db.upsertNode({ public_key: 'stale00000000000000000000stale000', name: 'StaleNode', role: 'repeater', last_seen: thirtyDaysAgo, first_seen: thirtyDaysAgo });
+  db.upsertNode({ public_key: 'fresh00000000000000000000fresh000', name: 'FreshNode', role: 'companion', last_seen: now, first_seen: now });
+
+  // Verify both exist in nodes
+  assert(db.getNode('stale00000000000000000000stale000') !== null, 'stale node exists before move');
+  assert(db.getNode('fresh00000000000000000000fresh000') !== null, 'fresh node exists before move');
+
+  // Move stale nodes (7 day threshold)
+  const moved = db.moveStaleNodes(7);
+  assert(moved >= 1, `moveStaleNodes moved at least 1 node (got ${moved})`);
+
+  // Stale node should be gone from nodes
+  assert(db.getNode('stale00000000000000000000stale000') === null, 'stale node removed from nodes');
+
+  // Fresh node should still be in nodes
+  assert(db.getNode('fresh00000000000000000000fresh000') !== null, 'fresh node still in nodes');
+
+  // Stale node should be in inactive_nodes
+  const inactive = db.db.prepare('SELECT * FROM inactive_nodes WHERE public_key = ?').get('stale00000000000000000000stale000');
+  assert(inactive !== null, 'stale node exists in inactive_nodes');
+  assert(inactive.name === 'StaleNode', 'stale node name preserved in inactive_nodes');
+  assert(inactive.role === 'repeater', 'stale node role preserved in inactive_nodes');
+
+  // Fresh node should NOT be in inactive_nodes
+  const freshInactive = db.db.prepare('SELECT * FROM inactive_nodes WHERE public_key = ?').get('fresh00000000000000000000fresh000');
+  assert(!freshInactive, 'fresh node not in inactive_nodes');
+
+  // Running again should move 0 (already moved)
+  const moved2 = db.moveStaleNodes(7);
+  assert(moved2 === 0, 'second moveStaleNodes moves nothing');
+
+  // With nodeDays=0 should be a no-op
+  const moved3 = db.moveStaleNodes(0);
+  assert(moved3 === 0, 'moveStaleNodes(0) is a no-op');
+
+  // With null should be a no-op
+  const moved4 = db.moveStaleNodes(null);
+  assert(moved4 === 0, 'moveStaleNodes(null) is a no-op');
+}
+
 cleanup();
 delete process.env.DB_PATH;
 

@@ -32,6 +32,20 @@ type Config struct {
 	LogLevel       string            `json:"logLevel,omitempty"`
 	ChannelKeysPath string           `json:"channelKeysPath,omitempty"`
 	ChannelKeys    map[string]string `json:"channelKeys,omitempty"`
+	Retention      *RetentionConfig  `json:"retention,omitempty"`
+}
+
+// RetentionConfig controls how long stale nodes are kept before being moved to inactive_nodes.
+type RetentionConfig struct {
+	NodeDays int `json:"nodeDays"`
+}
+
+// NodeDaysOrDefault returns the configured retention.nodeDays or 7 if not set.
+func (c *Config) NodeDaysOrDefault() int {
+	if c.Retention != nil && c.Retention.NodeDays > 0 {
+		return c.Retention.NodeDays
+	}
+	return 7
 }
 
 // LoadConfig reads configuration from a JSON file, with env var overrides.

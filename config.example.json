@@ -1,6 +1,10 @@
 {
   "port": 3000,
   "apiKey": "your-secret-api-key-here",
+  "retention": {
+    "nodeDays": 7,
+    "_comment": "Nodes not seen in this many days are moved to inactive_nodes table. Default 7."
+  },
   "https": {
     "cert": "/path/to/cert.pem",
     "key": "/path/to/key.pem"

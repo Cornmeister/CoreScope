@@ -476,6 +476,13 @@ setInterval(() => {
   }
 }, 60000).unref();
 
+// --- Node Retention: move stale nodes to inactive_nodes ---
+const RETENTION_NODE_DAYS = (config.retention && config.retention.nodeDays) || 7;
+db.moveStaleNodes(RETENTION_NODE_DAYS);
+setInterval(() => {
+  db.moveStaleNodes(RETENTION_NODE_DAYS);
+}, 24 * 3600000).unref();
+
 // --- Health / Telemetry Endpoint ---
 app.get('/api/health', (req, res) => {
   const mem = process.memoryUsage();

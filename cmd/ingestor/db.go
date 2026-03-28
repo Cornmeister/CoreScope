@@ -87,6 +87,19 @@ func applySchema(db *sql.DB) error {
 		CREATE INDEX IF NOT EXISTS idx_nodes_last_seen ON nodes(last_seen);
 		CREATE INDEX IF NOT EXISTS idx_observers_last_seen ON observers(last_seen);
 
+		CREATE TABLE IF NOT EXISTS inactive_nodes (
+			public_key TEXT PRIMARY KEY,
+			name TEXT,
+			role TEXT,
+			lat REAL,
+			lon REAL,
+			last_seen TEXT,
+			first_seen TEXT,
+			advert_count INTEGER DEFAULT 0
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_inactive_nodes_last_seen ON inactive_nodes(last_seen);
+
 		CREATE TABLE IF NOT EXISTS transmissions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			raw_hex TEXT NOT NULL,
@@ -329,6 +342,34 @@ func (s *Store) UpsertObserver(id, name, iata string) error {
 // Close closes the database.
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// MoveStaleNodes moves nodes not seen in nodeDays to the inactive_nodes table.
+// Returns the number of nodes moved.
+func (s *Store) MoveStaleNodes(nodeDays int) (int64, error) {
+	cutoff := time.Now().UTC().AddDate(0, 0, -nodeDays).Format(time.RFC3339)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(`INSERT OR REPLACE INTO inactive_nodes SELECT * FROM nodes WHERE last_seen < ?`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("insert inactive: %w", err)
+	}
+	result, err := tx.Exec(`DELETE FROM nodes WHERE last_seen < ?`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("delete stale: %w", err)
+	}
+	moved, _ := result.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+	if moved > 0 {
+		log.Printf("Moved %d node(s) to inactive_nodes (not seen in %d days)", moved, nodeDays)
+	}
+	return moved, nil
 }
 
 // PacketData holds the data needed to insert a packet into the DB.

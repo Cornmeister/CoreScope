@@ -52,8 +52,20 @@ db.exec(`
     noise_floor INTEGER
   );
 
+  CREATE TABLE IF NOT EXISTS inactive_nodes (
+    public_key TEXT PRIMARY KEY,
+    name TEXT,
+    role TEXT,
+    lat REAL,
+    lon REAL,
+    last_seen TEXT,
+    first_seen TEXT,
+    advert_count INTEGER DEFAULT 0
+  );
+
   CREATE INDEX IF NOT EXISTS idx_nodes_last_seen ON nodes(last_seen);
   CREATE INDEX IF NOT EXISTS idx_observers_last_seen ON observers(last_seen);
+  CREATE INDEX IF NOT EXISTS idx_inactive_nodes_last_seen ON inactive_nodes(last_seen);
 
   CREATE TABLE IF NOT EXISTS transmissions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -870,4 +882,20 @@ function getNodeAnalytics(pubkey, days) {
   };
 }
 
-module.exports = { db, schemaVersion, observerIdToRowid, resolveObserverIdx, insertTransmission, upsertNode, incrementAdvertCount, upsertObserver, updateObserverStatus, getPackets, getPacket, getTransmission, getNodes, getNode, getObservers, getStats, searchNodes, getNodeHealth, getNodeAnalytics, removePhantomNodes };
+// Move stale nodes to inactive_nodes table based on retention.nodeDays config.
+function moveStaleNodes(nodeDays) {
+  if (!nodeDays || nodeDays <= 0) return 0;
+  const cutoff = new Date(Date.now() - nodeDays * 24 * 3600000).toISOString();
+  const move = db.transaction(() => {
+    db.prepare(`INSERT OR REPLACE INTO inactive_nodes SELECT * FROM nodes WHERE last_seen < ?`).run(cutoff);
+    const result = db.prepare(`DELETE FROM nodes WHERE last_seen < ?`).run(cutoff);
+    return result.changes;
+  });
+  const moved = move();
+  if (moved > 0) {
+    console.log(`[retention] Moved ${moved} node(s) to inactive_nodes (not seen in ${nodeDays} days)`);
+  }
+  return moved;
+}
+
+module.exports = { db, schemaVersion, observerIdToRowid, resolveObserverIdx, insertTransmission, upsertNode, incrementAdvertCount, upsertObserver, updateObserverStatus, getPackets, getPacket, getTransmission, getNodes, getNode, getObservers, getStats, searchNodes, getNodeHealth, getNodeAnalytics, removePhantomNodes, moveStaleNodes };

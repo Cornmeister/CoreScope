@@ -42,6 +42,18 @@ func main() {
 	defer store.Close()
 	log.Printf("SQLite opened: %s", cfg.DBPath)
 
+	// Node retention: move stale nodes to inactive_nodes on startup
+	nodeDays := cfg.NodeDaysOrDefault()
+	store.MoveStaleNodes(nodeDays)
+
+	// Daily ticker for node retention
+	retentionTicker := time.NewTicker(24 * time.Hour)
+	go func() {
+		for range retentionTicker.C {
+			store.MoveStaleNodes(nodeDays)
+		}
+	}()
+
 	channelKeys := loadChannelKeys(cfg, *configPath)
 	if len(channelKeys) > 0 {
 		log.Printf("Loaded %d channel keys for GRP_TXT decryption", len(channelKeys))
@@ -124,6 +136,7 @@ func main() {
 	<-sig
 
 	log.Println("Shutting down...")
+	retentionTicker.Stop()
 	for _, c := range clients {
 		c.Disconnect(1000)
 	}

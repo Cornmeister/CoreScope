@@ -43,6 +43,20 @@ type Config struct {
 	} `json:"liveMap"`
 
 	CacheTTL map[string]interface{} `json:"cacheTTL"`
+
+	Retention *RetentionConfig `json:"retention,omitempty"`
+}
+
+type RetentionConfig struct {
+	NodeDays int `json:"nodeDays"`
+}
+
+// NodeDaysOrDefault returns the configured retention.nodeDays or 7 if not set.
+func (c *Config) NodeDaysOrDefault() int {
+	if c.Retention != nil && c.Retention.NodeDays > 0 {
+		return c.Retention.NodeDays
+	}
+	return 7
 }
 
 type HealthThresholds struct {
