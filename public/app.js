@@ -523,21 +523,21 @@ window.addEventListener('DOMContentLoaded', () => {
         const pktList = packets.packets || packets;
         if (Array.isArray(pktList)) {
           for (const p of pktList.slice(0, 5)) {
-            html += `<div class="search-result-item" onclick="location.hash='#/packets/${p.packet_hash || p.hash || p.id}';document.getElementById('searchOverlay').classList.add('hidden')">
+            html += `<div class="search-result-item" tabindex="0" role="option" data-href="#/packets/${p.packet_hash || p.hash || p.id}">
               <span class="search-result-type">Packet</span>${truncate(p.packet_hash || '', 16)} — ${payloadTypeName(p.payload_type)}</div>`;
           }
         }
         const nodeList = Array.isArray(nodes) ? nodes : (nodes.nodes || []);
         for (const n of nodeList.slice(0, 5)) {
           if (n.name && n.name.toLowerCase().includes(q.toLowerCase())) {
-            html += `<div class="search-result-item" onclick="location.hash='#/nodes/${n.public_key}';document.getElementById('searchOverlay').classList.add('hidden')">
+            html += `<div class="search-result-item" tabindex="0" role="option" data-href="#/nodes/${n.public_key}">
               <span class="search-result-type">Node</span>${n.name} — ${truncate(n.public_key || '', 16)}</div>`;
           }
         }
         const chList = Array.isArray(channels) ? channels : [];
         for (const c of chList) {
           if (c.name && c.name.toLowerCase().includes(q.toLowerCase())) {
-            html += `<div class="search-result-item" onclick="location.hash='#/channels/${c.channel_hash}';document.getElementById('searchOverlay').classList.add('hidden')">
+            html += `<div class="search-result-item" tabindex="0" role="option" data-href="#/channels/${c.channel_hash}">
               <span class="search-result-type">Channel</span>${c.name}</div>`;
           }
         }
@@ -545,6 +545,40 @@ window.addEventListener('DOMContentLoaded', () => {
         searchResults.innerHTML = html;
       } catch { searchResults.innerHTML = '<div class="search-no-results">Search error</div>'; }
     }, 300);
+  });
+
+  // #208 — Search results keyboard: click, Enter/Space, arrow-key navigation
+  function activateSearchItem(item) {
+    if (!item || !item.dataset.href) return;
+    location.hash = item.dataset.href;
+    searchOverlay.classList.add('hidden');
+  }
+  searchResults.addEventListener('click', (e) => {
+    activateSearchItem(e.target.closest('.search-result-item'));
+  });
+  searchResults.addEventListener('keydown', (e) => {
+    const item = e.target.closest('.search-result-item');
+    if (!item) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      activateSearchItem(item);
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      const next = item.nextElementSibling;
+      if (next && next.classList.contains('search-result-item')) next.focus();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const prev = item.previousElementSibling;
+      if (prev && prev.classList.contains('search-result-item')) prev.focus();
+      else searchInput.focus();
+    }
+  });
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      const first = searchResults.querySelector('.search-result-item');
+      if (first) first.focus();
+    }
   });
 
   // --- Login ---
