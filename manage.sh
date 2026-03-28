@@ -597,7 +597,8 @@ cmd_stop() {
         ;;
       all)
         info "Stopping all containers..."
-        docker compose --profile staging down
+        docker compose --profile staging --profile staging-go down 2>/dev/null
+        docker rm -f "$CONTAINER_NAME" 2>/dev/null
         log "All containers stopped."
         ;;
       *)
