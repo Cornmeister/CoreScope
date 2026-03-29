@@ -13,6 +13,10 @@ services:
     image: corescope-go:latest
     container_name: corescope-staging-go
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 3g
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

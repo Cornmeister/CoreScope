@@ -492,8 +492,24 @@ cmd_restart() {
       ;;
     staging)
       info "Restarting staging container (corescope-staging-go)..."
+      # Stop and remove old container
       docker compose -f "$STAGING_COMPOSE_FILE" -p corescope-staging rm -sf staging-go 2>/dev/null || true
       docker rm -f corescope-staging-go 2>/dev/null || true
+      # Wait for container to be fully gone and memory to be reclaimed
+      # This prevents OOM when old + new containers overlap on small VMs
+      for i in $(seq 1 15); do
+        if ! docker ps -a --format '{{.Names}}' | grep -q 'corescope-staging-go'; then
+          break
+        fi
+        sleep 1
+      done
+      sleep 3  # extra pause for OS to reclaim memory
+      # Verify config exists before starting
+      local staging_config="${STAGING_DATA_DIR:-$HOME/meshcore-staging-data}/config.json"
+      if [ ! -f "$staging_config" ]; then
+        warn "Staging config not found at $staging_config — creating from prod config..."
+        prepare_staging_config
+      fi
       docker compose -f "$STAGING_COMPOSE_FILE" -p corescope-staging up -d staging-go
       log "Staging restarted."
       ;;
