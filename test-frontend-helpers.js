@@ -1322,7 +1322,7 @@ console.log('\n=== app.js: formatVersionBadge ===');
     assert.ok(result.includes('>v2.6.0</a>'), 'version text has v prefix');
     assert.ok(result.includes(`href="${GH}/commit/abc1234def5678"`), 'commit links to full hash');
     assert.ok(result.includes('>abc1234</a>'), 'commit display is truncated to 7');
-    assert.ok(result.includes('[node]'), 'should show engine');
+    assert.ok(result.includes('engine-badge'), 'should show engine badge'); assert.ok(result.includes('>node<'), 'should show engine name');
   });
   test('prod port 80: shows version', () => {
     const { formatVersionBadge } = makeBadgeSandbox('80');
@@ -1348,7 +1348,7 @@ console.log('\n=== app.js: formatVersionBadge ===');
     assert.ok(!result.includes('v2.6.0'), 'staging should NOT show version');
     assert.ok(result.includes('>abc1234</a>'), 'should show commit hash');
     assert.ok(result.includes(`href="${GH}/commit/abc1234def5678"`), 'commit is linked');
-    assert.ok(result.includes('[go]'), 'should show engine');
+    assert.ok(result.includes('engine-badge'), 'should show engine badge'); assert.ok(result.includes('>go<'), 'should show engine name');
   });
   test('staging port 81: hides version', () => {
     const { formatVersionBadge } = makeBadgeSandbox('81');
@@ -1369,18 +1369,18 @@ console.log('\n=== app.js: formatVersionBadge ===');
     const result = formatVersionBadge('2.6.0', 'unknown', 'node');
     assert.ok(result.includes('>v2.6.0</a>'), 'should show version');
     assert.ok(!result.includes('unknown'), 'should not show unknown commit');
-    assert.ok(result.includes('[node]'), 'should show engine');
+    assert.ok(result.includes('engine-badge'), 'should show engine badge'); assert.ok(result.includes('>node<'), 'should show engine name');
   });
   test('skips commit when missing', () => {
     const { formatVersionBadge } = makeBadgeSandbox('');
     const result = formatVersionBadge('2.6.0', null, 'go');
     assert.ok(result.includes('>v2.6.0</a>'), 'should show version');
-    assert.ok(result.includes('[go]'), 'should show engine');
+    assert.ok(result.includes('engine-badge'), 'should show engine badge'); assert.ok(result.includes('>go<'), 'should show engine name');
   });
   test('shows only engine when version/commit missing', () => {
     const { formatVersionBadge } = makeBadgeSandbox('3000');
     const result = formatVersionBadge(null, null, 'go');
-    assert.ok(result.includes('[go]'), 'should show engine');
+    assert.ok(result.includes('engine-badge'), 'should show engine badge'); assert.ok(result.includes('>go<'), 'should show engine name');
     assert.ok(result.includes('version-badge'), 'should use version-badge class');
   });
   test('short commit not truncated in display', () => {
@@ -1398,7 +1398,7 @@ console.log('\n=== app.js: formatVersionBadge ===');
     const { formatVersionBadge } = makeBadgeSandbox('8080');
     const result = formatVersionBadge('2.6.0', null, 'go');
     assert.ok(!result.includes('2.6.0'), 'no version on staging');
-    assert.ok(result.includes('[go]'), 'engine shown');
+    assert.ok(result.includes('engine-badge'), 'engine badge shown'); assert.ok(result.includes('>go<'), 'engine name shown');
   });
 }
 
