@@ -122,6 +122,13 @@ jobs:
           echo "| Server | ${SERVER_COV}% |" >> $GITHUB_STEP_SUMMARY
           echo "| Ingestor | ${INGESTOR_COV}% |" >> $GITHUB_STEP_SUMMARY
 
+      - name: Cancel workflow on failure
+        if: failure()
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel"
+
       - name: Upload Go coverage badges
         if: always()
         uses: actions/upload-artifact@v4
@@ -263,6 +270,13 @@ jobs:
           BASE_URL=http://localhost:13581 node test-e2e-playwright.js || true
           kill $SERVER_PID 2>/dev/null || true
 
+      - name: Cancel workflow on failure
+        if: failure()
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel"
+
       - name: Upload Node.js test badges
         if: always()
         uses: actions/upload-artifact@v4
@@ -278,7 +292,7 @@ jobs:
   build:
     name: "🏗️ Build Docker Image"
     if: github.event_name == 'push'
-    needs: [go-test]
+    needs: [go-test, node-test]
     runs-on: self-hosted
     steps:
       - name: Checkout code
