@@ -1309,6 +1309,31 @@ func (s *Server) handleResolveHops(w http.ResponseWriter, r *http.Request) {
 	hops := strings.Split(hopsParam, ",")
 	resolved := map[string]*HopResolution{}
 
+	// Context for affinity-based disambiguation.
+	fromNode := r.URL.Query().Get("from_node")
+	observer := r.URL.Query().Get("observer")
+	var contextPubkeys []string
+	if fromNode != "" {
+		contextPubkeys = append(contextPubkeys, fromNode)
+	}
+	if observer != "" {
+		contextPubkeys = append(contextPubkeys, observer)
+	}
+
+	// Get the neighbor graph for affinity scoring (may be nil).
+	var graph *NeighborGraph
+	if len(contextPubkeys) > 0 {
+		graph = s.getNeighborGraph()
+	}
+
+	// Get the server's prefix map for resolveWithContext.
+	var pm *prefixMap
+	if s.store != nil {
+		s.store.mu.RLock()
+		_, pm = s.store.getCachedNodesAndPM()
+		s.store.mu.RUnlock()
+	}
+
 	for _, hop := range hops {
 		if hop == "" {
 			continue
@@ -1316,7 +1341,7 @@ func (s *Server) handleResolveHops(w http.ResponseWriter, r *http.Request) {
 		hopLower := strings.ToLower(hop)
 		rows, err := s.db.conn.Query("SELECT public_key, name, lat, lon FROM nodes WHERE LOWER(public_key) LIKE ?", hopLower+"%")
 		if err != nil {
-			resolved[hop] = &HopResolution{Name: nil, Candidates: []HopCandidate{}, Conflicts: []interface{}{}}
+			resolved[hop] = &HopResolution{Name: nil, Candidates: []HopCandidate{}, Conflicts: []interface{}{}, Confidence: "ambiguous"}
 			continue
 		}
 
@@ -1334,18 +1359,77 @@ func (s *Server) handleResolveHops(w http.ResponseWriter, r *http.Request) {
 		rows.Close()
 
 		if len(candidates) == 0 {
-			resolved[hop] = &HopResolution{Name: nil, Candidates: []HopCandidate{}, Conflicts: []interface{}{}}
+			resolved[hop] = &HopResolution{Name: nil, Candidates: []HopCandidate{}, Conflicts: []interface{}{}, Confidence: "no_match"}
 		} else if len(candidates) == 1 {
 			resolved[hop] = &HopResolution{
 				Name: candidates[0].Name, Pubkey: candidates[0].Pubkey,
 				Candidates: candidates, Conflicts: []interface{}{},
+				Confidence: "unique_prefix",
 			}
 		} else {
+			// Compute affinity scores for each candidate if we have context.
+			if graph != nil && len(contextPubkeys) > 0 {
+				now := time.Now()
+				for i := range candidates {
+					candPK := strings.ToLower(candidates[i].Pubkey)
+					bestScore := 0.0
+					for _, ctxPK := range contextPubkeys {
+						edges := graph.Neighbors(strings.ToLower(ctxPK))
+						for _, e := range edges {
+							if e.Ambiguous {
+								continue
+							}
+							otherPK := e.NodeA
+							if strings.EqualFold(otherPK, ctxPK) {
+								otherPK = e.NodeB
+							}
+							if strings.EqualFold(otherPK, candPK) {
+								sc := e.Score(now)
+								if sc > bestScore {
+									bestScore = sc
+								}
+							}
+						}
+					}
+					if bestScore > 0 {
+						s := bestScore
+						candidates[i].AffinityScore = &s
+					}
+				}
+			}
+
+			// Use resolveWithContext for 4-tier disambiguation.
+			var best *nodeInfo
+			var confidence string
+			if pm != nil {
+				best, confidence, _ = pm.resolveWithContext(hopLower, contextPubkeys, graph)
+			}
+
 			ambig := true
-			resolved[hop] = &HopResolution{
+			hr := &HopResolution{
 				Name: candidates[0].Name, Pubkey: candidates[0].Pubkey,
 				Ambiguous: &ambig, Candidates: candidates, Conflicts: hopCandidatesToConflicts(candidates),
+				Confidence: "ambiguous",
 			}
+
+			// Use the resolved node as the default (best-effort pick).
+			if best != nil {
+				hr.Name = best.Name
+				hr.Pubkey = best.PublicKey
+			}
+
+			// Only promote to bestCandidate when affinity is confident.
+			if confidence == "neighbor_affinity" && best != nil {
+				pk := best.PublicKey
+				hr.BestCandidate = &pk
+				hr.Confidence = "neighbor_affinity"
+			} else if (confidence == "geo_proximity" || confidence == "gps_preference") && best != nil {
+				// Propagate lower-priority tiers so the API reflects the actual
+				// resolution strategy used, rather than collapsing everything to "ambiguous".
+				hr.Confidence = confidence
+			}
+
+			resolved[hop] = hr
 		}
 	}
 	writeJSON(w, ResolveHopsResponse{Resolved: resolved})
