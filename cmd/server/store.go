@@ -61,6 +61,10 @@ type StoreObs struct {
 	Timestamp      string
 }
 
+// distRebuildInterval is the minimum time between distance index rebuilds
+// to avoid hot-looping on busy meshes.
+const distRebuildInterval = 30 * time.Second
+
 // PacketStore holds all transmissions in memory with indexes for fast queries.
 type PacketStore struct {
 	mu            sync.RWMutex
@@ -117,6 +121,8 @@ type PacketStore struct {
 	// computed during Load() and incrementally updated on ingest.
 	distHops  []distHopRecord
 	distPaths []distPathRecord
+	distDirty bool      // set when paths change; cleared after rebuild
+	distLast  time.Time // last time distance index was rebuilt
 
 	// Cached GetNodeHashSizeInfo result — recomputed at most once every 15s
 	hashSizeInfoMu    sync.Mutex
@@ -329,6 +335,7 @@ func (s *PacketStore) Load() error {
 
 	// Precompute distance analytics (hop distances, path totals)
 	s.buildDistanceIndex()
+	s.distLast = time.Now()
 
 	s.loaded = true
 	elapsed := time.Since(t0)
@@ -1470,25 +1477,29 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		}
 	}
 
-	// Rebuild distance index if any paths changed (distances depend on path hops)
+	// Check if any paths changed (used for both distance rebuild and cache invalidation).
+	hasPathChanges := false
 	for txID, tx := range updatedTxs {
 		if tx.PathJSON != oldPaths[txID] {
-			s.buildDistanceIndex()
+			hasPathChanges = true
 			break
 		}
+	}
+
+	// Mark distance index dirty if any paths changed (rebuild is debounced)
+	if hasPathChanges {
+		s.distDirty = true
+	}
+	if s.distDirty && time.Since(s.distLast) > distRebuildInterval {
+		s.buildDistanceIndex()
+		s.distDirty = false
+		s.distLast = time.Now()
 	}
 
 	if len(updatedTxs) > 0 {
 		// Targeted cache invalidation: new observations always affect RF
 		// analytics; topology/distance/subpath caches only if paths changed.
 		// Channel and hash caches are unaffected by observation-only ingestion.
-		hasPathChanges := false
-		for txID, tx := range updatedTxs {
-			if tx.PathJSON != oldPaths[txID] {
-				hasPathChanges = true
-				break
-			}
-		}
 		s.invalidateCachesFor(cacheInvalidation{
 			hasNewObservations: true,
 			hasNewPaths:        hasPathChanges,
