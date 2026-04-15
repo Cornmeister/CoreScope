@@ -540,7 +540,9 @@
         { q: '🔁 Step 4: Check "Heard N repeats"',
           a: '<ul><li><strong>"Sent"</strong> = transmitted, no confirmation</li><li><strong>"Heard 0 repeats"</strong> = no repeater picked it up</li><li><strong>"Heard 1+ repeats"</strong> = you\'re on the mesh!</li></ul>' },
         { q: '📍 Repeaters near you?',
-          a: '<p><a href="#/map" style="color:var(--accent)">Check the network map</a> to see active repeaters.</p>' }
+          a: '<p><a href="#/map" style="color:var(--accent)">Check the network map</a> to see active repeaters.</p>' },
+        { q: '🇳🇱 Standaardinstellingen voor Nederland (EU/UK Narrow)',
+          a: '<p>Voor gebruik in Nederland en de EU/UK-regio hanteert MeshCore de volgende aanbevolen instellingen:</p><div style="margin:12px 0;padding:12px;background:var(--surface-1);border-radius:6px;font-family:var(--mono);font-size:.85rem"><strong>Frequentie:</strong> 868 MHz (typisch 869.618 MHz)<br/><strong>Bandbreedte (BW):</strong> 62,5 kHz<br/><strong>Spreading Factor (SF):</strong> 8<br/><strong>Coding Rate (CR):</strong> 8<br/><strong>Vermogen:</strong> bijvoorbeeld 22 dBm</div>' }
       ];
       html = items.map(i => `<div class="checklist-item"><div class="checklist-q" role="button" tabindex="0" aria-expanded="false">${i.q}</div><div class="checklist-a">${i.a}</div></div>`).join('');
     }
