@@ -17,70 +17,73 @@
         </div>
         <div class="obs-help">
           <div class="help-box">
-            <div style="margin-bottom:6px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;cursor:pointer" data-action="toggle-help">
               <strong>ℹ️ How to connect your observer</strong>
+              <span class="help-toggle" style="font-size:14px;user-select:none">▼</span>
             </div>
 
-            <div class="text-muted" style="font-size:12px;margin-bottom:10px">
-              Connect your node to the Cornmeister MQTT broker to share raw packets.
-            </div>
-
-            <table class="help-table">
-              <tr><td>Server:</td><td><code>mqtt.cornmeister.nl</code></td></tr>
-              <tr><td>Port:</td><td><code>8883</code> (TLS)</td></tr>
-              <tr><td>Transport:</td><td><code>TCP</code></td></tr>
-              <tr><td>Username:</td><td><code>observer</code></td></tr>
-              <tr><td>Password:</td><td><code>hiermetdiedata</code></td></tr>
-            </table>
-
-            <div style="margin-top:10px">
-              <strong>Alternative (Meshwiki Community MQTT)</strong>
-              <div class="text-muted" style="font-size:12px;margin-bottom:6px">
-                TLS-enabled community endpoint:
+            <div class="help-content" style="overflow:hidden;transition:max-height 0.3s ease;max-height:2000px">
+              <div class="text-muted" style="font-size:12px;margin-bottom:10px">
+                Connect your node to the Cornmeister MQTT broker to share raw packets.
               </div>
 
               <table class="help-table">
-                <tr><td>Server:</td><td><code>mqtt.mwiki.nl</code></td></tr>
-                <tr><td>Port (TLS):</td><td><code>8883</code></td></tr>
-                <tr><td>Port (plain):</td><td><code>1883</code></td></tr>
+                <tr><td>Server:</td><td><code>mqtt.cornmeister.nl</code></td></tr>
+                <tr><td>Port:</td><td><code>8883</code> (TLS)</td></tr>
                 <tr><td>Transport:</td><td><code>TCP</code></td></tr>
                 <tr><td>Username:</td><td><code>observer</code></td></tr>
-                <tr><td>Password:</td><td><code>86w7bW9NJxuPcErp2Y5NCQ==</code></td></tr>
+                <tr><td>Password:</td><td><code>hiermetdiedata</code></td></tr>
               </table>
-            </div>
 
-            <hr style="margin:10px 0;border:none;border-top:1px solid var(--border)">
+              <div style="margin-top:10px">
+                <strong>Alternative (Meshwiki Community MQTT)</strong>
+                <div class="text-muted" style="font-size:12px;margin-bottom:6px">
+                  TLS-enabled community endpoint:
+                </div>
 
-            <strong>MQTT Bridge Firmware</strong>
-            <div class="text-muted" style="font-size:12px;margin-bottom:6px">
-              Paste into your device console:
-            </div>
+                <table class="help-table">
+                  <tr><td>Server:</td><td><code>mqtt.mwiki.nl</code></td></tr>
+                  <tr><td>Port (TLS):</td><td><code>8883</code> or <code>1883</code></td></tr>
+                  <tr><td>Port (plain):</td><td><code>1883</code></td></tr>
+                  <tr><td>Transport:</td><td><code>TCP</code></td></tr>
+                  <tr><td>Username:</td><td><code>observer</code></td></tr>
+                  <tr><td>Password:</td><td><code>86w7bW9NJxuPcErp2Y5NCQ==</code></td></tr>
+                </table>
+              </div>
 
-            <strong>Cornmeister (TLS - Recommended)</strong>
-            <div class="text-muted" style="font-size:12px;margin-bottom:6px">
-              Secure connection:
-            </div>
+              <hr style="margin:10px 0;border:none;border-top:1px solid var(--border)">
 
-            <pre class="help-code"><code>set mqtt.server mqtt.cornmeister.nl
+              <strong>MQTT Bridge Firmware</strong>
+              <div class="text-muted" style="font-size:12px;margin-bottom:6px">
+                Paste into your device console:
+              </div>
+
+              <strong>Cornmeister (TLS - Recommended)</strong>
+              <div class="text-muted" style="font-size:12px;margin-bottom:6px">
+                Secure connection:
+              </div>
+
+              <pre class="help-code"><code>set mqtt.server mqtt.cornmeister.nl
 set mqtt.port 8883
 set mqtt.username observer
 set mqtt.password hiermetdiedata
 set mqtt.tls 1</code></pre>
 
-            <strong>Meshwiki Community (Plain)</strong>
-            <div class="text-muted" style="font-size:12px;margin-bottom:6px">
-              Unencrypted connection:
-            </div>
+              <strong>Meshwiki Community (Plain)</strong>
+              <div class="text-muted" style="font-size:12px;margin-bottom:6px">
+                Unencrypted connection:
+              </div>
 
-            <pre class="help-code"><code>set mqtt.server mqtt.mwiki.nl
+              <pre class="help-code"><code>set mqtt.server mqtt.mwiki.nl
 set mqtt.port 1883
 set mqtt.username observer
 set mqtt.password 86w7bW9NJxuPcErp2Y5NCQ==</code></pre>
 
-            <hr style="margin:10px 0;border:none;border-top:1px solid var(--border)">
+              <hr style="margin:10px 0;border:none;border-top:1px solid var(--border)">
 
-            <div style="margin-top:8px;font-size:12px" class="text-muted">
-              Live packets: <a href="https://cornmeister.nl" target="_blank" rel="noopener">cornmeister.nl</a>
+              <div style="margin-top:8px;font-size:12px" class="text-muted">
+                Live packets: <a href="https://cornmeister.nl" target="_blank" rel="noopener">cornmeister.nl</a>
+              </div>
             </div>
           </div>
         </div>
@@ -95,6 +98,17 @@ set mqtt.password 86w7bW9NJxuPcErp2Y5NCQ==</code></pre>
     app.addEventListener('click', function (e) {
       var btn = e.target.closest('[data-action]');
       if (btn && btn.dataset.action === 'obs-refresh') loadObservers();
+      if (btn && btn.dataset.action === 'toggle-help') {
+        var content = btn.closest('.help-box').querySelector('.help-content');
+        var toggle = btn.querySelector('.help-toggle');
+        if (content.style.maxHeight === '0px') {
+          content.style.maxHeight = '2000px';
+          toggle.textContent = '▼';
+        } else {
+          content.style.maxHeight = '0px';
+          toggle.textContent = '▶';
+        }
+      }
       var row = e.target.closest('tr[data-action="navigate"]');
       if (row) location.hash = row.dataset.value;
     });
