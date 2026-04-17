@@ -44,17 +44,53 @@
   // --- View state (persisted across navigations) ---
   let viewMode  = localStorage.getItem('perf-view')      || 'cards';
   let timeframe = localStorage.getItem('perf-timeframe') || '5m';
-  let activeCharts = []; // [{ chart: Chart, key: string }]
+  let activeCharts = []; // [{ chart: Chart, id: string, datasets: [{key,label,color}] }]
 
-  const METRICS = [
-    { key: 'cpuPercent',   label: 'CPU Usage (%)',               color: '#f43f5e' },
-    { key: 'totalSysMB',   label: 'Server RAM — Total Sys (MB)', color: '#22c55e' },
-    { key: 'heapAllocMB',  label: 'Heap Alloc (MB)',             color: '#4a9eff' },
-    { key: 'goroutines',   label: 'Goroutines',                  color: '#eab308' },
-    { key: 'packetsInRAM', label: 'Packets in RAM',              color: '#a855f7' },
-    { key: 'cacheHitRate', label: 'Cache Hit Rate (%)',           color: '#f97316' },
-    { key: 'avgMs',        label: 'Avg Response (ms)',           color: '#ef4444' },
-    { key: 'dbSizeMB',     label: 'DB Size (MB)',                color: '#64748b' },
+  // Charts grouped by category. Multi-entry datasets render as multi-line charts with a legend.
+  const CHART_GROUPS = [
+    {
+      category: 'Runtime',
+      charts: [
+        { id: 'cpu',       label: 'CPU Usage (%)',     datasets: [{ key: 'cpuPercent',  label: 'CPU %',     color: '#f43f5e' }] },
+        { id: 'goroutines',label: 'Goroutines',        datasets: [{ key: 'goroutines',  label: 'Goroutines',color: '#eab308' }] },
+        { id: 'gcpause',   label: 'GC Last Pause (ms)',datasets: [{ key: 'lastPauseMs', label: 'Pause ms',  color: '#a78bfa' }] },
+      ]
+    },
+    {
+      category: 'Memory',
+      charts: [
+        {
+          id: 'heap', label: 'Go Heap (MB)',
+          datasets: [
+            { key: 'heapAllocMB', label: 'Alloc', color: '#4a9eff' },
+            { key: 'heapInuseMB', label: 'Inuse', color: '#22c55e' },
+            { key: 'heapSysMB',   label: 'Sys',   color: '#f97316' },
+          ]
+        },
+        { id: 'sysram', label: 'Total Server RAM (MB)', datasets: [{ key: 'totalSysMB', label: 'Total Sys', color: '#06b6d4' }] },
+      ]
+    },
+    {
+      category: 'API & Cache',
+      charts: [
+        { id: 'avgms',   label: 'Avg Response (ms)',  datasets: [{ key: 'avgMs',       label: 'Avg ms',    color: '#ef4444' }] },
+        { id: 'hitrate', label: 'Cache Hit Rate (%)', datasets: [{ key: 'cacheHitRate',label: 'Hit Rate %',color: '#f97316' }] },
+      ]
+    },
+    {
+      category: 'Storage',
+      charts: [
+        { id: 'packets',  label: 'Packets in RAM',         datasets: [{ key: 'packetsInRAM', label: 'Packets',    color: '#a855f7' }] },
+        { id: 'packetmb', label: 'Packet Store RAM (MB)',  datasets: [{ key: 'trackedMB',    label: 'Tracked MB', color: '#8b5cf6' }] },
+        {
+          id: 'sqlite', label: 'SQLite (MB)',
+          datasets: [
+            { key: 'dbSizeMB',  label: 'DB',  color: '#64748b' },
+            { key: 'walSizeMB', label: 'WAL', color: '#94a3b8' },
+          ]
+        },
+      ]
+    },
   ];
 
   // --- Ring buffer helpers ---
@@ -67,11 +103,16 @@
       cpuPercent:   gr ? +gr.cpuPercent                : null,
       totalSysMB:   gr ? +gr.totalSysMB                : null,
       heapAllocMB:  gr ? +gr.heapAllocMB               : null,
+      heapInuseMB:  gr ? +gr.heapInuseMB               : null,
+      heapSysMB:    gr ? +gr.heapSysMB                 : null,
+      lastPauseMs:  gr ? +gr.lastPauseMs               : null,
       goroutines:   gr ? gr.goroutines                 : null,
       packetsInRAM: ps ? ps.inMemory                   : null,
+      trackedMB:    ps ? +ps.trackedMB                 : null,
       cacheHitRate: server.cache ? server.cache.hitRate : null,
       avgMs:        server.avgMs  || null,
       dbSizeMB:     sq ? +sq.dbSizeMB                  : null,
+      walSizeMB:    sq ? +sq.walSizeMB                 : null,
     };
 
     // Short buffer (5 s resolution, 1 h)
@@ -138,6 +179,22 @@
     activeCharts = [];
   }
 
+  // Update all existing charts in-place from the current slice — no DOM rebuild.
+  // Returns true if charts existed; false if there was nothing to update.
+  function updateChartsInPlace() {
+    if (activeCharts.length === 0) return false;
+    const slice  = getSlice();
+    const labels = slice.map(function (s) { return new Date(s.ts).toLocaleTimeString(); });
+    activeCharts.forEach(function (c) {
+      c.chart.data.labels = labels;
+      c.datasets.forEach(function (ds, i) {
+        c.chart.data.datasets[i].data = slice.map(function (s) { return s[ds.key]; });
+      });
+      c.chart.update('none');
+    });
+    return true;
+  }
+
   // --- Init: builds page chrome once per navigation ---
   async function render(app) {
     app.innerHTML = `
@@ -174,15 +231,7 @@
         b.classList.toggle('active', b.dataset.tf === timeframe);
       });
       // Re-slice and push new data into existing charts immediately — no redraw
-      if (activeCharts.length > 0) {
-        var slice = getSlice();
-        var labels = slice.map(function (s) { return new Date(s.ts).toLocaleTimeString(); });
-        activeCharts.forEach(function (c) {
-          c.chart.data.labels = labels;
-          c.chart.data.datasets[0].data = slice.map(function (s) { return s[c.key]; });
-          c.chart.update('none');
-        });
-      }
+      updateChartsInPlace();
     });
 
     await preloadFromServer();
@@ -236,10 +285,7 @@
       if (isGo && server.goRuntime) {
         const gr = server.goRuntime;
         const gcColor = gr.lastPauseMs > 5 ? 'var(--status-red)' : gr.lastPauseMs > 1 ? 'var(--status-yellow)' : 'var(--status-green)';
-        const cpuPctColor = gr.cpuPercent > 80 ? 'var(--status-red)' : gr.cpuPercent > 40 ? 'var(--status-yellow)' : 'var(--status-green)';
         html += `<h3>🔧 Go Runtime</h3><div style="display:flex;gap:16px;flex-wrap:wrap;margin:8px 0;">
-          <div class="perf-card"><div class="perf-num" style="color:${cpuPctColor}">${(+gr.cpuPercent).toFixed(1)}%</div><div class="perf-label">CPU Usage</div></div>
-          <div class="perf-card"><div class="perf-num">${(+gr.totalSysMB).toFixed(0)}MB</div><div class="perf-label">Total Sys RAM</div></div>
           <div class="perf-card"><div class="perf-num">${gr.goroutines}</div><div class="perf-label">Goroutines</div></div>
           <div class="perf-card"><div class="perf-num">${gr.numGC}</div><div class="perf-label">GC Collections</div></div>
           <div class="perf-card"><div class="perf-num" style="color:${gcColor}">${(+gr.pauseTotalMs).toFixed(1)}ms</div><div class="perf-label">GC Pause Total</div></div>
@@ -380,75 +426,84 @@
       return;
     }
 
-    const labels = slice.map(function (s) { return new Date(s.ts).toLocaleTimeString(); });
-    const visibleMetrics = METRICS.filter(function (m) {
-      return slice.some(function (s) { return s[m.key] != null; });
-    });
-
     // Charts already exist — update data in place, no DOM rebuild
-    if (activeCharts.length > 0) {
-      activeCharts.forEach(function (c) {
-        c.chart.data.labels = labels;
-        c.chart.data.datasets[0].data = slice.map(function (s) { return s[c.key]; });
-        c.chart.update('none');
-      });
-      return;
-    }
+    if (updateChartsInPlace()) return;
 
-    // First render — build DOM and create Chart instances
-    el.innerHTML = `<div class="perf-graphs-grid">${
-      visibleMetrics.map(function (m) {
-        return `<div class="perf-graph-card">
-          <div class="perf-graph-title">${m.label}</div>
-          <div style="position:relative;height:160px"><canvas id="pgc-${m.key}"></canvas></div>
-        </div>`;
-      }).join('')
-    }</div>`;
-
+    // First render — build DOM with category sections, then create Chart instances
     const isDark = document.documentElement.dataset.theme === 'dark' ||
       (!document.documentElement.dataset.theme && window.matchMedia('(prefers-color-scheme: dark)').matches);
     const gridColor = isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.06)';
     const tickColor = isDark ? '#a8b8cc' : '#5b6370';
+    const labels    = slice.map(function (s) { return new Date(s.ts).toLocaleTimeString(); });
 
-    visibleMetrics.forEach(function (m) {
-      const canvas = document.getElementById('pgc-' + m.key);
-      if (!canvas) return;
-      const chart = new Chart(canvas, {
-        type: 'line',
-        data: {
-          labels: labels,
-          datasets: [{
-            data: slice.map(function (s) { return s[m.key]; }),
-            borderColor: m.color,
-            backgroundColor: m.color + '22',
-            borderWidth: 1.5,
-            pointRadius: 0,
-            tension: 0.3,
-            fill: true,
-          }]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          animation: false,
-          plugins: {
-            legend: { display: false },
-            tooltip: { mode: 'index', intersect: false }
+    el.innerHTML = CHART_GROUPS.map(function (group) {
+      const visible = group.charts.filter(function (c) {
+        return c.datasets.some(function (ds) {
+          return slice.some(function (s) { return s[ds.key] != null; });
+        });
+      });
+      if (visible.length === 0) return '';
+      return `<div class="perf-graphs-category">
+        <h3 class="perf-graphs-cat-title">${group.category}</h3>
+        <div class="perf-graphs-grid">${
+          visible.map(function (c) {
+            return `<div class="perf-graph-card">
+              <div class="perf-graph-title">${c.label}</div>
+              <div style="position:relative;height:160px"><canvas id="pgc-${c.id}"></canvas></div>
+            </div>`;
+          }).join('')
+        }</div>
+      </div>`;
+    }).join('');
+
+    CHART_GROUPS.forEach(function (group) {
+      group.charts.forEach(function (chartDef) {
+        const canvas = document.getElementById('pgc-' + chartDef.id);
+        if (!canvas) return; // filtered out (no data)
+        const multi = chartDef.datasets.length > 1;
+        const chart = new Chart(canvas, {
+          type: 'line',
+          data: {
+            labels: labels,
+            datasets: chartDef.datasets.map(function (ds) {
+              return {
+                label:           ds.label,
+                data:            slice.map(function (s) { return s[ds.key]; }),
+                borderColor:     ds.color,
+                backgroundColor: ds.color + '22',
+                borderWidth:     1.5,
+                pointRadius:     0,
+                tension:         0.3,
+                fill:            !multi,
+              };
+            })
           },
-          scales: {
-            x: {
-              ticks: { maxTicksLimit: 6, font: { size: 10 }, color: tickColor },
-              grid: { color: gridColor }
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            plugins: {
+              legend: {
+                display: multi,
+                labels: { boxWidth: 12, font: { size: 10 }, color: tickColor }
+              },
+              tooltip: { mode: 'index', intersect: false }
             },
-            y: {
-              beginAtZero: false,
-              ticks: { font: { size: 10 }, color: tickColor },
-              grid: { color: gridColor }
+            scales: {
+              x: {
+                ticks: { maxTicksLimit: 6, font: { size: 10 }, color: tickColor },
+                grid:  { color: gridColor }
+              },
+              y: {
+                beginAtZero: false,
+                ticks: { font: { size: 10 }, color: tickColor },
+                grid:  { color: gridColor }
+              }
             }
           }
-        }
+        });
+        activeCharts.push({ chart: chart, id: chartDef.id, datasets: chartDef.datasets });
       });
-      activeCharts.push({ chart: chart, key: m.key });
     });
   }
 

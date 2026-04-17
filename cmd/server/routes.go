@@ -743,17 +743,21 @@ func (s *Server) collectPerfSample() PerfSample {
 
 	var packetsInRAM int
 	var cacheHitRate float64
+	var trackedMB float64
 	if s.store != nil {
 		ps := s.store.GetPerfStoreStatsTyped()
 		packetsInRAM = ps.InMemory
+		trackedMB = ps.TrackedMB
 		cs := s.store.GetCacheStatsTyped()
 		cacheHitRate = cs.HitRate
 	}
 
 	var dbSizeMB float64
+	var walSizeMB float64
 	if s.db != nil {
 		ss := s.db.GetDBSizeStatsTyped()
 		dbSizeMB = ss.DbSizeMB
+		walSizeMB = ss.WalSizeMB
 	}
 
 	s.perfStats.mu.Lock()
@@ -765,11 +769,16 @@ func (s *Server) collectPerfSample() PerfSample {
 		CpuPercent:   s.getCPUPercent(),
 		TotalSysMB:   float64(ms.Sys) / 1024 / 1024,
 		HeapAllocMB:  float64(ms.HeapAlloc) / 1024 / 1024,
+		HeapInuseMB:  float64(ms.HeapInuse) / 1024 / 1024,
+		HeapSysMB:    float64(ms.HeapSys) / 1024 / 1024,
+		LastPauseMs:  float64(ms.PauseNs[(ms.NumGC+255)%256]) / 1e6,
 		Goroutines:   runtime.NumGoroutine(),
 		PacketsInRAM: packetsInRAM,
+		TrackedMB:    trackedMB,
 		CacheHitRate: cacheHitRate,
 		AvgMs:        avgMs,
 		DbSizeMB:     dbSizeMB,
+		WalSizeMB:    walSizeMB,
 	}
 }
 

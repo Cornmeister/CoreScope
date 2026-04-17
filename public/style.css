@@ -1706,6 +1706,11 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
   font-size: 12px; transition: background .15s, color .15s, border-color .15s;
 }
 .perf-tf-btn.active, .perf-tf-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+.perf-graphs-category { margin-bottom: 24px; }
+.perf-graphs-cat-title {
+  font-size: 12px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .5px; color: var(--text-muted); margin: 0 0 8px;
+}
 .perf-graphs-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
   gap: 16px; margin-top: 8px;

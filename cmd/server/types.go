@@ -237,11 +237,16 @@ type PerfSample struct {
 	CpuPercent   float64 `json:"cpuPercent"`
 	TotalSysMB   float64 `json:"totalSysMB"`
 	HeapAllocMB  float64 `json:"heapAllocMB"`
+	HeapInuseMB  float64 `json:"heapInuseMB"`
+	HeapSysMB    float64 `json:"heapSysMB"`
+	LastPauseMs  float64 `json:"lastPauseMs"`
 	Goroutines   int     `json:"goroutines"`
 	PacketsInRAM int     `json:"packetsInRAM"`
+	TrackedMB    float64 `json:"trackedMB"`
 	CacheHitRate float64 `json:"cacheHitRate"`
 	AvgMs        float64 `json:"avgMs"`
 	DbSizeMB     float64 `json:"dbSizeMB"`
+	WalSizeMB    float64 `json:"walSizeMB"`
 }
 
 // ─── Packets ───────────────────────────────────────────────────────────────────
