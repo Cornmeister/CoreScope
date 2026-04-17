@@ -44,7 +44,7 @@
 
                 <table class="help-table">
                   <tr><td>Server:</td><td><code>mqtt.mwiki.nl</code></td></tr>
-                  <tr><td>Port (TLS):</td><td><code>8883</code> or <code>1883</code></td></tr>
+                  <tr><td>Port (TLS):</td><td><code>8883</code></td></tr>
                   <tr><td>Port (plain):</td><td><code>1883</code></td></tr>
                   <tr><td>Transport:</td><td><code>TCP</code></td></tr>
                   <tr><td>Username:</td><td><code>observer</code></td></tr>
@@ -77,25 +77,12 @@
                     <option value="DHR">DHR – Den Helder (De Kooy)</option>
                     <option value="ENS">ENS – Enschede Twente</option>
                   </select>
-                </div>
+                </div>                
 
                 <div style="margin-bottom:12px">
-                  <strong>Cornmeister (TLS - Recommended)</strong>
+                  <strong>Cornmeister.nl (Recommended)</strong>
                   <div class="text-muted" style="font-size:12px;margin-top:4px;margin-bottom:8px">
-                    Secure connection:
-                  </div>
-                  <pre class="help-code"><code>set mqtt.server mqtt.cornmeister.nl
-set mqtt.port 8883
-set mqtt.username observer
-set mqtt.password hiermetdiedata
-set mqtt.tls 1
-set mqtt.iata <span class="obs-iata-val">AMS</span></code></pre>
-                </div>
-
-                <div style="margin-bottom:12px">
-                  <strong>Cornmeister (Plain)</strong>
-                  <div class="text-muted" style="font-size:12px;margin-top:4px;margin-bottom:8px">
-                    Unencrypted connection:
+                    Unencrypted non-tls connection uses port 1883
                   </div>
                   <pre class="help-code"><code>set mqtt.server mqtt.cornmeister.nl
 set mqtt.port 1883
@@ -105,12 +92,12 @@ set mqtt.iata <span class="obs-iata-val">AMS</span></code></pre>
                 </div>
 
                 <div>
-                  <strong>Meshwiki Community (Plain)</strong>
+                  <strong>Meshwiki Community</strong>
                   <div class="text-muted" style="font-size:12px;margin-top:4px;margin-bottom:8px">
-                    Unencrypted connection:
+                    Unencrypted non-tls connection uses port 1883
                   </div>
                   <pre class="help-code"><code>set mqtt.server mqtt.mwiki.nl
-set mqtt.port 1883
+set mqtt.port 1883 or 1883 for TLS
 set mqtt.username observer
 set mqtt.password 86w7bW9NJxuPcErp2Y5NCQ==
 set mqtt.iata <span class="obs-iata-val">AMS</span></code></pre>
