@@ -98,6 +98,11 @@
         ${checklist(homeCfg)}
       </section>`}
 
+      <section class="home-donate">
+        <p class="home-donate-text">CoreScope runs on real hardware, processing tens of thousands of mesh packets around the clock. If it's useful to you, a small donation goes a long way toward keeping the server running.</p>
+        <a href="https://bunq.me/cornmeister" target="_blank" rel="noopener" class="home-donate-btn">❤️ Support the project</a>
+      </section>
+
       <section class="home-footer">
         <div class="home-footer-links">
           ${homeCfg?.footerLinks ? homeCfg.footerLinks.map(l => `<a href="${escapeAttr(l.url)}" class="home-footer-link" target="_blank" rel="noopener">${escapeHtml(l.label)}</a>`).join('') : `

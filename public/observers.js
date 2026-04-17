@@ -105,13 +105,9 @@ set mqtt.password 86w7bW9NJxuPcErp2Y5NCQ==</code></pre>
       if (btn && btn.dataset.action === 'toggle-help') {
         var content = btn.closest('.help-box').querySelector('.help-content');
         var toggle = btn.querySelector('.help-toggle');
-        if (content.style.maxHeight === '0px') {
-          content.style.maxHeight = '2000px';
-          toggle.textContent = '▼';
-        } else {
-          content.style.maxHeight = '0px';
-          toggle.textContent = '▶';
-        }
+        var isCollapsed = toggle.textContent === '▶';
+        content.style.maxHeight = isCollapsed ? '2000px' : '0px';
+        toggle.textContent = isCollapsed ? '▼' : '▶';
       }
       var row = e.target.closest('tr[data-action="navigate"]');
       if (row) location.hash = row.dataset.value;
