@@ -17,13 +17,13 @@
         </div>
         <div class="obs-help">
           <div class="help-box">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;cursor:pointer" data-action="toggle-help">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;cursor:pointer" data-action="toggle-help">
               <strong>ℹ️ How to connect your observer</strong>
-              <span class="help-toggle" style="font-size:14px;user-select:none">▼</span>
+              <span class="help-toggle" style="font-size:14px;user-select:none">▶</span>
             </div>
 
-            <div class="help-content" style="overflow:hidden;transition:max-height 0.3s ease;max-height:2000px">
-              <div class="text-muted" style="font-size:12px;margin-bottom:10px">
+            <div class="help-content" style="overflow:hidden;transition:max-height 0.3s ease;max-height:0px">
+              <div class="text-muted" style="font-size:12px;margin-bottom:12px">
                 Connect your node to the Cornmeister MQTT broker to share raw packets.
               </div>
 
@@ -35,9 +35,9 @@
                 <tr><td>Password:</td><td><code>hiermetdiedata</code></td></tr>
               </table>
 
-              <div style="margin-top:10px">
+              <div style="margin-top:16px">
                 <strong>Alternative (Meshwiki Community MQTT)</strong>
-                <div class="text-muted" style="font-size:12px;margin-bottom:6px">
+                <div class="text-muted" style="font-size:12px;margin-top:4px;margin-bottom:8px">
                   TLS-enabled community endpoint:
                 </div>
 
@@ -51,37 +51,41 @@
                 </table>
               </div>
 
-              <hr style="margin:10px 0;border:none;border-top:1px solid var(--border)">
+              <hr style="margin:16px 0;border:none;border-top:1px solid var(--border)">
 
-              <strong>MQTT Bridge Firmware</strong>
-              <div class="text-muted" style="font-size:12px;margin-bottom:6px">
-                Paste into your device console:
-              </div>
+              <div style="margin-bottom:16px">
+                <strong>MQTT Bridge Firmware</strong>
+                <div class="text-muted" style="font-size:12px;margin-top:4px;margin-bottom:12px">
+                  Paste into your device console:
+                </div>
 
-              <strong>Cornmeister (TLS - Recommended)</strong>
-              <div class="text-muted" style="font-size:12px;margin-bottom:6px">
-                Secure connection:
-              </div>
-
-              <pre class="help-code"><code>set mqtt.server mqtt.cornmeister.nl
+                <div style="margin-bottom:12px">
+                  <strong>Cornmeister (TLS - Recommended)</strong>
+                  <div class="text-muted" style="font-size:12px;margin-top:4px;margin-bottom:8px">
+                    Secure connection:
+                  </div>
+                  <pre class="help-code"><code>set mqtt.server mqtt.cornmeister.nl
 set mqtt.port 8883
 set mqtt.username observer
 set mqtt.password hiermetdiedata
 set mqtt.tls 1</code></pre>
+                </div>
 
-              <strong>Meshwiki Community (Plain)</strong>
-              <div class="text-muted" style="font-size:12px;margin-bottom:6px">
-                Unencrypted connection:
-              </div>
-
-              <pre class="help-code"><code>set mqtt.server mqtt.mwiki.nl
+                <div>
+                  <strong>Meshwiki Community (Plain)</strong>
+                  <div class="text-muted" style="font-size:12px;margin-top:4px;margin-bottom:8px">
+                    Unencrypted connection:
+                  </div>
+                  <pre class="help-code"><code>set mqtt.server mqtt.mwiki.nl
 set mqtt.port 1883
 set mqtt.username observer
 set mqtt.password 86w7bW9NJxuPcErp2Y5NCQ==</code></pre>
+                </div>
+              </div>
 
-              <hr style="margin:10px 0;border:none;border-top:1px solid var(--border)">
+              <hr style="margin:16px 0;border:none;border-top:1px solid var(--border)">
 
-              <div style="margin-top:8px;font-size:12px" class="text-muted">
+              <div style="font-size:12px" class="text-muted">
                 Live packets: <a href="https://cornmeister.nl" target="_blank" rel="noopener">cornmeister.nl</a>
               </div>
             </div>
