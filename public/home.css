@@ -313,17 +313,29 @@
   margin-bottom: 16px;
   line-height: 1.6;
 }
-.home-donate-btn {
+.home-donate-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.home-donate-btn, .home-discord-btn {
   display: inline-block;
   padding: 10px 24px;
-  background: var(--accent);
-  color: #fff;
   border-radius: 8px;
   text-decoration: none;
   font: 600 .9rem var(--font);
   transition: opacity .15s;
 }
-.home-donate-btn:hover { opacity: .85; }
+.home-donate-btn {
+  background: var(--accent);
+  color: #fff;
+}
+.home-discord-btn {
+  background: #5865f2;
+  color: #fff;
+}
+.home-donate-btn:hover, .home-discord-btn:hover { opacity: .85; }
 
 /* Footer links */
 .home-footer {
