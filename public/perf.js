@@ -94,10 +94,15 @@
     {
       category: 'MQTT Observers',
       charts: [
-        { id: 'obs-total',   label: 'Total Observers',   datasets: [{ key: 'totalObservers',   label: 'Total',   color: '#a78bfa' }] },
-        { id: 'obs-online',  label: 'Online Observers',  datasets: [{ key: 'onlineObservers',  label: 'Online',  color: '#22c55e' }] },
-        { id: 'obs-stale',   label: 'Stale Observers',   datasets: [{ key: 'staleObservers',   label: 'Stale',   color: '#eab308' }] },
-        { id: 'obs-offline', label: 'Offline Observers', datasets: [{ key: 'offlineObservers', label: 'Offline', color: '#ef4444' }] },
+        {
+          id: 'observers', label: 'Observers',
+          datasets: [
+            { key: 'totalObservers',   label: 'Total',   color: '#a78bfa' },
+            { key: 'onlineObservers',  label: 'Online',  color: '#22c55e' },
+            { key: 'staleObservers',   label: 'Stale',   color: '#eab308' },
+            { key: 'offlineObservers', label: 'Offline', color: '#ef4444' },
+          ]
+        },
       ]
     },
   ];
