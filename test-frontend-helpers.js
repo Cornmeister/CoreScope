@@ -222,6 +222,10 @@ console.log('\n=== app.js: routeTypeName / payloadTypeName ===');
   test('payloadTypeName(4) = Advert', () => assert.strictEqual(ctx.payloadTypeName(4), 'Advert'));
   test('payloadTypeName(2) = Direct Msg', () => assert.strictEqual(ctx.payloadTypeName(2), 'Direct Msg'));
   test('payloadTypeName(99) = UNKNOWN', () => assert.strictEqual(ctx.payloadTypeName(99), 'UNKNOWN'));
+  test('getPathLenOffset: transport route (0) → 5', () => assert.strictEqual(ctx.getPathLenOffset(0), 5));
+  test('getPathLenOffset: transport route (3) → 5', () => assert.strictEqual(ctx.getPathLenOffset(3), 5));
+  test('getPathLenOffset: flood route (1) → 1', () => assert.strictEqual(ctx.getPathLenOffset(1), 1));
+  test('getPathLenOffset: direct route (2) → 1', () => assert.strictEqual(ctx.getPathLenOffset(2), 1));
 }
 
 console.log('\n=== app.js: truncate ===');
@@ -5361,6 +5365,10 @@ console.log('\n=== packets.js: buildFieldTable transport offsets (#765) ===');
   ftCtx.escapeHtml = (s) => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   ftCtx.window.escapeHtml = ftCtx.escapeHtml;
   ftCtx.window.HopDisplay = { renderHop: (hex) => hex };
+  ftCtx.isTransportRoute = (rt) => rt === 0 || rt === 3;
+  ftCtx.window.isTransportRoute = ftCtx.isTransportRoute;
+  ftCtx.getPathLenOffset = (rt) => ftCtx.isTransportRoute(rt) ? 5 : 1;
+  ftCtx.window.getPathLenOffset = ftCtx.getPathLenOffset;
   loadInCtx(ftCtx, 'public/packets.js');
   const { buildFieldTable, fieldRow } = ftCtx.window._packetsTestAPI;
 
@@ -5447,6 +5455,10 @@ console.log('\n=== packets.js: buildFieldTable hop count from path_len (#844) ==
   ftCtx.escapeHtml = (s) => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   ftCtx.window.escapeHtml = ftCtx.escapeHtml;
   ftCtx.window.HopDisplay = { renderHop: (hex) => hex };
+  ftCtx.isTransportRoute = (rt) => rt === 0 || rt === 3;
+  ftCtx.window.isTransportRoute = ftCtx.isTransportRoute;
+  ftCtx.getPathLenOffset = (rt) => ftCtx.isTransportRoute(rt) ? 5 : 1;
+  ftCtx.window.getPathLenOffset = ftCtx.getPathLenOffset;
   loadInCtx(ftCtx, 'public/packets.js');
   const { buildFieldTable } = ftCtx.window._packetsTestAPI;
 
@@ -5974,6 +5986,57 @@ console.log('\n=== analytics.js: renderCollisionsFromServer collision table ==='
     assert.strictEqual(extractRawHopCount(null, 1), null);
     assert.strictEqual(extractRawHopCount('', 1), null);
     assert.strictEqual(extractRawHopCount('04', 1), null); // too short
+  });
+}
+
+// ===== Issue #852: hashSize offset + var(--muted) regression =====
+{
+  console.log('\n=== Issue #852: hashSize path_len offset + var(--muted) regression ===');
+
+  // Use getPathLenOffset from app.js (loaded via vm context) to avoid duplicating offset logic
+  const ctx852 = makeSandbox();
+  loadInCtx(ctx852, 'public/roles.js');
+  loadInCtx(ctx852, 'public/app.js');
+
+  function extractHashSize(rawHex, routeType) {
+    const plOff = ctx852.getPathLenOffset(routeType);
+    const rawPathByte = rawHex ? parseInt(rawHex.slice(plOff * 2, plOff * 2 + 2), 16) : NaN;
+    return (isNaN(rawPathByte) || (rawPathByte & 0x3F) === 0) ? null : ((rawPathByte >> 6) + 1);
+  }
+
+  test('#852: hashSize for flood route (route_type=1, offset 1)', () => {
+    // Byte at offset 1 = 0x82 → hash_size = (0x82 >> 6) + 1 = 3
+    const rawHex = '0482aabbccddee';
+    assert.strictEqual(extractHashSize(rawHex, 1), 3);
+  });
+
+  test('#852: hashSize for direct transport route (route_type=0, offset 5)', () => {
+    // Bytes 1-4 are next_hop+last_hop, byte at offset 5 = 0x45 → hash_size = (0x45 >> 6) + 1 = 2
+    const rawHex = '001122334445aabb';
+    assert.strictEqual(extractHashSize(rawHex, 0), 2);
+  });
+
+  test('#852: hashSize for transport route flood (route_type=3, offset 5)', () => {
+    const rawHex = '00aabbccdd85aabb';
+    assert.strictEqual(extractHashSize(rawHex, 3), 3); // 0x85 >> 6 = 2, +1 = 3
+  });
+
+  test('#852: hashSize returns null for missing raw_hex', () => {
+    assert.strictEqual(extractHashSize(null, 1), null);
+    assert.strictEqual(extractHashSize('', 0), null);
+  });
+
+  test('#852: no var(--muted) in public/ files (regression guard)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const pubDir = path.join(__dirname, 'public');
+    const files = fs.readdirSync(pubDir).filter(f => f.endsWith('.js') || f.endsWith('.css'));
+    files.forEach(f => {
+      const content = fs.readFileSync(path.join(pubDir, f), 'utf8');
+      // Match var(--muted) but not var(--text-muted) or var(--bg-muted) etc.
+      const matches = content.match(/var\(--muted\)/g);
+      if (matches) throw new Error(`${f} contains undefined CSS var var(--muted); use var(--text-muted)`);
+    });
   });
 }
 

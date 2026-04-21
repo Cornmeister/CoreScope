@@ -1165,7 +1165,7 @@
         const nodes = data.nodes || [];
         if (nodes.length === 0) { fNodeDrop.classList.add('hidden'); fNode.setAttribute('aria-expanded', 'false'); return; }
         fNodeDrop.innerHTML = nodes.map((n, i) =>
-          `<div class="node-filter-option" id="fNodeOpt-${i}" role="option" data-key="${n.public_key}" data-name="${escapeHtml(n.name || n.public_key.slice(0,8))}">${escapeHtml(n.name || n.public_key.slice(0,8))} <span style="color:var(--muted);font-size:0.8em">${n.public_key.slice(0,8)}</span></div>`
+          `<div class="node-filter-option" id="fNodeOpt-${i}" role="option" data-key="${n.public_key}" data-name="${escapeHtml(n.name || n.public_key.slice(0,8))}">${escapeHtml(n.name || n.public_key.slice(0,8))} <span style="color:var(--text-muted);font-size:0.8em">${n.public_key.slice(0,8)}</span></div>`
         ).join('');
         fNodeDrop.classList.remove('hidden');
         fNode.setAttribute('aria-expanded', 'true');
@@ -1833,8 +1833,7 @@
     let rawHopCount = null;
     if (obsRawHex.length >= 4) {
       // path_len byte position depends on route type
-      let plOff = 1;
-      if (pkt.route_type === 0 || pkt.route_type === 3) plOff = 5;
+      const plOff = getPathLenOffset(pkt.route_type);
       const plByte = parseInt(obsRawHex.slice(plOff * 2, plOff * 2 + 2), 16);
       if (!isNaN(plByte)) rawHopCount = plByte & 0x3F;
     }
@@ -1884,7 +1883,8 @@
     }
 
     // Parse hash size from path byte
-    const rawPathByte = pkt.raw_hex ? parseInt(pkt.raw_hex.slice(2, 4), 16) : NaN;
+    const plOff = getPathLenOffset(pkt.route_type);
+    const rawPathByte = pkt.raw_hex ? parseInt(pkt.raw_hex.slice(plOff * 2, plOff * 2 + 2), 16) : NaN;
     const hashSize = (isNaN(rawPathByte) || (rawPathByte & 0x3F) === 0) ? null : ((rawPathByte >> 6) + 1);
 
     const size = effectivePkt.raw_hex ? Math.floor(effectivePkt.raw_hex.length / 2) : (pkt.raw_hex ? Math.floor(pkt.raw_hex.length / 2) : 0);
@@ -1903,13 +1903,13 @@
       const meta = [chLabel, hopLabel, snrLabel].filter(Boolean).join(' · ');
       messageHtml = `<div class="detail-message" style="padding:12px;margin:8px 0;background:var(--card-bg);border-radius:8px;border-left:3px solid var(--accent)">
         <div style="font-size:1.1em">${escapeHtml(decoded.text)}</div>
-        ${meta ? `<div style="font-size:0.85em;color:var(--muted);margin-top:4px">${meta}</div>` : ''}
+        ${meta ? `<div style="font-size:0.85em;color:var(--text-muted);margin-top:4px">${meta}</div>` : ''}
       </div>`;
     } else if (decoded.type === 'GRP_TXT' && decoded.channelHash != null) {
       const hashHex = decoded.channelHashHex || decoded.channelHash.toString(16).padStart(2, '0').toUpperCase();
       const statusLabel = decoded.decryptionStatus === 'no_key' ? 'no key' : 'decryption failed';
       messageHtml = `<div class="detail-message" style="padding:12px;margin:8px 0;background:var(--card-bg);border-radius:8px;border-left:3px solid var(--warning, #f0ad4e)">
-        <div style="font-size:1.1em">🔒 Channel Hash: 0x${hashHex} <span style="color:var(--muted)">(${statusLabel})</span></div>
+        <div style="font-size:1.1em">🔒 Channel Hash: 0x${hashHex} <span style="color:var(--text-muted)">(${statusLabel})</span></div>
       </div>`;
     }
 
@@ -1978,7 +1978,7 @@
     // Hop count display: trust raw_hex (firmware truth) over path_json
     const displayHopCount = rawHopCount != null ? rawHopCount : pathHops.length;
     const obsIndicator = currentObs && observations.length > 1
-      ? `<span style="font-size:0.8em;color:var(--muted);margin-left:6px">(observation ${observations.indexOf(currentObs) + 1} of ${observations.length})</span>`
+      ? `<span style="font-size:0.8em;color:var(--text-muted);margin-left:6px">(observation ${observations.indexOf(currentObs) + 1} of ${observations.length})</span>`
       : '';
 
     panel.innerHTML = `
@@ -2039,9 +2039,9 @@
         // Cross-observer aggregate (Option B): show longest observed path across all observers
         const aggregatePath = getParsedPath(pkt) || [];
         return `<div class="detail-aggregate" style="margin-top:12px;padding:10px;background:var(--card-bg);border-radius:6px;border:1px solid var(--border);font-size:0.9em">
-          <div style="font-weight:600;margin-bottom:4px;color:var(--muted)">Cross-observer aggregate</div>
+          <div style="font-weight:600;margin-bottom:4px;color:var(--text-muted)">Cross-observer aggregate</div>
           <div>Longest observed path: ${aggregatePath.length ? `${aggregatePath.length} hops — ${renderPath(aggregatePath, pkt.observer_id)}` : '— (direct)'}</div>
-          <div style="font-size:0.8em;color:var(--muted);margin-top:2px">Longest path seen across all ${uniqueObservers} observer${uniqueObservers !== 1 ? 's' : ''}</div>
+          <div style="font-size:0.8em;color:var(--text-muted);margin-top:2px">Longest path seen across all ${uniqueObservers} observer${uniqueObservers !== 1 ? 's' : ''}</div>
         </div>`;
       })() : ''}
     `;
@@ -2166,7 +2166,7 @@
 
     // Transport codes come BEFORE path length for transport routes (bytes 1-4)
     let off = 1;
-    if (pkt.route_type === 0 || pkt.route_type === 3) {
+    if (isTransportRoute(pkt.route_type)) {
       rows += sectionRow('Transport Codes', 'section-transport');
       rows += fieldRow(off, 'Next Hop', buf.slice(off * 2, (off + 2) * 2), '');
       rows += fieldRow(off + 2, 'Last Hop', buf.slice((off + 2) * 2, (off + 4) * 2), '');
