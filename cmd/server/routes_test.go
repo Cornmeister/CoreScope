@@ -3681,66 +3681,54 @@ func TestNodePathsPrefixCollisionFilter(t *testing.T) {
 func TestNodeInResolvedPath(t *testing.T) {
 	target := "aabbccdd11223344"
 
-	// Case 1: tx.ResolvedPath contains target
-	pk := "aabbccdd11223344"
-	tx1 := &StoreTx{ResolvedPath: []*string{&pk}}
-	if !nodeInResolvedPath(tx1, target) {
-		t.Error("should match when ResolvedPath contains target")
+	// After #800, nodeInResolvedPath is replaced by nodeInResolvedPathViaIndex
+	// which uses the membership index. Test the index-based approach.
+	store := &PacketStore{
+		byNode:               make(map[string][]*StoreTx),
+		nodeHashes:           make(map[string]map[string]bool),
+		useResolvedPathIndex: true,
+	}
+	store.initResolvedPathIndex()
+
+	// Case 1: tx indexed with target pubkey
+	tx1 := &StoreTx{ID: 1}
+	store.addToResolvedPubkeyIndex(1, []string{target})
+	if !store.nodeInResolvedPathViaIndex(tx1, target) {
+		t.Error("should match when index contains target")
 	}
 
-	// Case 2: tx.ResolvedPath contains different node
-	other := "aacafe0000000000"
-	tx2 := &StoreTx{ResolvedPath: []*string{&other}}
-	if nodeInResolvedPath(tx2, target) {
-		t.Error("should not match when ResolvedPath contains different node")
+	// Case 2: tx indexed with different pubkey
+	tx2 := &StoreTx{ID: 2}
+	store.addToResolvedPubkeyIndex(2, []string{"aacafe0000000000"})
+	if store.nodeInResolvedPathViaIndex(tx2, target) {
+		t.Error("should not match when index contains different node")
 	}
 
-	// Case 3: nil ResolvedPath — should match (no data to disambiguate, keep it)
-	tx3 := &StoreTx{}
-	if !nodeInResolvedPath(tx3, target) {
-		t.Error("should match when ResolvedPath is nil (no data to disambiguate)")
-	}
-
-	// Case 4: ResolvedPath with nil elements only — has data but no match
-	tx4 := &StoreTx{ResolvedPath: []*string{nil, nil}}
-	if nodeInResolvedPath(tx4, target) {
-		t.Error("should not match when all ResolvedPath elements are nil")
-	}
-
-	// Case 5: target in observation but not in tx.ResolvedPath
-	tx5 := &StoreTx{
-		ResolvedPath: []*string{&other},
-		Observations: []*StoreObs{
-			{ResolvedPath: []*string{&pk}},
-		},
-	}
-	if !nodeInResolvedPath(tx5, target) {
-		t.Error("should match when observation's ResolvedPath contains target")
+	// Case 3: tx not in index at all — should match (no data to disambiguate)
+	tx3 := &StoreTx{ID: 3}
+	if !store.nodeInResolvedPathViaIndex(tx3, target) {
+		t.Error("should match when tx has no index entries (no data to disambiguate)")
 	}
 }
 
 func TestPathHopIndexIncrementalUpdate(t *testing.T) {
-	// Test that addTxToPathHopIndex and removeTxFromPathHopIndex work correctly
+	// After #800, addTxToPathHopIndex only indexes raw hops (not resolved pubkeys).
+	// Resolved pubkeys are handled by the resolved pubkey membership index.
 	idx := make(map[string][]*StoreTx)
 
-	pk1 := "fullpubkey1"
 	tx1 := &StoreTx{
 		ID:       1,
 		PathJSON: `["ab","cd"]`,
-		ResolvedPath: []*string{&pk1, nil},
 	}
 
 	addTxToPathHopIndex(idx, tx1)
 
-	// Should be indexed under "ab", "cd", and "fullpubkey1"
+	// Should be indexed under "ab" and "cd" only (no resolved pubkey)
 	if len(idx["ab"]) != 1 {
 		t.Errorf("expected 1 entry for 'ab', got %d", len(idx["ab"]))
 	}
 	if len(idx["cd"]) != 1 {
 		t.Errorf("expected 1 entry for 'cd', got %d", len(idx["cd"]))
-	}
-	if len(idx["fullpubkey1"]) != 1 {
-		t.Errorf("expected 1 entry for resolved pubkey, got %d", len(idx["fullpubkey1"]))
 	}
 
 	// Add another tx with overlapping hop
@@ -3765,9 +3753,6 @@ func TestPathHopIndexIncrementalUpdate(t *testing.T) {
 	}
 	if _, ok := idx["cd"]; ok {
 		t.Error("expected 'cd' key to be deleted after removal")
-	}
-	if _, ok := idx["fullpubkey1"]; ok {
-		t.Error("expected resolved pubkey key to be deleted after removal")
 	}
 }
 
@@ -3806,5 +3791,90 @@ func TestMetricsAPIEndpoints(t *testing.T) {
 	observers, ok := resp2["observers"].([]interface{})
 	if !ok || len(observers) != 1 {
 		t.Errorf("expected 1 observer in summary, got %v", resp2["observers"])
+	}
+}
+
+// TestNodeHealth_RecentPackets_ResolvedPath verifies that recentPackets in the
+// node health endpoint include resolved_path (regression for Codex review item #2).
+func TestNodeHealth_RecentPackets_ResolvedPath(t *testing.T) {
+	_, router := setupTestServer(t)
+	req := httptest.NewRequest("GET", "/api/nodes/aabbccdd11223344/health", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("json decode: %v", err)
+	}
+	rp, ok := body["recentPackets"].([]interface{})
+	if !ok || len(rp) == 0 {
+		t.Fatal("expected non-empty recentPackets")
+	}
+	// At least one packet should have resolved_path (tx 1 has observations with resolved_path)
+	found := false
+	for _, p := range rp {
+		pm, ok := p.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if pm["resolved_path"] != nil {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected at least one recentPacket with resolved_path")
+	}
+}
+
+// TestPacketsExpand_ResolvedPath verifies that expandObservations=true includes
+// resolved_path on expanded observations (regression for Codex review item #3).
+func TestPacketsExpand_ResolvedPath(t *testing.T) {
+	_, router := setupTestServer(t)
+	req := httptest.NewRequest("GET", "/api/packets?expand=observations&limit=10", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("json decode: %v", err)
+	}
+	packets, ok := body["packets"].([]interface{})
+	if !ok || len(packets) == 0 {
+		t.Fatal("expected non-empty packets")
+	}
+	// Find a packet with observations that should have resolved_path
+	found := false
+	for _, p := range packets {
+		pm, ok := p.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		obs, ok := pm["observations"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, o := range obs {
+			om, ok := o.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if om["resolved_path"] != nil {
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+	}
+	if !found {
+		t.Error("expected at least one expanded observation with resolved_path")
 	}
 }
