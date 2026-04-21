@@ -997,6 +997,25 @@ func (db *DB) GetObservers() ([]Observer, error) {
 	return observers, nil
 }
 
+// GetObserverCounts returns a single-row aggregate of observer status counts.
+// Online: last_seen within 600 s, stale: 600–3600 s, offline: >3600 s or NULL.
+func (db *DB) GetObserverCounts() (*ObserverCounts, error) {
+	var c ObserverCounts
+	err := db.conn.QueryRow(`
+		SELECT
+			COUNT(*),
+			SUM(CASE WHEN last_seen > datetime('now', '-600 seconds')  THEN 1 ELSE 0 END),
+			SUM(CASE WHEN last_seen <= datetime('now', '-600 seconds')
+			          AND last_seen >  datetime('now', '-3600 seconds') THEN 1 ELSE 0 END),
+			SUM(CASE WHEN last_seen IS NULL
+			          OR  last_seen <= datetime('now', '-3600 seconds') THEN 1 ELSE 0 END)
+		FROM observers`).Scan(&c.Total, &c.Online, &c.Stale, &c.Offline)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
 // GetObserverByID returns a single observer.
 func (db *DB) GetObserverByID(id string) (*Observer, error) {
 	var o Observer

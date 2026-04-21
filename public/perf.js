@@ -102,29 +102,6 @@
     },
   ];
 
-  // --- Observer status counts ---
-  // Mirrors the healthStatus() thresholds in observers.js (600 s online, 3600 s stale,
-  // +30 s clock-skew tolerance) so graphs stay consistent with the Observers page.
-  function computeObserverCounts(obsData) {
-    if (!obsData || !Array.isArray(obsData.observers)) {
-      return { total: null, online: null, stale: null, offline: null };
-    }
-    const ONLINE_MS    = 600000;
-    const STALE_MS     = 3600000;
-    const TOLERANCE_MS = 30000;
-    const now = Date.now();
-    let online = 0, stale = 0, offline = 0;
-    for (var i = 0; i < obsData.observers.length; i++) {
-      const ls = obsData.observers[i].last_seen;
-      if (!ls) { offline++; continue; }
-      const ago = now - new Date(ls).getTime();
-      if      (ago < ONLINE_MS + TOLERANCE_MS) online++;
-      else if (ago < STALE_MS  + TOLERANCE_MS) stale++;
-      else                                     offline++;
-    }
-    return { total: obsData.observers.length, online: online, stale: stale, offline: offline };
-  }
-
   // --- Ring buffer helpers ---
   function pushSample(server, obs) {
     const gr = server.goRuntime;
@@ -279,14 +256,13 @@
     var el = document.getElementById('perfContent');
     if (!el) return;
     try {
-      const [server, client, obsData] = await Promise.all([
+      const [server, client] = await Promise.all([
         fetch('/api/perf').then(r => r.json()),
         Promise.resolve(window.apiPerf ? window.apiPerf() : null),
-        fetch('/api/observers').then(r => r.json()).catch(() => null),
       ]);
       const health = await fetch('/api/health').then(r => r.json()).catch(() => null);
 
-      pushSample(server, computeObserverCounts(obsData));
+      pushSample(server, server.observerCounts || null);
 
       if (viewMode === 'graphs') {
         renderGraphs(el);
