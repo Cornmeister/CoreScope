@@ -790,7 +790,7 @@ func (s *Server) collectPerfSample() PerfSample {
 	avgMs := safeAvg(s.perfStats.TotalMs, float64(s.perfStats.Requests))
 	s.perfStats.mu.Unlock()
 
-	return PerfSample{
+	sample := PerfSample{
 		Ts:           time.Now().UnixMilli(),
 		CpuPercent:   s.getCPUPercent(),
 		TotalSysMB:   float64(ms.Sys) / 1024 / 1024,
@@ -806,6 +806,15 @@ func (s *Server) collectPerfSample() PerfSample {
 		DbSizeMB:     dbSizeMB,
 		WalSizeMB:    walSizeMB,
 	}
+	if s.db != nil {
+		if oc, err := s.db.GetObserverCounts(); err == nil {
+			sample.TotalObservers   = &oc.Total
+			sample.OnlineObservers  = &oc.Online
+			sample.StaleObservers   = &oc.Stale
+			sample.OfflineObservers = &oc.Offline
+		}
+	}
+	return sample
 }
 
 // storePerfSample appends a sample to the server-side ring buffer (max 2880 = 48 h at 1 min).
