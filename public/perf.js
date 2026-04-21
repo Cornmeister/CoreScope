@@ -91,28 +91,46 @@
         },
       ]
     },
+    {
+      category: 'MQTT Observers',
+      charts: [
+        {
+          id: 'observers', label: 'Observers',
+          datasets: [
+            { key: 'totalObservers',   label: 'Total',   color: '#a78bfa' },
+            { key: 'onlineObservers',  label: 'Online',  color: '#22c55e' },
+            { key: 'staleObservers',   label: 'Stale',   color: '#eab308' },
+            { key: 'offlineObservers', label: 'Offline', color: '#ef4444' },
+          ]
+        },
+      ]
+    },
   ];
 
   // --- Ring buffer helpers ---
-  function pushSample(server) {
+  function pushSample(server, obs) {
     const gr = server.goRuntime;
     const ps = server.packetStore;
     const sq = server.sqlite;
     const sample = {
-      ts:           Date.now(),
-      cpuPercent:   gr ? +gr.cpuPercent                : null,
-      totalSysMB:   gr ? +gr.totalSysMB                : null,
-      heapAllocMB:  gr ? +gr.heapAllocMB               : null,
-      heapInuseMB:  gr ? +gr.heapInuseMB               : null,
-      heapSysMB:    gr ? +gr.heapSysMB                 : null,
-      lastPauseMs:  gr ? +gr.lastPauseMs               : null,
-      goroutines:   gr ? gr.goroutines                 : null,
-      packetsInRAM: ps ? ps.inMemory                   : null,
-      trackedMB:    ps ? +ps.trackedMB                 : null,
-      cacheHitRate: server.cache ? server.cache.hitRate : null,
-      avgMs:        server.avgMs  || null,
-      dbSizeMB:     sq ? +sq.dbSizeMB                  : null,
-      walSizeMB:    sq ? +sq.walSizeMB                 : null,
+      ts:              Date.now(),
+      cpuPercent:      gr  ? +gr.cpuPercent                : null,
+      totalSysMB:      gr  ? +gr.totalSysMB                : null,
+      heapAllocMB:     gr  ? +gr.heapAllocMB               : null,
+      heapInuseMB:     gr  ? +gr.heapInuseMB               : null,
+      heapSysMB:       gr  ? +gr.heapSysMB                 : null,
+      lastPauseMs:     gr  ? +gr.lastPauseMs               : null,
+      goroutines:      gr  ? gr.goroutines                 : null,
+      packetsInRAM:    ps  ? ps.inMemory                   : null,
+      trackedMB:       ps  ? +ps.trackedMB                 : null,
+      cacheHitRate:    server.cache ? server.cache.hitRate  : null,
+      avgMs:           server.avgMs || null,
+      dbSizeMB:        sq  ? +sq.dbSizeMB                  : null,
+      walSizeMB:       sq  ? +sq.walSizeMB                 : null,
+      totalObservers:  obs ? obs.total                     : null,
+      onlineObservers: obs ? obs.online                    : null,
+      staleObservers:  obs ? obs.stale                     : null,
+      offlineObservers:obs ? obs.offline                   : null,
     };
 
     // Short buffer (5 s resolution, 1 h)
@@ -245,11 +263,11 @@
     try {
       const [server, client] = await Promise.all([
         fetch('/api/perf').then(r => r.json()),
-        Promise.resolve(window.apiPerf ? window.apiPerf() : null)
+        Promise.resolve(window.apiPerf ? window.apiPerf() : null),
       ]);
       const health = await fetch('/api/health').then(r => r.json()).catch(() => null);
 
-      pushSample(server);
+      pushSample(server, server.observerCounts || null);
 
       if (viewMode === 'graphs') {
         renderGraphs(el);

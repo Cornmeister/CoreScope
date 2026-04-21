@@ -713,15 +713,22 @@ func (s *Server) handlePerf(w http.ResponseWriter, r *http.Request) {
 		sqliteStats = &ss
 	}
 
+	// Observer counts (single aggregate query — no full row scan)
+	var observerCounts *ObserverCounts
+	if s.db != nil {
+		observerCounts, _ = s.db.GetObserverCounts()
+	}
+
 	writeJSON(w, PerfResponse{
 		Uptime:        uptimeSec,
 		TotalRequests: totalRequests,
 		AvgMs:         safeAvg(totalMs, float64(totalRequests)),
 		Endpoints:     summary,
 		SlowQueries:   slowQueries,
-		Cache:         perfCS,
-		PacketStore:   pktStoreStats,
-		Sqlite:        sqliteStats,
+		Cache:          perfCS,
+		PacketStore:    pktStoreStats,
+		Sqlite:         sqliteStats,
+		ObserverCounts: observerCounts,
 		GoRuntime: func() *GoRuntimeStats {
 			ms := s.getMemStats()
 			return &GoRuntimeStats{
