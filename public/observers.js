@@ -52,19 +52,20 @@
                     Pick your region below — the commands update automatically.
                   </div>
                   <select id="obsIataSelect" style="width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text);font-size:12px;cursor:pointer">
-                    <option value="AMS">AMS – Amsterdam Schiphol</option>
-					<option value="DHR">DHR – Den Helder (De Kooy)</option>
-					<option value="EIN">EIN – Eindhoven</option>
-					<option value="ENS">ENS – Enschede Twente</option>
-					<option value="GLZ">GLZ – Gilze-Rijen Noord-Brabant</option>
-					<option value="GRQ">GRQ – Groningen Eelde</option>
-					<option value="LWR">LWR – Leeuwarden Friesland</option>
-					<option value="LEY">LEY – Lelystad Flevoland</option>
-					<option value="MST">MST – Maastricht Aachen</option>
-					<option value="QAR">QAR – Arnhem Twente</option>
-					<option value="RTM">RTM – Rotterdam The Hague</option>
-					<option value="UDE">UDE – Volkel Noord-Brabant</option>
-					<option value="WOE">WOE – Bergen Op Zoom Noord-Brabant</option>
+                    <option value="AMS">AMS – Schiphol Airport</option>
+					<option value="DHR">DHR – Den Helder Airport</option>
+					<option value="EIN">EIN – Eindhoven Airport</option>
+					<option value="ENS">ENS – Enschede Airport</option>
+					<option value="GLZ">GLZ – Gilze-Rijen Airbase</option>
+					<option value="GRQ">GRQ – Eelde Airport</option>
+					<option value="LWR">LWR – Leeuwarden Airbase</option>
+					<option value="LEY">LEY – Lelystad Airport</option>
+					<option value="MST">MST – Maastricht Airport</option>
+					<option value="QAR">QAR – Deelen Airbase</option>
+					<option value="RTM">RTM – Rotterdam Airport</option>
+					<option value="UDE">UDE – Volkel Airbase</option>
+					<option value="UTC">UTC – Utrecht Airport</option>
+					<option value="WOE">WOE – Woensdrecht Airbase</option>
                   </select>
                 </div>                
 
