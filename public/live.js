@@ -1765,19 +1765,20 @@
   function packetInvolvesFilteredNode(pkt) {
     if (!nodeFilterText) return true;
     const f = nodeFilterText.toLowerCase();
-    const decoded = pkt.decoded || {};
-    const payload = decoded.payload || {};
-    const hops = decoded.path?.hops || [];
 
-    // ADVERT sender name carried inline
-    if (payload.name && payload.name.toLowerCase().includes(f)) return true;
-
-    // Sender pubkey → nodeData name lookup
-    if (payload.pubKey && nodeData[payload.pubKey]) {
-      if ((nodeData[payload.pubKey].name || '').toLowerCase().includes(f)) return true;
+    // resolved_path: server-resolved full pubkeys — O(1) nodeData lookup per hop.
+    // Most reliable for MeshCore repeater paths; skip slower fallbacks when present.
+    const resolved = window.getResolvedPath ? window.getResolvedPath(pkt) : null;
+    if (resolved && resolved.length) {
+      for (const key of resolved) {
+        if (key && nodeData[key] && (nodeData[key].name || '').toLowerCase().includes(f)) return true;
+      }
+      return false;
     }
 
-    // Hop keys (may be full or truncated pubkey prefix) → nodeData name lookup
+    // path_json: per-observation hop keys (preferred over decoded.path.hops for live pkts)
+    // Falls back to decoded.path.hops if path_json is absent.
+    const hops = getParsedPath(pkt).length ? getParsedPath(pkt) : ((pkt.decoded || {}).path?.hops || []);
     for (const hop of hops) {
       const h = (hop.id || hop.public_key || hop).toString().toLowerCase();
       for (const [k, nd] of Object.entries(nodeData)) {
