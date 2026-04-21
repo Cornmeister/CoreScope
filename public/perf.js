@@ -91,28 +91,64 @@
         },
       ]
     },
+    {
+      category: 'MQTT Observers',
+      charts: [
+        { id: 'obs-total',   label: 'Total Observers',   datasets: [{ key: 'totalObservers',   label: 'Total',   color: '#a78bfa' }] },
+        { id: 'obs-online',  label: 'Online Observers',  datasets: [{ key: 'onlineObservers',  label: 'Online',  color: '#22c55e' }] },
+        { id: 'obs-stale',   label: 'Stale Observers',   datasets: [{ key: 'staleObservers',   label: 'Stale',   color: '#eab308' }] },
+        { id: 'obs-offline', label: 'Offline Observers', datasets: [{ key: 'offlineObservers', label: 'Offline', color: '#ef4444' }] },
+      ]
+    },
   ];
 
+  // --- Observer status counts ---
+  // Mirrors the healthStatus() thresholds in observers.js (600 s online, 3600 s stale,
+  // +30 s clock-skew tolerance) so graphs stay consistent with the Observers page.
+  function computeObserverCounts(obsData) {
+    if (!obsData || !Array.isArray(obsData.observers)) {
+      return { total: null, online: null, stale: null, offline: null };
+    }
+    const ONLINE_MS    = 600000;
+    const STALE_MS     = 3600000;
+    const TOLERANCE_MS = 30000;
+    const now = Date.now();
+    let online = 0, stale = 0, offline = 0;
+    for (var i = 0; i < obsData.observers.length; i++) {
+      const ls = obsData.observers[i].last_seen;
+      if (!ls) { offline++; continue; }
+      const ago = now - new Date(ls).getTime();
+      if      (ago < ONLINE_MS + TOLERANCE_MS) online++;
+      else if (ago < STALE_MS  + TOLERANCE_MS) stale++;
+      else                                     offline++;
+    }
+    return { total: obsData.observers.length, online: online, stale: stale, offline: offline };
+  }
+
   // --- Ring buffer helpers ---
-  function pushSample(server) {
+  function pushSample(server, obs) {
     const gr = server.goRuntime;
     const ps = server.packetStore;
     const sq = server.sqlite;
     const sample = {
-      ts:           Date.now(),
-      cpuPercent:   gr ? +gr.cpuPercent                : null,
-      totalSysMB:   gr ? +gr.totalSysMB                : null,
-      heapAllocMB:  gr ? +gr.heapAllocMB               : null,
-      heapInuseMB:  gr ? +gr.heapInuseMB               : null,
-      heapSysMB:    gr ? +gr.heapSysMB                 : null,
-      lastPauseMs:  gr ? +gr.lastPauseMs               : null,
-      goroutines:   gr ? gr.goroutines                 : null,
-      packetsInRAM: ps ? ps.inMemory                   : null,
-      trackedMB:    ps ? +ps.trackedMB                 : null,
-      cacheHitRate: server.cache ? server.cache.hitRate : null,
-      avgMs:        server.avgMs  || null,
-      dbSizeMB:     sq ? +sq.dbSizeMB                  : null,
-      walSizeMB:    sq ? +sq.walSizeMB                 : null,
+      ts:              Date.now(),
+      cpuPercent:      gr  ? +gr.cpuPercent                : null,
+      totalSysMB:      gr  ? +gr.totalSysMB                : null,
+      heapAllocMB:     gr  ? +gr.heapAllocMB               : null,
+      heapInuseMB:     gr  ? +gr.heapInuseMB               : null,
+      heapSysMB:       gr  ? +gr.heapSysMB                 : null,
+      lastPauseMs:     gr  ? +gr.lastPauseMs               : null,
+      goroutines:      gr  ? gr.goroutines                 : null,
+      packetsInRAM:    ps  ? ps.inMemory                   : null,
+      trackedMB:       ps  ? +ps.trackedMB                 : null,
+      cacheHitRate:    server.cache ? server.cache.hitRate  : null,
+      avgMs:           server.avgMs || null,
+      dbSizeMB:        sq  ? +sq.dbSizeMB                  : null,
+      walSizeMB:       sq  ? +sq.walSizeMB                 : null,
+      totalObservers:  obs ? obs.total                     : null,
+      onlineObservers: obs ? obs.online                    : null,
+      staleObservers:  obs ? obs.stale                     : null,
+      offlineObservers:obs ? obs.offline                   : null,
     };
 
     // Short buffer (5 s resolution, 1 h)
@@ -243,13 +279,14 @@
     var el = document.getElementById('perfContent');
     if (!el) return;
     try {
-      const [server, client] = await Promise.all([
+      const [server, client, obsData] = await Promise.all([
         fetch('/api/perf').then(r => r.json()),
-        Promise.resolve(window.apiPerf ? window.apiPerf() : null)
+        Promise.resolve(window.apiPerf ? window.apiPerf() : null),
+        fetch('/api/observers').then(r => r.json()).catch(() => null),
       ]);
       const health = await fetch('/api/health').then(r => r.json()).catch(() => null);
 
-      pushSample(server);
+      pushSample(server, computeObserverCounts(obsData));
 
       if (viewMode === 'graphs') {
         renderGraphs(el);
