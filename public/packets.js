@@ -389,7 +389,7 @@
               expandedHashes.add(h);
               const obsPacket = {...data.packet, observer_id: obs.observer_id, observer_name: obs.observer_name, snr: obs.snr, rssi: obs.rssi, path_json: obs.path_json, resolved_path: obs.resolved_path, direction: obs.direction, timestamp: obs.timestamp, first_seen: obs.timestamp};
               clearParsedCache(obsPacket);
-              selectPacket(obs.id, h, {packet: obsPacket, breakdown: data.breakdown, observations: data.observations}, obs.id);
+              selectPacket(obs.id, h, {packet: obsPacket, observations: data.observations}, obs.id);
             } else {
               selectPacket(data.packet.id, h, data);
             }
@@ -519,7 +519,7 @@
               if (p.decoded_json) existing.decoded_json = p.decoded_json;
               // Update expanded children if this group is expanded
               if (expandedHashes.has(h) && existing._children) {
-                existing._children.unshift(p);
+                existing._children.unshift(clearParsedCache({...p, _isObservation: true}));
                 if (existing._children.length > 200) existing._children.length = 200;
                 sortGroupChildren(existing);
                 // Invalidate row counts — child count changed, so virtual scroll
@@ -683,10 +683,14 @@
       // Restore expanded group children (parallel fetch, Map lookup)
       if (groupByHash && expandedHashes.size > 0) {
         const expandedArr = [...expandedHashes];
+        // Fetch the full packet detail (which includes per-observation rows) for each expanded hash.
+        // Previously this used `/packets?hash=X&limit=20` which returned ONE aggregate row, causing
+        // every "child" row in the table to carry the parent packet.id instead of unique observation
+        // ids — so clicking any child pointed the side pane at the same aggregate. See #866.
         const results = await Promise.all(expandedArr.map(hash => {
           const group = hashIndex.get(hash);
           if (!group) return { hash, group: null, data: null };
-          return api(`/packets?hash=${hash}&limit=20`)
+          return api(`/packets/${hash}`)
             .then(data => ({ hash, group, data }))
             .catch(() => ({ hash, group, data: null }));
         }));
@@ -694,7 +698,15 @@
           if (!group) {
             expandedHashes.delete(hash);
           } else if (data) {
-            group._children = data.packets || [];
+            const pkt = data.packet || group;
+            // Build per-observation children. Spread (pkt, obs) so obs-level fields
+            // (id, observer_id/name, path_json, snr/rssi, timestamp, raw_hex) override
+            // the aggregate. Each child's `id` is the observation id (unique per observer).
+            const obs = data.observations || [];
+            group._children = obs.length
+              ? obs.map(o => clearParsedCache({...pkt, ...o, _isObservation: true}))
+              : [pkt];
+            group._fetchedData = { packet: pkt, observations: obs };
             sortGroupChildren(group);
           }
         }
@@ -1248,7 +1260,7 @@
             const parentData = group._fetchedData;
             const obsPacket = parentData ? {...parentData.packet, observer_id: child.observer_id, observer_name: child.observer_name, snr: child.snr, rssi: child.rssi, path_json: child.path_json, resolved_path: child.resolved_path, direction: child.direction, timestamp: child.timestamp, first_seen: child.timestamp} : child;
             if (parentData) { clearParsedCache(obsPacket); }
-            selectPacket(child.id, parentHash, {packet: obsPacket, breakdown: parentData?.breakdown, observations: parentData?.observations}, child.id);
+            selectPacket(child.id, parentHash, {packet: obsPacket, observations: parentData?.observations}, child.id);
           }
         }
         else if (action === 'select-hash') pktSelectHash(value);
@@ -1806,8 +1818,6 @@
 
   async function renderDetail(panel, data, chosenObsId) {
     const pkt = data.packet;
-    const breakdown = data.breakdown || {};
-    const ranges = breakdown.ranges || [];
     const observations = data.observations || [];
 
     // Per-observation rendering (issue #849):
@@ -1828,6 +1838,15 @@
     const decoded = getParsedDecoded(effectivePkt) || {};
     const pathHops = getParsedPath(effectivePkt) || [];
 
+    // Compute breakdown ranges from the actually-rendered raw_hex (per-observation).
+    // Single source of truth — derived from the same bytes we display, so a
+    // post-#882 per-obs raw_hex with a different path length than the top-level
+    // packet's raw_hex still gets accurate byte highlights.
+    const obsRawHexForRanges = effectivePkt.raw_hex || pkt.raw_hex || '';
+    const ranges = obsRawHexForRanges
+      ? computeBreakdownRanges(obsRawHexForRanges, pkt.route_type, pkt.payload_type)
+      : [];
+
     // Cross-check: hop count from raw_hex path_len byte vs path_json length
     const obsRawHex = effectivePkt.raw_hex || pkt.raw_hex || '';
     let rawHopCount = null;
@@ -1838,7 +1857,7 @@
       if (!isNaN(plByte)) rawHopCount = plByte & 0x3F;
     }
     if (rawHopCount != null && pathHops.length !== rawHopCount) {
-      console.warn(`[CoreScope] Hop count inconsistency for packet ${pkt.hash}: path_json has ${pathHops.length} hops but raw_hex path_len has ${rawHopCount}. Trusting raw_hex.`);
+      console.warn(`[CoreScope] Hop count inconsistency for packet ${pkt.hash}: path_json has ${pathHops.length} hops but raw_hex path_len has ${rawHopCount}. UI shows path_json.`);
     }
 
     // Resolve sender GPS — from packet directly, or from known node in DB
@@ -1975,8 +1994,10 @@
       ? `<div class="anomaly-banner" style="background:var(--warning, #f0ad4e); color:#000; padding:8px 12px; border-radius:4px; margin-bottom:8px; font-weight:600;">⚠️ Anomaly: ${escapeHtml(decoded.anomaly)}</div>`
       : '';
 
-    // Hop count display: trust raw_hex (firmware truth) over path_json
-    const displayHopCount = rawHopCount != null ? rawHopCount : pathHops.length;
+    // Hop count display: use pathHops length (= effective observation's path_json).
+    // The raw_hex/path_json mismatch warning is logged above for diagnostics; the UI
+    // must stay self-consistent — top pill names and byte breakdown rows must agree.
+    const displayHopCount = pathHops.length;
     const obsIndicator = currentObs && observations.length > 1
       ? `<span style="font-size:0.8em;color:var(--text-muted);margin-left:6px">(observation ${observations.indexOf(currentObs) + 1} of ${observations.length})</span>`
       : '';
@@ -2181,18 +2202,19 @@
     rows += fieldRow(off, 'Path Length', '0x' + (buf.slice(off * 2, off * 2 + 2) || '??'), hashCountVal === 0 ? `hash_count=0 (direct advert)` : `hash_size=${hashSizeVal} byte${hashSizeVal !== 1 ? 's' : ''}, hash_count=${hashCountVal}`);
     off += 1;
 
-    // Path — derive hop count from path_len byte (firmware truth), not aggregated _parsedPath
+    // Path — render hops from path_json (what this observation reported).
+    // Byte offsets advance by hashSize * pathHops.length to match.
     const hashSize = isNaN(pathByte0) ? 1 : ((pathByte0 >> 6) + 1);
-    if (typeof hashCountVal === 'number' && hashCountVal > 0) {
-      rows += sectionRow('Path (' + hashCountVal + ' hops)', 'section-path');
-      for (let i = 0; i < hashCountVal; i++) {
+    if (pathHops.length > 0) {
+      rows += sectionRow('Path (' + pathHops.length + ' hops)', 'section-path');
+      for (let i = 0; i < pathHops.length; i++) {
         const hopOff = off + i * hashSize;
-        const hex = buf.slice(hopOff * 2, (hopOff + hashSize) * 2).toUpperCase();
+        const hex = String(pathHops[i] || '').toUpperCase();
         const hopHtml = HopDisplay.renderHop(hex, hopNameCache[hex]);
         const label = `Hop ${i} — ${hopHtml}`;
         rows += fieldRow(hopOff, label, hex, '');
       }
-      off += hashSize * hashCountVal;
+      off += hashSize * pathHops.length;
     }
 
     // Payload
@@ -2466,7 +2488,7 @@
       renderTableRows();
       return;
     }
-    // Single fetch — gets packet + observations + path + breakdown
+    // Single fetch — gets packet + observations + path
     try {
       const data = await api(`/packets/${hash}`);
       const pkt = data.packet;

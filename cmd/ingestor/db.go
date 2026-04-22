@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/meshcore-analyzer/packetpath"
 	_ "modernc.org/sqlite"
 )
 
@@ -189,7 +190,7 @@ func applySchema(db *sql.DB) error {
 	db.Exec(`DROP VIEW IF EXISTS packets_v`)
 	_, vErr := db.Exec(`
 		CREATE VIEW packets_v AS
-			SELECT o.id, t.raw_hex,
+			SELECT o.id, COALESCE(o.raw_hex, t.raw_hex) AS raw_hex,
 				   datetime(o.timestamp, 'unixepoch') AS timestamp,
 				   obs.id AS observer_id, obs.name AS observer_name,
 				   o.direction, o.snr, o.rssi, o.score, t.hash, t.route_type,
@@ -408,6 +409,15 @@ func applySchema(db *sql.DB) error {
 		log.Println("[migration] dropped_packets table created")
 	}
 
+	// Migration: add raw_hex column to observations (#881)
+	row = db.QueryRow("SELECT 1 FROM _migrations WHERE name = 'observations_raw_hex_v1'")
+	if row.Scan(&migDone) != nil {
+		log.Println("[migration] Adding raw_hex column to observations...")
+		db.Exec(`ALTER TABLE observations ADD COLUMN raw_hex TEXT`)
+		db.Exec(`INSERT INTO _migrations (name) VALUES ('observations_raw_hex_v1')`)
+		log.Println("[migration] observations.raw_hex column added")
+	}
+
 	return nil
 }
 
@@ -433,12 +443,13 @@ func (s *Store) prepareStatements() error {
 	}
 
 	s.stmtInsertObservation, err = s.db.Prepare(`
-		INSERT INTO observations (transmission_id, observer_idx, direction, snr, rssi, score, path_json, timestamp)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO observations (transmission_id, observer_idx, direction, snr, rssi, score, path_json, timestamp, raw_hex)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(transmission_id, observer_idx, COALESCE(path_json, '')) DO UPDATE SET
-			snr   = COALESCE(excluded.snr,   snr),
-			rssi  = COALESCE(excluded.rssi,  rssi),
-			score = COALESCE(excluded.score, score)
+			snr     = COALESCE(excluded.snr,     snr),
+			rssi    = COALESCE(excluded.rssi,    rssi),
+			score   = COALESCE(excluded.score,   score),
+			raw_hex = COALESCE(excluded.raw_hex, raw_hex)
 	`)
 	if err != nil {
 		return err
@@ -584,7 +595,7 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 	_, err = s.stmtInsertObservation.Exec(
 		txID, observerIdx, data.Direction,
 		data.SNR, data.RSSI, data.Score,
-		data.PathJSON, epochTs,
+		data.PathJSON, epochTs, nilIfEmpty(data.RawHex),
 	)
 	if err != nil {
 		s.Stats.WriteErrors.Add(1)
@@ -931,11 +942,22 @@ type MQTTPacketMessage struct {
 }
 
 // BuildPacketData constructs a PacketData from a decoded packet and MQTT message.
+// path_json is derived directly from raw_hex header bytes (not decoded.Path.Hops)
+// to guarantee the stored path always matches the raw bytes. This matters for
+// TRACE packets where decoded.Path.Hops is overwritten with payload hops (#886).
 func BuildPacketData(msg *MQTTPacketMessage, decoded *DecodedPacket, observerID, region string) *PacketData {
 	now := time.Now().UTC().Format(time.RFC3339)
 	pathJSON := "[]"
-	if len(decoded.Path.Hops) > 0 {
-		b, _ := json.Marshal(decoded.Path.Hops)
+	// For TRACE packets, path_json must be the payload-decoded route hops
+	// (decoded.Path.Hops), NOT the raw_hex header bytes which are SNR values.
+	// For all other packet types, derive path from raw_hex (#886).
+	if !packetpath.PathBytesAreHops(byte(decoded.Header.PayloadType)) {
+		if len(decoded.Path.Hops) > 0 {
+			b, _ := json.Marshal(decoded.Path.Hops)
+			pathJSON = string(b)
+		}
+	} else if hops, err := packetpath.DecodePathFromRawHex(msg.Raw); err == nil && len(hops) > 0 {
+		b, _ := json.Marshal(hops)
 		pathJSON = string(b)
 	}
 

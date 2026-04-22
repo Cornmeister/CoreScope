@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/meshcore-analyzer/packetpath"
 )
 
 // Server holds shared state for route handlers.
@@ -1055,11 +1056,9 @@ func (s *Server) handlePacketDetail(w http.ResponseWriter, r *http.Request) {
 		pathHops = []interface{}{}
 	}
 
-	rawHex, _ := packet["raw_hex"].(string)
 	writeJSON(w, PacketDetailResponse{
 		Packet:           packet,
 		Path:             pathHops,
-		Breakdown:        BuildBreakdown(rawHex),
 		ObservationCount: observationCount,
 		Observations:     mapSliceToObservations(observations),
 	})
@@ -1118,8 +1117,17 @@ func (s *Server) handlePostPacket(w http.ResponseWriter, r *http.Request) {
 
 	contentHash := ComputeContentHash(hexStr)
 	pathJSON := "[]"
-	if len(decoded.Path.Hops) > 0 {
-		if pj, e := json.Marshal(decoded.Path.Hops); e == nil {
+	// For TRACE packets, path_json must be the payload-decoded route hops
+	// (decoded.Path.Hops), NOT the raw_hex header bytes which are SNR values.
+	// For all other packet types, derive path from raw_hex (#886).
+	if !packetpath.PathBytesAreHops(byte(decoded.Header.PayloadType)) {
+		if len(decoded.Path.Hops) > 0 {
+			if pj, e := json.Marshal(decoded.Path.Hops); e == nil {
+				pathJSON = string(pj)
+			}
+		}
+	} else if hops, err := packetpath.DecodePathFromRawHex(hexStr); err == nil && len(hops) > 0 {
+		if pj, e := json.Marshal(hops); e == nil {
 			pathJSON = string(pj)
 		}
 	}

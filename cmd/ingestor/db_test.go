@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/meshcore-analyzer/packetpath"
 )
 
 func tempDBPath(t *testing.T) string {
@@ -1966,5 +1969,157 @@ func TestInsertObservationSNRFillIn(t *testing.T) {
 	}
 	if rssi3 == nil || *rssi3 != rssi {
 		t.Errorf("RSSI overwritten by null arrival: got %v, want %v", rssi3, rssi)
+	}
+}
+
+// TestPerObservationRawHex verifies that two MQTT packets for the same hash
+// from different observers store distinct raw_hex per observation (#881).
+func TestPerObservationRawHex(t *testing.T) {
+	store, err := OpenStore(tempDBPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Register two observers
+	store.UpsertObserver("obs-A", "Observer A", "", nil)
+	store.UpsertObserver("obs-B", "Observer B", "", nil)
+
+	hash := "abc123def456"
+	rawA := "c0ffee01"
+	rawB := "c0ffee0201aa"
+	dir := "RX"
+
+	// First observation from observer A
+	pdA := &PacketData{
+		RawHex:    rawA,
+		Hash:      hash,
+		Timestamp: "2026-04-21T10:00:00Z",
+		ObserverID: "obs-A",
+		Direction:  &dir,
+		PathJSON:   "[]",
+	}
+	isNew, err := store.InsertTransmission(pdA)
+	if err != nil {
+		t.Fatalf("insert A: %v", err)
+	}
+	if !isNew {
+		t.Fatal("expected new transmission")
+	}
+
+	// Second observation from observer B (same hash, different raw bytes)
+	pdB := &PacketData{
+		RawHex:    rawB,
+		Hash:      hash,
+		Timestamp: "2026-04-21T10:00:01Z",
+		ObserverID: "obs-B",
+		Direction:  &dir,
+		PathJSON:   `["aabb"]`,
+	}
+	isNew2, err := store.InsertTransmission(pdB)
+	if err != nil {
+		t.Fatalf("insert B: %v", err)
+	}
+	if isNew2 {
+		t.Fatal("expected duplicate transmission")
+	}
+
+	// Query observations and verify per-observation raw_hex
+	rows, err := store.db.Query(`
+		SELECT o.raw_hex, obs.id
+		FROM observations o
+		LEFT JOIN observers obs ON obs.rowid = o.observer_idx
+		ORDER BY o.id ASC
+	`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+
+	type obsResult struct {
+		rawHex     string
+		observerID string
+	}
+	var results []obsResult
+	for rows.Next() {
+		var rh, oid sql.NullString
+		if err := rows.Scan(&rh, &oid); err != nil {
+			t.Fatal(err)
+		}
+		results = append(results, obsResult{
+			rawHex:     rh.String,
+			observerID: oid.String,
+		})
+	}
+
+	if len(results) != 2 {
+		t.Fatalf("expected 2 observations, got %d", len(results))
+	}
+	if results[0].rawHex != rawA {
+		t.Errorf("obs A raw_hex: got %q, want %q", results[0].rawHex, rawA)
+	}
+	if results[1].rawHex != rawB {
+		t.Errorf("obs B raw_hex: got %q, want %q", results[1].rawHex, rawB)
+	}
+	if results[0].rawHex == results[1].rawHex {
+		t.Error("both observations have same raw_hex — should differ")
+	}
+}
+
+// TestBuildPacketData_TraceUsesPayloadHops verifies that TRACE packets use
+// payload-decoded route hops in path_json (NOT the raw_hex header SNR bytes).
+// Issue #886 / #887.
+func TestBuildPacketData_TraceUsesPayloadHops(t *testing.T) {
+	// TRACE packet: header path has SNR bytes [30,2D,0D,23], but decoded.Path.Hops
+	// is overwritten to payload hops [67,33,D6,33,67].
+	rawHex := "2604302D0D2359FEE7B100000000006733D63367"
+	decoded, err := DecodePacket(rawHex, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// decoded.Path.Hops should be the TRACE-replaced hops (payload hops)
+	if len(decoded.Path.Hops) != 5 {
+		t.Fatalf("expected 5 decoded hops, got %d", len(decoded.Path.Hops))
+	}
+
+	msg := &MQTTPacketMessage{Raw: rawHex}
+	pd := BuildPacketData(msg, decoded, "test-obs", "TST")
+
+	// For TRACE: path_json MUST be the payload-decoded route hops, NOT the SNR bytes
+	expectedPathJSON := `["67","33","D6","33","67"]`
+	if pd.PathJSON != expectedPathJSON {
+		t.Errorf("path_json = %s, want %s (TRACE must use payload hops)", pd.PathJSON, expectedPathJSON)
+	}
+
+	// Verify that DecodePathFromRawHex returns the SNR bytes (header path) which differ
+	headerHops, herr := packetpath.DecodePathFromRawHex(rawHex)
+	if herr != nil {
+		t.Fatal(herr)
+	}
+	headerJSON, _ := json.Marshal(headerHops)
+	if string(headerJSON) == expectedPathJSON {
+		t.Error("header path (SNR) should differ from payload hops for TRACE")
+	}
+}
+
+// TestBuildPacketData_NonTracePathJSON verifies non-TRACE packets also derive path from raw_hex.
+func TestBuildPacketData_NonTracePathJSON(t *testing.T) {
+	// A simple ADVERT packet (payload type 0) with 2 hops, hash_size 1
+	// Header 0x09 = FLOOD(1), ADVERT(2), version 0
+	// Path byte 0x02 = hash_size 1, hash_count 2
+	// Path bytes: AA BB
+	rawHex := "0902AABB" + "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+	decoded, err := DecodePacket(rawHex, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msg := &MQTTPacketMessage{Raw: rawHex}
+	pd := BuildPacketData(msg, decoded, "obs1", "TST")
+
+	expectedPathJSON := `["AA","BB"]`
+	if pd.PathJSON != expectedPathJSON {
+		t.Errorf("path_json = %s, want %s", pd.PathJSON, expectedPathJSON)
 	}
 }

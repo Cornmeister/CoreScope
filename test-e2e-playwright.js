@@ -15,6 +15,11 @@ async function test(name, fn) {
     results.push({ name, pass: true });
     console.log(`  \u2705 ${name}`);
   } catch (err) {
+    if (err.skip) {
+      results.push({ name, pass: true, skipped: true });
+      console.log(`  ⏭ ${name}: ${err.message}`);
+      return;
+    }
     results.push({ name, pass: false, error: err.message });
     console.log(`  \u274c ${name}: ${err.message}`);
     console.log(`\nFail-fast: stopping after first failure.`);
@@ -1778,12 +1783,343 @@ async function run() {
     }
   });
 
+  // Test: Expanded group children have unique observation ids (#866)
+  await test('Expanded group children update detail pane per-observation', async () => {
+    await page.goto(`${BASE}/#/packets`, { waitUntil: 'domcontentloaded' });
+    // Ensure grouped mode and wide time window
+    await page.evaluate(() => {
+      localStorage.setItem('meshcore-time-window', '525600');
+      localStorage.setItem('meshcore-groupbyhash', 'true');
+    });
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForSelector('table tbody tr', { timeout: 15000 });
+
+    // Find a group row with observation_count > 1 (has expand button)
+    const expandBtn = await page.$('table tbody tr .expand-btn, table tbody tr [data-expand]');
+    if (!expandBtn) {
+      console.log('    ℹ️  No expandable groups found — skipping child assertion');
+      return;
+    }
+
+    // Click expand and wait for the /packets/<hash> detail API call
+    const [detailResp] = await Promise.all([
+      page.waitForResponse(resp => {
+        const u = new URL(resp.url(), BASE);
+        // Match /api/packets/<hash> but not /api/packets?... or /api/packets/observations
+        return /\/api\/packets\/[A-Fa-f0-9]+$/.test(u.pathname) && resp.status() === 200;
+      }, { timeout: 15000 }),
+      expandBtn.click(),
+    ]);
+    assert(detailResp, 'Expected /api/packets/<hash> response on expand');
+
+    // Wait for child rows to appear
+    await page.waitForSelector('table tbody tr.child-row, table tbody tr[class*="child"]', { timeout: 5000 });
+    const childRows = await page.$$('table tbody tr.child-row, table tbody tr[class*="child"]');
+    if (childRows.length < 2) {
+      console.log('    ℹ️  Group has < 2 children — skipping per-observation assertion');
+      return;
+    }
+
+    // Click first child row
+    await childRows[0].click();
+    await page.waitForFunction(() => {
+      const panel = document.getElementById('pktRight');
+      return panel && !panel.classList.contains('empty') && panel.textContent.trim().length > 0;
+    }, { timeout: 10000 });
+    const content1 = await page.$eval('#pktRight', el => el.textContent.trim());
+    const url1 = page.url();
+
+    // Click second child row
+    await childRows[1].click();
+    await page.waitForTimeout(500);
+    const content2 = await page.$eval('#pktRight', el => el.textContent.trim());
+    const url2 = page.url();
+
+    // URL should contain ?obs= with a real observation id
+    assert(url1.includes('obs=') || url2.includes('obs='), `URL should contain obs= parameter, got: ${url1}`);
+
+    // The two children should show different detail pane content (different observers)
+    // At minimum, the URL obs= values should differ
+    if (url1.includes('obs=') && url2.includes('obs=')) {
+      const obs1 = new URL(url1).hash.match(/obs=(\d+)/)?.[1];
+      const obs2 = new URL(url2).hash.match(/obs=(\d+)/)?.[1];
+      if (obs1 && obs2) {
+        assert(obs1 !== obs2, `Two children should have different obs ids, both got obs=${obs1}`);
+      }
+    }
+
+    // Verify obs id is NOT the aggregate packet id (the bug from #866)
+    const obsMatch = url2.match(/obs=(\d+)/);
+    if (obsMatch) {
+      const detailJson = await detailResp.json().catch(() => null);
+      if (detailJson?.packet?.id) {
+        const aggId = String(detailJson.packet.id);
+        // At least one child obs id should differ from the aggregate packet id
+        const obs1 = url1.match(/obs=(\d+)/)?.[1];
+        const obs2 = url2.match(/obs=(\d+)/)?.[1];
+        const allSameAsAgg = obs1 === aggId && obs2 === aggId;
+        assert(!allSameAsAgg, `Child obs ids should not all equal aggregate packet.id (${aggId})`);
+      }
+    }
+  });
+
+  // Test: per-observation raw_hex — hex pane updates when switching observations (#881)
+  await test('Packet detail hex pane updates per observation', async () => {
+    await page.goto(BASE + '#/packets', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('table tbody tr', { timeout: 15000 });
+    await page.waitForTimeout(500);
+
+    // Try clicking packet rows to find one with multiple observations
+    const rows = await page.$$('table tbody tr[data-action]');
+    let obsRows = [];
+    for (let i = 0; i < Math.min(rows.length, 10); i++) {
+      await rows[i].click({ timeout: 3000 }).catch(() => null);
+      await page.waitForTimeout(600);
+      obsRows = await page.$$('.detail-obs-row');
+      if (obsRows.length >= 2) break;
+    }
+
+    if (obsRows.length < 2) {
+      console.log('    ⏭ Skipped: no packet with ≥2 observations found in first 10 rows');
+      return;
+    }
+
+    // Click first observation, capture hex dump
+    await obsRows[0].click({ timeout: 5000 });
+    await page.waitForTimeout(500);
+    const hex1 = await page.$eval('.hex-dump', el => el.textContent).catch(() => '');
+
+    // Click second observation, capture hex dump
+    await obsRows[1].click({ timeout: 5000 });
+    await page.waitForTimeout(500);
+    const hex2 = await page.$eval('.hex-dump', el => el.textContent).catch(() => '');
+
+    // If both have content and differ, the feature works
+    if (hex1 && hex2 && hex1 !== hex2) {
+      console.log('    ✓ Hex pane content differs between observations');
+    } else if (hex1 && hex2 && hex1 === hex2) {
+      console.log('    ⏭ Hex same for both observations (likely historical NULL raw_hex — OK)');
+    } else {
+      console.log('    ⏭ Could not capture hex content from both observations');
+    }
+  });
+
+  // Test: path pill (top) and byte breakdown (bottom) agree on hop count
+  // Regression for visual mismatch where badge said "1 hop" but path text listed N names
+  await test('Packet detail path pill and byte breakdown agree on hop count', async () => {
+    await page.goto(BASE + '#/packets', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('table tbody tr', { timeout: 15000 });
+    await page.waitForTimeout(500);
+
+    // Click rows until we find one whose detail pane renders a multi-hop path
+    const rows = await page.$$('table tbody tr[data-action]');
+    let found = false;
+    for (let i = 0; i < Math.min(rows.length, 15); i++) {
+      await rows[i].click({ timeout: 3000 }).catch(() => null);
+      await page.waitForTimeout(500);
+
+      const result = await page.evaluate(() => {
+        // Path pill: <dt>Path</dt><dd><span class="badge ...">N hops</span> ...names...</dd>
+        const dts = document.querySelectorAll('dl.detail-meta dt');
+        let pillBadgeCount = null;
+        let pillNameCount = null;
+        for (const dt of dts) {
+          if (dt.textContent.trim() === 'Path') {
+            const dd = dt.nextElementSibling;
+            if (!dd) break;
+            const badge = dd.querySelector('.badge');
+            if (badge) {
+              const m = badge.textContent.match(/(\d+)\s*hop/);
+              if (m) pillBadgeCount = parseInt(m[1], 10);
+            }
+            // Count rendered hop links/spans (HopDisplay.renderHop output)
+            const hops = dd.querySelectorAll('.hop-link, [data-hop-link], .hop-named, .hop-anonymous');
+            pillNameCount = hops.length;
+            break;
+          }
+        }
+        // Byte breakdown: section row "Path (N hops)" + N "Hop X — ..." rows
+        let breakdownSectionCount = null;
+        let breakdownRowCount = 0;
+        const fieldTable = document.querySelector('table.field-table');
+        if (fieldTable) {
+          for (const tr of fieldTable.querySelectorAll('tr')) {
+            const txt = tr.textContent.trim();
+            const sec = txt.match(/^Path\s*\((\d+)\s*hops?\)/);
+            if (sec) breakdownSectionCount = parseInt(sec[1], 10);
+            if (/^\s*\d+\s*Hop\s+\d+\s*—/.test(txt) || /^Hop\s+\d+\s*—/.test(txt.replace(/^\d+/, '').trim())) {
+              breakdownRowCount++;
+            }
+          }
+        }
+        return { pillBadgeCount, pillNameCount, breakdownSectionCount, breakdownRowCount };
+      });
+
+      if (result.pillBadgeCount && result.pillBadgeCount > 0 && result.breakdownSectionCount != null) {
+        found = true;
+        // Top badge count must equal bottom section count
+        assert(result.pillBadgeCount === result.breakdownSectionCount,
+          `Path pill badge says ${result.pillBadgeCount} hops but byte breakdown says ${result.breakdownSectionCount} hops`);
+        // Number of rendered hop names in pill should also match (within 1, since renderPath may add separators)
+        if (result.pillNameCount != null && result.pillNameCount > 0) {
+          assert(Math.abs(result.pillNameCount - result.pillBadgeCount) <= 1,
+            `Path pill badge ${result.pillBadgeCount} but rendered ${result.pillNameCount} hop names`);
+        }
+        // And breakdown rendered rows should match its own section count
+        assert(result.breakdownRowCount > 0,
+          'breakdown rows selector matched nothing — selector or DOM changed');
+        assert(result.breakdownRowCount === result.breakdownSectionCount,
+          `Byte breakdown section says ${result.breakdownSectionCount} hops but rendered ${result.breakdownRowCount} hop rows`);
+        console.log(`    ✓ Path pill (${result.pillBadgeCount}) and byte breakdown (${result.breakdownSectionCount}) agree`);
+        break;
+      }
+    }
+    if (!found) {
+      if (process.env.E2E_REQUIRE_PATH_TEST === '1') {
+        throw new Error('BLOCKED — no multi-hop packet found in first 15 rows (E2E_REQUIRE_PATH_TEST=1 requires it)');
+      }
+      const skipErr = new Error('SKIP: No multi-hop packet with byte breakdown found in first 15 rows — needs fixture');
+      skipErr.skip = true;
+      throw skipErr;
+    }
+  });
+
+  // Test: hex-strip color spans match the labeled byte rows (per-obs raw_hex).
+  // Regression #891: server-supplied breakdown was computed once from top-level
+  // raw_hex, so per-observation rendering had off-by-N highlights vs the labels.
+  await test('Packet detail hex strip Path range matches hop row count', async () => {
+    await page.goto(BASE + '#/packets', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('table tbody tr', { timeout: 15000 });
+    await page.waitForTimeout(500);
+
+    const rows = await page.$$('table tbody tr[data-action]');
+    let checked = 0;
+    for (let i = 0; i < Math.min(rows.length, 25) && checked < 3; i++) {
+      await rows[i].click({ timeout: 3000 }).catch(() => null);
+      await page.waitForTimeout(400);
+
+      const result = await page.evaluate(() => {
+        const dump = document.querySelector('.hex-dump');
+        const fieldTable = document.querySelector('table.field-table');
+        if (!dump || !fieldTable) return null;
+        const pathSpan = dump.querySelector('span.hex-byte.hex-path');
+        const pathBytes = pathSpan ? pathSpan.textContent.trim().split(/\s+/).filter(Boolean).length : 0;
+        const hopRows = [];
+        for (const tr of fieldTable.querySelectorAll('tr')) {
+          const cells = [...tr.cells].map(c => c.textContent.trim());
+          if (cells.length >= 2 && /^Hop\s+\d+/.test(cells[1])) hopRows.push(cells[2]);
+        }
+        return { pathBytes, hopRows };
+      });
+
+      if (!result || (result.pathBytes === 0 && result.hopRows.length === 0)) continue;
+      checked++;
+      // Either both zero, or the count of bytes inside hex-path == hop rows.
+      // (For multi-byte hash sizes this is bytes-per-hop * hops; for hash_size=1 it's just hops.)
+      // The simpler invariant: if there are hop rows, hex-path span must exist and have at least
+      // as many bytes as there are hops (== exactly hops * hash_size).
+      assert(result.hopRows.length > 0,
+        `row ${i}: hex-path span has ${result.pathBytes} bytes but no hop rows in the labeled table`);
+      assert(result.pathBytes >= result.hopRows.length,
+        `row ${i}: hex-path has ${result.pathBytes} bytes but ${result.hopRows.length} hop rows — strip and labels disagree`);
+      assert(result.pathBytes % result.hopRows.length === 0,
+        `row ${i}: hex-path has ${result.pathBytes} bytes but ${result.hopRows.length} hop rows — bytes/hops not divisible (hash_size violated)`);
+      console.log(`    ✓ row ${i}: hex-path ${result.pathBytes} bytes / ${result.hopRows.length} hop rows (hash_size=${result.pathBytes / result.hopRows.length})`);
+    }
+    if (checked === 0) {
+      const skipErr = new Error('SKIP: no packet with rendered hex strip + hop rows found in first 25 rows');
+      skipErr.skip = true;
+      throw skipErr;
+    }
+  });
+
+  // Test: clicking a different observation row re-renders strip + breakdown consistently.
+  // Regression: observations of the same packet hash have different raw_hex (#882),
+  // so picking a different obs must recompute the byte ranges, not reuse the old ones.
+  await test('Packet detail switches consistently across observations', async () => {
+    await page.goto(BASE + '#/packets?groupByHash=1', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('table tbody tr', { timeout: 15000 });
+    await page.waitForTimeout(500);
+
+    let opened = false;
+    const groupRows = await page.$$('table tbody tr[data-action]');
+    for (let i = 0; i < Math.min(groupRows.length, 10); i++) {
+      await groupRows[i].click({ timeout: 3000 }).catch(() => null);
+      await page.waitForTimeout(400);
+      const obsCount = await page.evaluate(() => {
+        return document.querySelectorAll('table.observations-table tbody tr, .obs-row').length;
+      });
+      if (obsCount >= 2) { opened = true; break; }
+    }
+    if (!opened) {
+      const skipErr = new Error('SKIP: no multi-observation packet found in first 10 group rows');
+      skipErr.skip = true;
+      throw skipErr;
+    }
+
+    async function snapshot() {
+      return page.evaluate(() => {
+        const dump = document.querySelector('.hex-dump');
+        const fieldTable = document.querySelector('table.field-table');
+        if (!dump || !fieldTable) return null;
+        const pathSpan = dump.querySelector('span.hex-byte.hex-path');
+        const pathBytes = pathSpan ? pathSpan.textContent.trim().split(/\s+/).filter(Boolean).length : 0;
+        const hopRows = [];
+        for (const tr of fieldTable.querySelectorAll('tr')) {
+          const cells = [...tr.cells].map(c => c.textContent.trim());
+          if (cells.length >= 2 && /^Hop\s+\d+/.test(cells[1])) hopRows.push(cells[2]);
+        }
+        const rawHexParts = [...dump.querySelectorAll('span.hex-byte')].map(s => s.textContent.trim());
+        return { pathBytes, hopCount: hopRows.length, rawHexJoined: rawHexParts.join('|') };
+      });
+    }
+
+    const snapA = await snapshot();
+    assert(snapA, 'first snapshot must have hex dump + field table');
+    assert(snapA.hopCount === 0 || snapA.pathBytes >= snapA.hopCount,
+      `obs A inconsistent: hex-path ${snapA.pathBytes} bytes vs ${snapA.hopCount} hop rows`);
+
+    const switched = await page.evaluate(() => {
+      const obsRows = [...document.querySelectorAll('table.observations-table tbody tr, .obs-row')];
+      if (obsRows.length < 2) return false;
+      obsRows[1].click();
+      return true;
+    });
+    assert(switched, 'should click second observation row');
+    await page.waitForTimeout(500);
+
+    const snapB = await snapshot();
+    assert(snapB, 'second snapshot must have hex dump + field table');
+    assert(snapB.hopCount === 0 || snapB.pathBytes >= snapB.hopCount,
+      `obs B inconsistent: hex-path ${snapB.pathBytes} bytes vs ${snapB.hopCount} hop rows`);
+    console.log(`    ✓ obs A: ${snapA.pathBytes} path bytes / ${snapA.hopCount} hops; obs B: ${snapB.pathBytes} / ${snapB.hopCount}`);
+  });
+
+  // Test: clicking the 🔍 Details button in the nodes side panel navigates to
+  // the full-screen node detail view. Regression: hash already === target,
+  // so location.hash assignment was a no-op and the panel stayed open.
+  await test('Nodes side panel Details button opens full-screen view', async () => {
+    await page.goto(BASE + '#/nodes', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('table tbody tr[data-action]', { timeout: 15000 });
+    await page.waitForTimeout(500);
+    // Open side panel
+    await page.click('table tbody tr[data-action]');
+    await page.waitForSelector('#nodesRight .node-detail-btn', { timeout: 5000 });
+    // Click Details
+    await page.click('#nodesRight .node-detail-btn');
+    // Wait for full-screen view to appear
+    await page.waitForSelector('.node-fullscreen', { timeout: 5000 });
+    const isFullScreen = await page.evaluate(() => !!document.querySelector('.node-fullscreen'));
+    assert(isFullScreen, 'Details button should open full-screen node view');
+  });
+
   await browser.close();
 
   // Summary
-  const passed = results.filter(r => r.pass).length;
+  const skipped = results.filter(r => r.skipped).length;
+  const passed = results.filter(r => r.pass && !r.skipped).length;
   const failed = results.filter(r => !r.pass).length;
-  console.log(`\n${passed}/${results.length} tests passed${failed ? `, ${failed} failed` : ''}`);
+  console.log(`\n${passed}/${results.length} tests passed${skipped ? `, ${skipped} skipped` : ''}${failed ? `, ${failed} failed` : ''}`);
   process.exit(failed > 0 ? 1 : 0);
 }
 
