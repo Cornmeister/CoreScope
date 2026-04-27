@@ -58,8 +58,9 @@
 					<option value="ENS">ENS – Enschede Airport</option>
 					<option value="GLZ">GLZ – Gilze-Rijen Airbase</option>
 					<option value="GRQ">GRQ – Eelde Airport</option>
-					<option value="LWR">LWR – Leeuwarden Airbase</option>
 					<option value="LEY">LEY – Lelystad Airport</option>
+					<option value="LID">LID – Valkenburg Airbase</option>
+					<option value="LWR">LWR – Leeuwarden Airbase</option>
 					<option value="MST">MST – Maastricht Airport</option>
 					<option value="QAR">QAR – Deelen Airbase</option>
 					<option value="RTM">RTM – Rotterdam Airport</option>
