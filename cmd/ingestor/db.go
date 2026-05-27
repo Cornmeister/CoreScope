@@ -96,7 +96,26 @@ func OpenStoreWithInterval(dbPath string, sampleIntervalSec int) (*Store, error)
 		return nil, fmt.Errorf("creating data dir: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=auto_vacuum(INCREMENTAL)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)")
+	// SQLite PRAGMAs, in addition to the auto_vacuum/WAL/FK/busy_timeout
+	// baseline:
+	//
+	//   synchronous=NORMAL — safe in WAL mode (commits durably fsync only
+	//     on checkpoint), 2-3× faster writes during sustained ingest.
+	//   temp_store=MEMORY — keep temporary B-trees in RAM instead of disk.
+	//     Speeds up COUNT(DISTINCT)/GROUP BY in retention/analytics queries.
+	//   cache_size=-32768 — 32 MiB per-connection page cache. Writer has
+	//     SetMaxOpenConns(1) below so this is the total writer cache.
+	//   journal_size_limit=33554432 — cap WAL file growth at 32 MiB so
+	//     between checkpoints it stays bounded.
+	db, err := sql.Open("sqlite", dbPath+
+		"?_pragma=auto_vacuum(INCREMENTAL)"+
+		"&_pragma=journal_mode(WAL)"+
+		"&_pragma=foreign_keys(ON)"+
+		"&_pragma=busy_timeout(5000)"+
+		"&_pragma=synchronous(NORMAL)"+
+		"&_pragma=temp_store(MEMORY)"+
+		"&_pragma=cache_size(-32768)"+
+		"&_pragma=journal_size_limit(33554432)")
 	if err != nil {
 		return nil, fmt.Errorf("opening db: %w", err)
 	}
@@ -1186,6 +1205,30 @@ func (s *Store) Checkpoint() {
 	} else {
 		log.Println("[db] WAL checkpoint complete")
 	}
+}
+
+// CheckpointPassive runs a PASSIVE wal_checkpoint — flushes as many WAL frames
+// as it can to the main DB without blocking concurrent readers or writers. Used
+// by the periodic ticker to keep the WAL file from growing unboundedly between
+// writer-startup checkpoints. Quiet on success; a single line on error.
+func (s *Store) CheckpointPassive() {
+	if _, err := s.db.Exec("PRAGMA wal_checkpoint(PASSIVE)"); err != nil {
+		log.Printf("[db] WAL passive checkpoint error: %v", err)
+	}
+}
+
+// RunAnalyze refreshes SQLite's query-planner statistics by running ANALYZE
+// across every table. The planner uses these stats to pick between candidate
+// indexes — without them, decisions are made on rough rule-of-thumb defaults
+// that can be wrong by an order of magnitude on a populated DB. Cheap on
+// modern SQLite (samples a fixed number of pages per table, not full scans).
+// Run on startup once and from the daily maintenance ticker.
+func (s *Store) RunAnalyze() {
+	if _, err := s.db.Exec("ANALYZE"); err != nil {
+		log.Printf("[db] ANALYZE error: %v", err)
+		return
+	}
+	log.Println("[db] ANALYZE complete — query planner stats refreshed")
 }
 
 // BackfillPathJSONAsync launches the path_json backfill in a background goroutine.

@@ -1,13 +1,16 @@
 package main
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"runtime"
@@ -45,10 +48,11 @@ type Server struct {
 	// computing a fresh response (potentially blocked on s.mu.RLock during
 	// eviction), all other goroutines serve the existing stale cache instead
 	// of queuing behind statsMu for 90+ seconds.
-	statsMu        sync.Mutex
-	statsCache     *StatsResponse
-	statsCachedAt  time.Time
-	statsComputing bool
+	statsMu         sync.Mutex
+	statsCache      *StatsResponse
+	statsCacheBytes []byte // pre-marshaled JSON of statsCache; invalidated together
+	statsCachedAt   time.Time
+	statsComputing  bool
 
 	// Guards s.cfg.GeoFilter — read by ingest/handler goroutines, written by PUT handler
 	cfgMu sync.RWMutex
@@ -115,12 +119,15 @@ type Server struct {
 	perfCachedAt  time.Time
 	perfComputing bool
 
-	// Per-observer analytics cache (60s TTL). The /api/observers/:id/analytics
-	// endpoint is expensive (DB aggregate + path-sample queries). Without caching,
+	// Per-observer analytics cache. The /api/observers/:id/analytics endpoint
+	// is expensive (DB aggregate + path-sample queries). Without caching,
 	// repeated loads of the same observer page hammer the DB. Cache key is
-	// "observerID|totalMinutes".
-	obsAnalyticsMu    sync.Mutex
-	obsAnalyticsCache map[string]*obsAnalyticsCacheEntry
+	// "observerID|totalMinutes". A per-key singleflight map coalesces
+	// concurrent cache-miss requests so we don't thundering-herd the DB when
+	// many clients open the same observer page within the same TTL window.
+	obsAnalyticsMu       sync.Mutex
+	obsAnalyticsCache    map[string]*obsAnalyticsCacheEntry
+	obsAnalyticsInFlight map[string]chan struct{}
 
 	losHandler *losHandler // elevation cache + HTTP client for LOS API calls
 	losOnce    sync.Once   // ensures losHandler is initialized exactly once
@@ -130,6 +137,181 @@ type Server struct {
 
 	// Cached /api/route-history responses by hour window.
 	routeHistoryCache routeHistoryCacheState
+
+	// Single-key bytes-payload caches with singleflight. These endpoints are
+	// hot (frontend polls them on a timer) and the response shape is identical
+	// across all callers, so we keep the marshaled JSON and reuse it.
+	observersListCache  singleKeyByteCache
+	observersStatsCache singleKeyByteCache
+	statsBytesCache     singleKeyByteCache
+	nodeInfoMapCache    nodeInfoMapCacheState
+
+	// Per-key bytes-payload caches. Same singleflight semantics as
+	// singleKeyByteCache but keyed by a string so the same endpoint can
+	// cache distinct query-parameter combinations independently.
+	nodesListCache perKeyByteCache
+	channelsCache  perKeyByteCache
+}
+
+// perKeyByteCache is the multi-key version of singleKeyByteCache — separate
+// TTL'd entries for each distinct cache key, with per-key singleflight so
+// concurrent misses on the same key share one build.
+type perKeyByteCache struct {
+	mu       sync.Mutex
+	entries  map[string]*perKeyByteCacheEntry
+	inFlight map[string]chan struct{}
+}
+
+type perKeyByteCacheEntry struct {
+	payload   []byte
+	etag      string
+	expiresAt time.Time
+}
+
+func (c *perKeyByteCache) serve(w http.ResponseWriter, r *http.Request, key string, ttl time.Duration, errContext string, opts serveOpts, build func() ([]byte, error)) {
+	for {
+		c.mu.Lock()
+		if c.entries == nil {
+			c.entries = make(map[string]*perKeyByteCacheEntry)
+		}
+		if c.inFlight == nil {
+			c.inFlight = make(map[string]chan struct{})
+		}
+		if e, ok := c.entries[key]; ok && time.Now().Before(e.expiresAt) {
+			payload, etag := e.payload, e.etag
+			c.mu.Unlock()
+			writeServedBytes(w, r, payload, etag, opts)
+			return
+		}
+		if ch, inflight := c.inFlight[key]; inflight {
+			c.mu.Unlock()
+			<-ch
+			continue
+		}
+		done := make(chan struct{})
+		c.inFlight[key] = done
+		c.mu.Unlock()
+
+		var (
+			payload []byte
+			err     error
+			etag    string
+		)
+		func() {
+			defer func() {
+				c.mu.Lock()
+				if err == nil && payload != nil {
+					etag = computeETag(payload)
+					c.entries[key] = &perKeyByteCacheEntry{
+						payload:   payload,
+						etag:      etag,
+						expiresAt: time.Now().Add(ttl),
+					}
+				}
+				delete(c.inFlight, key)
+				c.mu.Unlock()
+				close(done)
+			}()
+			payload, err = build()
+		}()
+		if err != nil {
+			writeInternalError(w, errContext, err)
+			return
+		}
+		writeServedBytes(w, r, payload, etag, opts)
+		return
+	}
+}
+
+// writeServedBytes is the per-key analogue of singleKeyByteCache.writeServed.
+// Honors If-None-Match → 304 and stamps the Cache-Control header from opts.
+func writeServedBytes(w http.ResponseWriter, r *http.Request, payload []byte, etag string, opts serveOpts) {
+	if etag != "" {
+		w.Header().Set("ETag", etag)
+		if ifNoneMatchHits(r.Header.Get("If-None-Match"), etag) {
+			if opts.CacheControl != "" {
+				w.Header().Set("Cache-Control", opts.CacheControl)
+			}
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+	if opts.CacheControl != "" {
+		w.Header().Set("Cache-Control", opts.CacheControl)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(payload) //nolint:errcheck
+}
+
+// singleKeyByteCache is a tiny TTL cache + singleflight wrapper for endpoints
+// that don't vary by URL path/query. Concurrent cache-miss requests share one
+// in-flight computation; cache hits return the pre-marshaled bytes directly so
+// json.Marshal isn't repeated per request.
+//
+// Also tracks an ETag derived from a SHA-256 of the payload so the handler can
+// return 304 Not Modified when the client re-asks for the same content — this
+// is the big win on slow-changing data like nodes/observers/channels: even
+// after the TTL expires and the browser revalidates, if the payload bytes are
+// identical the server can answer with an empty 304 body instead of
+// re-shipping ~170 KB compressed.
+type singleKeyByteCache struct {
+	mu        sync.Mutex
+	payload   []byte
+	etag      string
+	expiresAt time.Time
+	inFlight  chan struct{}
+}
+
+// computeETag returns a stable, quoted ETag value for the given payload.
+// Truncated SHA-256: 16 hex chars (64 bits of entropy) is plenty for HTTP
+// validators — collisions are 2^32 hashes away and a collision only causes
+// a stale 304, not a security issue.
+func computeETag(payload []byte) string {
+	sum := sha256.Sum256(payload)
+	return `"` + hex.EncodeToString(sum[:8]) + `"`
+}
+
+// ifNoneMatchHits returns true if the request's If-None-Match header
+// semantically matches storedETag, using RFC 7232 §2.3.2 weak comparison —
+// the W/ prefix on either side is ignored, and "*" is a wildcard. This
+// matters because intermediaries (Cloudflare, Caddy, …) rewrite strong
+// ETags to weak (W/"…") when they apply a content-encoding transform like
+// gzip or brotli on top of our response. Without weak comparison, the
+// client's If-None-Match never matches our cache's strong ETag and we
+// always send the full body — 304 never fires.
+func ifNoneMatchHits(reqHeader, storedETag string) bool {
+	if reqHeader == "" || storedETag == "" {
+		return false
+	}
+	storedStripped := strings.TrimPrefix(storedETag, "W/")
+	// If-None-Match may be a comma-separated list, or "*". Split and try each.
+	for _, part := range strings.Split(reqHeader, ",") {
+		tag := strings.TrimSpace(part)
+		if tag == "*" {
+			return true
+		}
+		if strings.TrimPrefix(tag, "W/") == storedStripped {
+			return true
+		}
+	}
+	return false
+}
+
+// writeNotModified writes a 304 with the ETag echoed back, no body.
+func writeNotModified(w http.ResponseWriter, etag string) {
+	w.Header().Set("ETag", etag)
+	w.WriteHeader(http.StatusNotModified)
+}
+
+// nodeInfoMapCacheState caches the assembled name/role map used by neighbor
+// endpoints. The result is small (~few hundred entries) but is currently
+// rebuilt fresh by every /api/nodes/{pubkey}/neighbors and
+// /api/analytics/neighbor-graph request.
+type nodeInfoMapCacheState struct {
+	mu        sync.Mutex
+	cached    map[string]nodeInfo
+	expiresAt time.Time
+	inFlight  chan struct{}
 }
 
 // obsAnalyticsCacheEntry holds one cached /api/observers/:id/analytics response.
@@ -138,7 +320,104 @@ type obsAnalyticsCacheEntry struct {
 	expiresAt time.Time
 }
 
-const obsAnalyticsCacheTTL = 60 * time.Second
+// serveOpts configures cache-header behavior for a serve() call.
+type serveOpts struct {
+	// CacheControl is set verbatim as the Cache-Control header. Empty = no
+	// header. Typical values:
+	//   "private, max-age=60, stale-while-revalidate=60"
+	//   "public, max-age=300, stale-while-revalidate=300"
+	CacheControl string
+}
+
+// serve looks up cached bytes for c, otherwise builds a fresh payload via
+// build, caches it for ttl, and writes the result. Concurrent cache-miss
+// callers share one in-flight build (singleflight). build returns the JSON
+// bytes to cache and write; if it returns an error, the response is a 500
+// with the standard "internal error" body (the underlying error is logged
+// server-side via writeInternalError so raw SQL/filesystem details don't
+// leak to clients). The cache is left untouched on error so the next caller
+// retries.
+//
+// errContext labels the endpoint in server logs (e.g. "handleObservers
+// GetObservers"). It must NOT contain user-controlled input.
+//
+// If the cached payload (or freshly-built payload) matches the request's
+// If-None-Match header, the response is a 304 with no body — the big win
+// on slow-changing data.
+func (c *singleKeyByteCache) serve(w http.ResponseWriter, r *http.Request, ttl time.Duration, errContext string, opts serveOpts, build func() ([]byte, error)) {
+	for {
+		c.mu.Lock()
+		if c.payload != nil && time.Now().Before(c.expiresAt) {
+			payload := c.payload
+			etag := c.etag
+			c.mu.Unlock()
+			c.writeServed(w, r, payload, etag, opts)
+			return
+		}
+		if c.inFlight != nil {
+			ch := c.inFlight
+			c.mu.Unlock()
+			<-ch
+			continue
+		}
+		done := make(chan struct{})
+		c.inFlight = done
+		c.mu.Unlock()
+
+		var (
+			payload []byte
+			err     error
+		)
+		func() {
+			defer func() {
+				c.mu.Lock()
+				if err == nil && payload != nil {
+					c.payload = payload
+					c.etag = computeETag(payload)
+					c.expiresAt = time.Now().Add(ttl)
+				}
+				c.inFlight = nil
+				c.mu.Unlock()
+				close(done)
+			}()
+			payload, err = build()
+		}()
+		if err != nil {
+			writeInternalError(w, errContext, err)
+			return
+		}
+		c.mu.Lock()
+		etag := c.etag
+		c.mu.Unlock()
+		c.writeServed(w, r, payload, etag, opts)
+		return
+	}
+}
+
+func (c *singleKeyByteCache) writeServed(w http.ResponseWriter, r *http.Request, payload []byte, etag string, opts serveOpts) {
+	if etag != "" {
+		w.Header().Set("ETag", etag)
+		if ifNoneMatchHits(r.Header.Get("If-None-Match"), etag) {
+			if opts.CacheControl != "" {
+				w.Header().Set("Cache-Control", opts.CacheControl)
+			}
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+	if opts.CacheControl != "" {
+		w.Header().Set("Cache-Control", opts.CacheControl)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(payload) //nolint:errcheck
+}
+
+// obsAnalyticsCacheTTL caps how often we recompute /api/observers/:id/analytics
+// per (observer, window) key. The data is a backward-looking rollup of mostly
+// >5-minute buckets, so a few extra minutes of staleness is invisible. The
+// previous 60s value caused the endpoint to recompute roughly every observer
+// page refresh.
+const obsAnalyticsCacheTTL = 5 * time.Minute
 
 // maxJSONBodyBytes caps the size of JSON request bodies on POST endpoints.
 // 64 KB is far larger than any legitimate request (the biggest is a 200-hash
@@ -202,7 +481,66 @@ const (
 	memStatsTTL    = 5 * time.Second
 	healthCacheTTL = 5 * time.Second  // /api/health response cache
 	perfCacheTTL   = 10 * time.Second // /api/perf response cache
+
+	// nodesWarmInterval is how often the background goroutine refreshes
+	// already-seen /api/nodes cache keys. Chosen to be a hair below
+	// handleNodesTTL (60s) so each entry gets refreshed just before it
+	// would otherwise go stale.
+	nodesWarmInterval = 45 * time.Second
 )
+
+// StartCacheWarmers kicks off background goroutines that periodically refresh
+// hot response caches so user-visible cache misses are rare. Called from
+// main.go after the server is wired but before HTTP listen.
+func (s *Server) StartCacheWarmers() {
+	go s.warmNodesCacheLoop()
+}
+
+func (s *Server) warmNodesCacheLoop() {
+	tick := time.NewTicker(nodesWarmInterval)
+	defer tick.Stop()
+	for range tick.C {
+		s.warmNodesCacheOnce()
+	}
+}
+
+// warmNodesCacheOnce refreshes every currently-cached /api/nodes entry.
+// Skips when nothing has ever been cached — no point precomputing query
+// shapes the frontend doesn't actually use.
+func (s *Server) warmNodesCacheOnce() {
+	s.nodesListCache.mu.Lock()
+	keys := make([]string, 0, len(s.nodesListCache.entries))
+	for k := range s.nodesListCache.entries {
+		keys = append(keys, k)
+	}
+	s.nodesListCache.mu.Unlock()
+	if len(keys) == 0 {
+		return
+	}
+	for _, key := range keys {
+		req := newWarmRequest(key)
+		payload, err := s.buildNodesResponse(req)
+		if err != nil || payload == nil {
+			continue
+		}
+		etag := computeETag(payload)
+		s.nodesListCache.mu.Lock()
+		s.nodesListCache.entries[key] = &perKeyByteCacheEntry{
+			payload:   payload,
+			etag:      etag,
+			expiresAt: time.Now().Add(handleNodesTTL),
+		}
+		s.nodesListCache.mu.Unlock()
+	}
+}
+
+// newWarmRequest fabricates a minimal *http.Request that buildNodesResponse
+// can read for its query parameters. The cache key from perKeyByteCache is
+// the raw query string (see handleNodes), so we put it back in URL.RawQuery
+// and let Query() parse it the same way the real handler would.
+func newWarmRequest(rawQuery string) *http.Request {
+	return &http.Request{URL: &url.URL{RawQuery: rawQuery}}
+}
 
 // getMemStats returns cached runtime.MemStats, refreshing at most every 5 seconds.
 // runtime.ReadMemStats() stops the world; caching prevents per-request GC pauses.
@@ -247,16 +585,22 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	// Backfill status header middleware
 	r.Use(s.backfillStatusMiddleware)
 
-	// Config endpoints
+	// Config endpoints. Most are practically static for a given server build
+	// (theme, regions, areas, map config, client config) — let the browser
+	// cache them for 5 minutes so SPA route changes don't re-fetch the same
+	// JSON on every navigation. /api/config/geo-filter is mutable via PUT and
+	// /api/config/channel-keys carries decryption material — both stay
+	// uncached.
+	const configCacheSecs = 300
 	r.HandleFunc("/api/config/cache", s.handleConfigCache).Methods("GET")
-	r.HandleFunc("/api/config/client", s.handleConfigClient).Methods("GET")
-	r.HandleFunc("/api/config/regions", s.handleConfigRegions).Methods("GET")
-	r.HandleFunc("/api/config/theme", s.handleConfigTheme).Methods("GET")
-	r.HandleFunc("/api/config/map", s.handleConfigMap).Methods("GET")
+	r.HandleFunc("/api/config/client", withShortClientCache(configCacheSecs, s.handleConfigClient)).Methods("GET")
+	r.HandleFunc("/api/config/regions", withShortClientCache(configCacheSecs, s.handleConfigRegions)).Methods("GET")
+	r.HandleFunc("/api/config/theme", withShortClientCache(configCacheSecs, s.handleConfigTheme)).Methods("GET")
+	r.HandleFunc("/api/config/map", withShortClientCache(configCacheSecs, s.handleConfigMap)).Methods("GET")
 	r.HandleFunc("/api/config/geo-filter", s.handleConfigGeoFilter).Methods("GET")
 	r.HandleFunc("/api/config/channel-keys", s.handleConfigChannelKeys).Methods("GET")
-	r.HandleFunc("/api/config/areas", s.handleConfigAreas).Methods("GET")
-	r.HandleFunc("/api/config/areas/polygons", s.handleConfigAreasPolygons).Methods("GET")
+	r.HandleFunc("/api/config/areas", withShortClientCache(configCacheSecs, s.handleConfigAreas)).Methods("GET")
+	r.HandleFunc("/api/config/areas/polygons", withShortClientCache(configCacheSecs, s.handleConfigAreasPolygons)).Methods("GET")
 	r.Handle("/api/config/geo-filter", s.requireAPIKey(http.HandlerFunc(s.handlePutConfigGeoFilter))).Methods("PUT")
 
 	// Readiness endpoint (gated on background init completion)
@@ -825,33 +1169,46 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
+// writeCachedStats writes the cached stats response. Prefers the pre-marshaled
+// bytes (the common path on cache hit); falls back to marshaling the struct
+// if bytes haven't been populated yet (e.g. test code that sets the struct
+// directly). Caller must NOT hold statsMu.
+func (s *Server) writeCachedStats(w http.ResponseWriter, cached *StatsResponse, bytes []byte) {
+	if bytes != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(bytes) //nolint:errcheck
+		return
+	}
+	writeJSON(w, cached)
+}
+
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	const statsTTL = 10 * time.Second
 
 	s.statsMu.Lock()
 	if s.statsCache != nil && time.Since(s.statsCachedAt) < statsTTL {
-		cached := s.statsCache
+		cached, bytes := s.statsCache, s.statsCacheBytes
 		s.statsMu.Unlock()
-		writeJSON(w, cached)
+		s.writeCachedStats(w, cached, bytes)
 		return
 	}
 	if s.statsCache != nil {
-		cached := s.statsCache
+		cached, bytes := s.statsCache, s.statsCacheBytes
 		if !s.statsComputing {
 			s.statsComputing = true
 			go s.refreshStatsCache()
 		}
 		s.statsMu.Unlock()
-		writeJSON(w, cached)
+		s.writeCachedStats(w, cached, bytes)
 		return
 	}
 	// If another goroutine is already computing a fresh response (potentially
 	// blocked on s.mu.RLock during a long eviction pass), serve the existing
 	// stale cache rather than queuing 80+ goroutines behind statsMu for 90s.
 	if s.statsComputing && s.statsCache != nil {
-		cached := s.statsCache
+		cached, bytes := s.statsCache, s.statsCacheBytes
 		s.statsMu.Unlock()
-		writeJSON(w, cached)
+		s.writeCachedStats(w, cached, bytes)
 		return
 	}
 	// Mark computing and release the lock before the expensive work so other
@@ -868,21 +1225,30 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Marshal once and store the bytes so future cache hits don't repeat
+	// the marshal work.
+	respBytes, _ := json.Marshal(resp)
 	s.statsMu.Lock()
 	s.statsCache = resp
+	s.statsCacheBytes = respBytes
 	s.statsCachedAt = time.Now()
 	s.statsComputing = false
 	s.statsMu.Unlock()
 
-	writeJSON(w, resp)
+	s.writeCachedStats(w, resp, respBytes)
 }
 
 func (s *Server) refreshStatsCache() {
 	resp, err := s.buildStatsResponse()
+	var respBytes []byte
+	if err == nil && resp != nil {
+		respBytes, _ = json.Marshal(resp)
+	}
 	s.statsMu.Lock()
 	defer s.statsMu.Unlock()
 	if err == nil && resp != nil {
 		s.statsCache = resp
+		s.statsCacheBytes = respBytes
 		s.statsCachedAt = time.Now()
 	} else if err != nil {
 		log.Printf("[stats] background refresh error: %v", err)
@@ -1295,6 +1661,25 @@ func (s *Server) startPerfHistoryCollector() func() {
 
 // --- Packet Handlers ---
 
+// maxPacketsLimit caps the per-request packet result size. Clients have been
+// observed asking for ?limit=50000 (the grouped-packets view on the Live page)
+// which builds enormous JSON responses and hammers the in-memory store. 5000
+// is well above any reasonable UI page (the frontend renders 25-50 at a time)
+// and gives bulk consumers a clear hard ceiling instead of an open-ended one.
+const maxPacketsLimit = 5000
+
+// clampLimit reads `?limit=N` with a default and clamps to maxPacketsLimit.
+func clampLimit(r *http.Request, defaultLimit int) int {
+	v := queryInt(r, "limit", defaultLimit)
+	if v > maxPacketsLimit {
+		return maxPacketsLimit
+	}
+	if v < 1 {
+		return 1
+	}
+	return v
+}
+
 func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 	// Multi-node filter: comma-separated pubkeys (Node.js parity)
 	if nodesParam := r.URL.Query().Get("nodes"); nodesParam != "" {
@@ -1314,11 +1699,11 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 		var err error
 		if s.store != nil {
 			result = s.store.QueryMultiNodePackets(cleaned,
-				queryInt(r, "limit", 50), queryInt(r, "offset", 0),
+				clampLimit(r, 50), queryInt(r, "offset", 0),
 				order, r.URL.Query().Get("since"), r.URL.Query().Get("until"))
 		} else {
 			result, err = s.db.QueryMultiNodePackets(cleaned,
-				queryInt(r, "limit", 50), queryInt(r, "offset", 0),
+				clampLimit(r, 50), queryInt(r, "offset", 0),
 				order, r.URL.Query().Get("since"), r.URL.Query().Get("until"))
 		}
 		if err != nil {
@@ -1328,14 +1713,14 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, PacketListResponse{
 			Packets: mapSliceToTransmissions(result.Packets),
 			Total:   result.Total,
-			Limit:   queryInt(r, "limit", 50),
+			Limit:   clampLimit(r, 50),
 			Offset:  queryInt(r, "offset", 0),
 		})
 		return
 	}
 
 	q := PacketQuery{
-		Limit:              queryInt(r, "limit", 50),
+		Limit:              clampLimit(r, 50),
 		Offset:             queryInt(r, "offset", 0),
 		Observer:           r.URL.Query().Get("observer"),
 		Hash:               r.URL.Query().Get("hash"),
@@ -1661,8 +2046,42 @@ func (s *Server) handlePostPacket(w http.ResponseWriter, r *http.Request) {
 
 // --- Node Handlers ---
 
+// handleNodesTTL caps how often /api/nodes recomputes for a given query-string
+// combination. Most of the per-node fields (role, name, lat/lon, hash size)
+// are stable across hours; last_seen drifts every packet. 60s server-side
+// strikes the balance — combined with ETag/304 below, browsers that revalidate
+// after their own max-age get a 304 (a few hundred bytes) instead of the full
+// 168 KB-compressed response when nothing changed.
+const handleNodesTTL = 60 * time.Second
+
+// nodesCacheHeader instructs browsers (and Cloudflare) to:
+//   - Treat the response as cacheable for 60 seconds (no revalidation in that
+//     window — instant local hits).
+//   - After that, revalidate with If-None-Match — server may return 304.
+//   - "private" because the response can vary by future per-user filters
+//     (it does not today, but staying conservative is free).
+//   - stale-while-revalidate gives the browser permission to keep serving the
+//     stale copy for an extra 60s while it asks for an update in the background.
+const nodesCacheHeader = "private, max-age=60, stale-while-revalidate=60"
+
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
+	// The result depends on every query param read below plus the server's
+	// blacklist + geo-filter config (those rarely change during a process
+	// lifetime, so we don't include them in the cache key — restart clears
+	// the cache). Using RawQuery directly means callers that send params
+	// in the same order share a cache entry; callers that re-order would
+	// not share, which is OK (just slightly worse hit rate).
+	cacheKey := r.URL.RawQuery
+	s.nodesListCache.serve(w, r, cacheKey, handleNodesTTL, "handleNodes GetNodes", serveOpts{CacheControl: nodesCacheHeader}, func() ([]byte, error) {
+		return s.buildNodesResponse(r)
+	})
+}
+
+func (s *Server) buildNodesResponse(r *http.Request) ([]byte, error) {
 	q := r.URL.Query()
+	// /api/nodes accepts limits up to the node count (Map page asks for 10000
+	// to plot every node). The handlePackets clamp doesn't apply here — there
+	// is no per-node bloat concern equivalent to per-packet observations.
 	nodes, total, counts, err := s.db.GetNodes(
 		queryInt(r, "limit", 50),
 		queryInt(r, "offset", 0),
@@ -1670,8 +2089,7 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		q.Get("lastHeard"), q.Get("sortBy"), q.Get("region"),
 	)
 	if err != nil {
-		writeInternalError(w, "handleNodes GetNodes", err)
-		return
+		return nil, err
 	}
 	if s.store != nil {
 		hashInfo := s.store.GetNodeHashSizeInfo()
@@ -1777,7 +2195,7 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 			total = len(filtered)
 		}
 	}
-	writeJSON(w, NodeListResponse{Nodes: nodes, Total: total, Counts: counts})
+	return json.Marshal(NodeListResponse{Nodes: nodes, Total: total, Counts: counts})
 }
 
 func (s *Server) handleNodeSearch(w http.ResponseWriter, r *http.Request) {
@@ -1924,7 +2342,7 @@ func (s *Server) handleNodeHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleBulkHealth(w http.ResponseWriter, r *http.Request) {
-	limit := queryInt(r, "limit", 50)
+	limit := clampLimit(r, 50)
 	if limit > 200 {
 		limit = 200
 	}
@@ -2705,36 +3123,45 @@ func (s *Server) handleResolveHops(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, ResolveHopsResponse{Resolved: resolved})
 }
 
+// handleChannelsTTL caps how often /api/channels recomputes per
+// (region, includeEncrypted) combination. Channels are operator-managed —
+// adverts add new ones, but the set is essentially static within a 5-minute
+// window. Bumped from 60s to 5 min in conjunction with ETag/304: cache misses
+// are rare, browsers revalidate after their own max-age and get a 304 the
+// vast majority of the time.
+const handleChannelsTTL = 5 * time.Minute
+const channelsCacheHeader = "private, max-age=300, stale-while-revalidate=300"
+
 func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 	region := r.URL.Query().Get("region")
 	includeEncrypted := r.URL.Query().Get("includeEncrypted") == "true"
-	// Prefer DB for full history (in-memory store has limited retention)
-	if s.db != nil {
-		channels, err := s.db.GetChannels(region)
-		if err != nil {
-			writeInternalError(w, "handleChannels GetChannels", err)
-			return
-		}
-		if includeEncrypted {
-			encrypted, err := s.db.GetEncryptedChannels(region)
+	cacheKey := region + "|" + strconv.FormatBool(includeEncrypted)
+	s.channelsCache.serve(w, r, cacheKey, handleChannelsTTL, "handleChannels GetChannels", serveOpts{CacheControl: channelsCacheHeader}, func() ([]byte, error) {
+		// Prefer DB for full history (in-memory store has limited retention)
+		if s.db != nil {
+			channels, err := s.db.GetChannels(region)
 			if err != nil {
-				log.Printf("WARN GetEncryptedChannels: %v", err)
-			} else {
-				channels = append(channels, encrypted...)
+				return nil, err
 			}
+			if includeEncrypted {
+				encrypted, err := s.db.GetEncryptedChannels(region)
+				if err != nil {
+					log.Printf("WARN GetEncryptedChannels: %v", err)
+				} else {
+					channels = append(channels, encrypted...)
+				}
+			}
+			return json.Marshal(ChannelListResponse{Channels: channels})
 		}
-		writeJSON(w, ChannelListResponse{Channels: channels})
-		return
-	}
-	if s.store != nil {
-		channels := s.store.GetChannels(region)
-		if includeEncrypted {
-			channels = append(channels, s.store.GetEncryptedChannels(region)...)
+		if s.store != nil {
+			channels := s.store.GetChannels(region)
+			if includeEncrypted {
+				channels = append(channels, s.store.GetEncryptedChannels(region)...)
+			}
+			return json.Marshal(ChannelListResponse{Channels: channels})
 		}
-		writeJSON(w, ChannelListResponse{Channels: channels})
-		return
-	}
-	writeJSON(w, ChannelListResponse{Channels: []map[string]interface{}{}})
+		return json.Marshal(ChannelListResponse{Channels: []map[string]interface{}{}})
+	})
 }
 
 func (s *Server) handleChannelMessages(w http.ResponseWriter, r *http.Request) {
@@ -2760,82 +3187,101 @@ func (s *Server) handleChannelMessages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, ChannelMessagesResponse{Messages: []map[string]interface{}{}, Total: 0})
 }
 
+// observersListCacheTTL caps how often /api/observers re-scans the DB.
+// Observer metadata is operator-managed and the only fast-moving field is
+// PacketsLastHour (a 1-hour rolling count) — 5 minutes of staleness on a
+// 60-minute window is invisible. The Observers page bursts this endpoint
+// on every inbound WS packet (observers.js debounce + force-refresh); with
+// ETag/304 below those bursts mostly return 304 anyway, so the TTL can be
+// generous.
+const observersListCacheTTL = 5 * time.Minute
+const observersListCacheHeader = "private, max-age=120, stale-while-revalidate=180"
+
 func (s *Server) handleObservers(w http.ResponseWriter, r *http.Request) {
-	observers, err := s.db.GetObservers()
-	if err != nil {
-		writeInternalError(w, "handleObservers GetObservers", err)
-		return
-	}
-
-	// Batch lookup: 1h packet counts only — 24h/7d are served by /api/observers/stats.
-	// observations.timestamp is INTEGER (Unix epoch) — use integer cutoff.
-	pktCounts := s.db.GetObserverPacketCounts(time.Now().Add(-1 * time.Hour).Unix())
-
-	// Batch lookup: node locations only for observer IDs (not all nodes)
-	observerIDs := make([]string, len(observers))
-	for i, o := range observers {
-		observerIDs[i] = o.ID
-	}
-	nodeLocations := s.db.GetNodeLocationsByKeys(observerIDs)
-
-	result := make([]ObserverResp, 0, len(observers))
-	for _, o := range observers {
-		// Defense in depth: skip observers that are in the blacklist
-		if s.cfg != nil && s.cfg.IsObserverBlacklisted(o.ID) {
-			continue
-		}
-		plh := pktCounts[o.ID]
-		var lat, lon, nodeRole interface{}
-		if nodeLoc, ok := nodeLocations[strings.ToLower(o.ID)]; ok {
-			lat = nodeLoc["lat"]
-			lon = nodeLoc["lon"]
-			nodeRole = nodeLoc["role"]
+	s.observersListCache.serve(w, r, observersListCacheTTL, "handleObservers GetObservers", serveOpts{CacheControl: observersListCacheHeader}, func() ([]byte, error) {
+		observers, err := s.db.GetObservers()
+		if err != nil {
+			return nil, err
 		}
 
-		result = append(result, ObserverResp{
-			ID: o.ID, Name: o.Name, IATA: o.IATA,
-			LastSeen: o.LastSeen, FirstSeen: o.FirstSeen,
-			PacketCount: o.PacketCount,
-			Model:       o.Model, Firmware: o.Firmware,
-			ClientVersion: o.ClientVersion, Radio: o.Radio,
-			BatteryMv: o.BatteryMv, UptimeSecs: o.UptimeSecs,
-			NoiseFloor:      o.NoiseFloor,
-			LastPacketAt:    o.LastPacketAt,
-			PacketsLastHour: plh,
-			Lat:             lat, Lon: lon, NodeRole: nodeRole,
-			Repeat: o.Repeat,
+		// Batch lookup: 1h packet counts only — 24h/7d are served by /api/observers/stats.
+		// observations.timestamp is INTEGER (Unix epoch) — use integer cutoff.
+		pktCounts := s.db.GetObserverPacketCounts(time.Now().Add(-1 * time.Hour).Unix())
+
+		// Batch lookup: node locations only for observer IDs (not all nodes)
+		observerIDs := make([]string, len(observers))
+		for i, o := range observers {
+			observerIDs[i] = o.ID
+		}
+		nodeLocations := s.db.GetNodeLocationsByKeys(observerIDs)
+
+		result := make([]ObserverResp, 0, len(observers))
+		for _, o := range observers {
+			// Defense in depth: skip observers that are in the blacklist
+			if s.cfg != nil && s.cfg.IsObserverBlacklisted(o.ID) {
+				continue
+			}
+			plh := pktCounts[o.ID]
+			var lat, lon, nodeRole interface{}
+			if nodeLoc, ok := nodeLocations[strings.ToLower(o.ID)]; ok {
+				lat = nodeLoc["lat"]
+				lon = nodeLoc["lon"]
+				nodeRole = nodeLoc["role"]
+			}
+
+			result = append(result, ObserverResp{
+				ID: o.ID, Name: o.Name, IATA: o.IATA,
+				LastSeen: o.LastSeen, FirstSeen: o.FirstSeen,
+				PacketCount: o.PacketCount,
+				Model:       o.Model, Firmware: o.Firmware,
+				ClientVersion: o.ClientVersion, Radio: o.Radio,
+				BatteryMv: o.BatteryMv, UptimeSecs: o.UptimeSecs,
+				NoiseFloor:      o.NoiseFloor,
+				LastPacketAt:    o.LastPacketAt,
+				PacketsLastHour: plh,
+				Lat:             lat, Lon: lon, NodeRole: nodeRole,
+				Repeat: o.Repeat,
+			})
+		}
+		return json.Marshal(ObserverListResponse{
+			Observers:  result,
+			ServerTime: time.Now().UTC().Format(time.RFC3339),
 		})
-	}
-	writeJSON(w, ObserverListResponse{
-		Observers:  result,
-		ServerTime: time.Now().UTC().Format(time.RFC3339),
 	})
 }
+
+// observersStatsCacheTTL caps how often /api/observers/stats re-scans the DB.
+// The 24h/7d counts change very slowly relative to the 5-min frontend client
+// TTL — a few extra minutes of staleness on a 7-day count is invisible.
+const observersStatsCacheTTL = 5 * time.Minute
+const observersStatsCacheHeader = "private, max-age=300, stale-while-revalidate=300"
 
 // handleObserversStats returns per-observer 24h and 7d packet counts for the
 // stats block. Kept separate from /api/observers so the main list stays lean.
 func (s *Server) handleObserversStats(w http.ResponseWriter, r *http.Request) {
-	// observations.timestamp is INTEGER (Unix epoch) — use integer cutoffs.
-	now := time.Now()
-	counts := s.db.GetObserverAllPacketCounts(
-		now.Add(-1*time.Hour).Unix(),
-		now.Add(-24*time.Hour).Unix(),
-		now.Add(-7*24*time.Hour).Unix(),
-	)
-	result := make([]ObserverStatEntry, 0, len(counts))
-	for id, c := range counts {
-		if s.cfg != nil && s.cfg.IsObserverBlacklisted(id) {
-			continue
+	s.observersStatsCache.serve(w, r, observersStatsCacheTTL, "handleObserversStats GetObserverAllPacketCounts", serveOpts{CacheControl: observersStatsCacheHeader}, func() ([]byte, error) {
+		// observations.timestamp is INTEGER (Unix epoch) — use integer cutoffs.
+		now := time.Now()
+		counts := s.db.GetObserverAllPacketCounts(
+			now.Add(-1*time.Hour).Unix(),
+			now.Add(-24*time.Hour).Unix(),
+			now.Add(-7*24*time.Hour).Unix(),
+		)
+		result := make([]ObserverStatEntry, 0, len(counts))
+		for id, c := range counts {
+			if s.cfg != nil && s.cfg.IsObserverBlacklisted(id) {
+				continue
+			}
+			result = append(result, ObserverStatEntry{
+				ID:             id,
+				PacketsLast24h: c.Day,
+				PacketsLast7d:  c.Week,
+			})
 		}
-		result = append(result, ObserverStatEntry{
-			ID:             id,
-			PacketsLast24h: c.Day,
-			PacketsLast7d:  c.Week,
+		return json.Marshal(ObserverStatsResponse{
+			Observers:  result,
+			ServerTime: now.UTC().Format(time.RFC3339),
 		})
-	}
-	writeJSON(w, ObserverStatsResponse{
-		Observers:  result,
-		ServerTime: now.UTC().Format(time.RFC3339),
 	})
 }
 
@@ -2906,22 +3352,47 @@ func (s *Server) handleObserverAnalytics(w http.ResponseWriter, r *http.Request)
 		since = time.Now().Add(-time.Duration(days) * 24 * time.Hour)
 	}
 
-	// Serve from per-observer cache when available (60s TTL).
-	// This endpoint runs two heavy DB queries; caching prevents repeated
-	// hammering when the UI auto-refreshes or multiple clients view the same
-	// observer page.
+	// Serve from per-observer cache when available. This endpoint runs two
+	// heavy DB queries; caching prevents repeated hammering when the UI
+	// auto-refreshes or multiple clients view the same observer page.
 	cacheKey := id + "|" + strconv.Itoa(totalMinutes)
-	s.obsAnalyticsMu.Lock()
-	if s.obsAnalyticsCache == nil {
-		s.obsAnalyticsCache = make(map[string]*obsAnalyticsCacheEntry)
-	}
-	if entry, ok := s.obsAnalyticsCache[cacheKey]; ok && time.Now().Before(entry.expiresAt) {
+	// Cache + singleflight loop: try the cache, and if it's cold, either
+	// become the leader for this key or wait for the in-flight leader.
+	for {
+		s.obsAnalyticsMu.Lock()
+		if s.obsAnalyticsCache == nil {
+			s.obsAnalyticsCache = make(map[string]*obsAnalyticsCacheEntry)
+		}
+		if entry, ok := s.obsAnalyticsCache[cacheKey]; ok && time.Now().Before(entry.expiresAt) {
+			payload := entry.payload
+			s.obsAnalyticsMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(payload) //nolint:errcheck
+			return
+		}
+		if s.obsAnalyticsInFlight == nil {
+			s.obsAnalyticsInFlight = make(map[string]chan struct{})
+		}
+		if ch, inflight := s.obsAnalyticsInFlight[cacheKey]; inflight {
+			// Another goroutine is computing this exact response. Wait
+			// for it and re-check the cache when it finishes.
+			s.obsAnalyticsMu.Unlock()
+			<-ch
+			continue
+		}
+		// We're the leader. Publish our in-flight marker and break out
+		// to do the work without holding obsAnalyticsMu.
+		done := make(chan struct{})
+		s.obsAnalyticsInFlight[cacheKey] = done
 		s.obsAnalyticsMu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(entry.payload) //nolint:errcheck
-		return
+		defer func() {
+			s.obsAnalyticsMu.Lock()
+			delete(s.obsAnalyticsInFlight, cacheKey)
+			s.obsAnalyticsMu.Unlock()
+			close(done)
+		}()
+		break
 	}
-	s.obsAnalyticsMu.Unlock()
 
 	var bucketDur time.Duration
 	switch {
@@ -3392,6 +3863,18 @@ func writeJSONWithReq(w http.ResponseWriter, r *http.Request, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("[routes] JSON encode error on %s %s: %v", r.Method, r.URL.Path, err)
+	}
+}
+
+// withShortClientCache wraps a handler so its responses carry a public
+// Cache-Control header — browsers reuse them across SPA route changes
+// instead of re-fetching practically-static config on every navigation.
+// `seconds` is the max-age in seconds.
+func withShortClientCache(seconds int, h http.HandlerFunc) http.HandlerFunc {
+	cc := fmt.Sprintf("public, max-age=%d", seconds)
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", cc)
+		h(w, r)
 	}
 }
 

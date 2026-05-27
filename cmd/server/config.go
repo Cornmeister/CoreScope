@@ -255,14 +255,27 @@ type CompressionConfig struct {
 	ContentTypes []string `json:"contentTypes,omitempty"`
 }
 
-// GZipEnabled returns true when HTTP gzip compression is explicitly enabled.
+// GZipEnabled returns true when HTTP gzip compression is enabled.
+// Defaults to true; set "compression": {"gzip": false} in config.json to disable
+// (useful when an upstream proxy like Caddy/Cloudflare already compresses, in
+// which case double-compressing is wasted CPU but otherwise harmless).
 func (c *Config) GZipEnabled() bool {
-	return c.Compression != nil && c.Compression.GZip
+	if c.Compression == nil {
+		return true
+	}
+	return c.Compression.GZip
 }
 
-// WSCompressionEnabled returns true when WebSocket permessage-deflate is explicitly enabled.
+// WSCompressionEnabled returns true when WebSocket permessage-deflate is
+// enabled. Defaults to true: the WS broadcast carries full decoded-JSON
+// packets, which compress very well (~4-6× ratio). The per-message CPU cost
+// is negligible compared to the network savings on a busy mesh. Set
+// "compression": {"websocket": false} in config.json to opt out.
 func (c *Config) WSCompressionEnabled() bool {
-	return c.Compression != nil && c.Compression.Websocket
+	if c.Compression == nil {
+		return true
+	}
+	return c.Compression.Websocket
 }
 
 // ResolvedPathConfig controls async backfill behavior.

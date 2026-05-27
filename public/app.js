@@ -85,7 +85,7 @@ const _apiCache = new Map();
 const _inflight = new Map();
 // Client-side TTLs (ms) — loaded from server config, with defaults
 const CLIENT_TTL = {
-  stats: 10000, nodeDetail: 240000, nodeHealth: 240000, nodeList: 90000,
+  stats: 30000, nodeDetail: 240000, nodeHealth: 240000, nodeList: 90000,
   bulkHealth: 300000, networkStatus: 300000, observers: 120000,
   channels: 15000, channelMessages: 10000, analyticsRF: 300000,
   analyticsTopology: 300000, analyticsChannels: 300000, analyticsHashSizes: 300000,
@@ -859,6 +859,51 @@ const pages = {};
 
 function registerPage(name, mod) { pages[name] = mod; }
 
+// --- Lazy-loaded page bundles ---
+// Pages that aren't on the critical path of typical sessions (Audio Lab,
+// for now) get their scripts dynamically appended on first navigation
+// instead of loaded eagerly from index.html. Saves ~80 KB compressed off
+// every page load that doesn't visit them.
+//
+// Scripts MUST be listed in execution order: dependencies (the engine)
+// first, then plug-ins (voices), then the page that consumes them.
+const lazyPageScripts = {
+  'audio-lab': [
+    'audio.js',
+    'audio-v1-constellation.js',
+    'audio-v2-pulse.js',
+    'audio-v3-drone.js',
+    'audio-v4-chiptune.js',
+    'audio-v5-blaster.js',
+    'audio-v6-warzone.js',
+    'audio-v7-nggyu.js',
+    'audio-lab.js',
+  ],
+};
+const _lazyPageLoaded = new Set();
+function loadLazyPageScripts(name) {
+  if (_lazyPageLoaded.has(name)) return Promise.resolve();
+  const list = lazyPageScripts[name];
+  if (!list || !list.length) return Promise.resolve();
+  // Load sequentially so the engine is ready before its voice modules
+  // register, and the voice modules are present before audio-lab tries
+  // to enumerate them.
+  let chain = Promise.resolve();
+  list.forEach(function (src) {
+    chain = chain.then(function () {
+      return new Promise(function (resolve) {
+        const s = document.createElement('script');
+        s.src = src;
+        s.async = false;
+        s.onload = function () { resolve(); };
+        s.onerror = function () { console.error('[lazy] failed to load', src); resolve(); };
+        document.head.appendChild(s);
+      });
+    });
+  });
+  return chain.then(function () { _lazyPageLoaded.add(name); });
+}
+
 // Tools landing page — shows sub-menu with all tools.
 registerPage('tools-landing', {
   init: function (container) {
@@ -978,6 +1023,17 @@ function navigate() {
     var moreMenu = document.getElementById('navMoreMenu');
     var hasActiveMore = moreMenu && moreMenu.querySelector('.nav-link.active');
     moreBtn.classList.toggle('active', !!hasActiveMore);
+  }
+
+  // Lazy-loaded pages: fetch the bundle on first visit, then re-run navigate.
+  // We tear down the current page first so it stops running while we wait.
+  if (lazyPageScripts[basePage] && !pages[basePage]) {
+    if (currentPage && pages[currentPage]?.destroy) pages[currentPage].destroy();
+    currentPage = null;
+    const appEl = document.getElementById('app');
+    if (appEl) appEl.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">Loading…</div>';
+    loadLazyPageScripts(basePage).then(navigate);
+    return;
   }
 
   if (currentPage && pages[currentPage]?.destroy) {
@@ -1550,8 +1606,19 @@ window.addEventListener('DOMContentLoaded', () => {
     } catch {}
   }
   updateNavStats();
-  setInterval(updateNavStats, 15000);
-  debouncedOnWS(function () { updateNavStats(); });
+  setInterval(updateNavStats, 30000);
+  // WS-driven refresh used to fire updateNavStats() on every packet-burst
+  // debounce — on a busy mesh that hit /api/stats 15+ times per minute.
+  // Throttle to at most once per 30s; the 30s setInterval above is the
+  // floor anyway, so this only adds an immediate refresh after a long
+  // quiet period.
+  let _navStatsLastWS = 0;
+  debouncedOnWS(function () {
+    const now = Date.now();
+    if (now - _navStatsLastWS < 30000) return;
+    _navStatsLastWS = now;
+    updateNavStats();
+  });
 
   // --- Theme Customization ---
   // Fetch theme config and apply via customizer v2 pipeline

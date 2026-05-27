@@ -10,11 +10,17 @@ import (
 
 func TestCompressionConfigDefaults(t *testing.T) {
 	cfg := &Config{}
-	if cfg.GZipEnabled() {
-		t.Error("GZipEnabled should be false when compression is nil")
+	// HTTP gzip defaults to ON so out-of-the-box deployments aren't shipping
+	// raw 7+ MB of unminified JS. Operators can opt out via
+	// "compression": {"gzip": false} when a fronting proxy already compresses.
+	if !cfg.GZipEnabled() {
+		t.Error("GZipEnabled should default to true when compression is nil")
 	}
-	if cfg.WSCompressionEnabled() {
-		t.Error("WSCompressionEnabled should be false when compression is nil")
+	// WebSocket permessage-deflate also defaults to ON — broadcast packets
+	// carry full decoded JSON which compresses 4-6×, and the per-message CPU
+	// cost is small relative to the network savings on a busy mesh.
+	if !cfg.WSCompressionEnabled() {
+		t.Error("WSCompressionEnabled should default to true when compression is nil")
 	}
 }
 

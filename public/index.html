@@ -7,9 +7,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Cornmeister.nl</title>
 
-  <!-- Warm the connection to the unpkg CDN early: Leaflet CSS/JS and
-       Chart.js are loaded from it on the critical path. -->
-  <link rel="preconnect" href="https://unpkg.com" crossorigin>
   <!-- Preload the one critical above-the-fold font (navbar logo wordmark).
        Path matches the @font-face url() in style.css so the preload and the
        real fetch dedupe to a single request. -->
@@ -35,20 +32,16 @@
   <link rel="stylesheet" href="live.css?v=__BUST__">
   <link rel="stylesheet" href="bottom-nav.css?v=__BUST__">
   <link rel="stylesheet" href="nav-drawer.css?v=__BUST__">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
-    crossorigin="anonymous">
+  <link rel="stylesheet" href="vendor/leaflet-1.9.4.css?v=__BUST__">
   <link rel="stylesheet" href="vendor/MarkerCluster.css?v=__BUST__">
   <link rel="stylesheet" href="vendor/MarkerCluster.Default.css?v=__BUST__">
   <!-- Server theme inlined here (after stylesheets) so the page paints with the
        operator's theme before app.js fetches /api/config/theme — no color flash. -->
   __THEME_STYLE__
-  <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-    crossorigin="anonymous"></script>
+  <script defer src="vendor/leaflet-1.9.4.js?v=__BUST__"></script>
   <script defer src="vendor/leaflet.markercluster.js?v=__BUST__"></script>
   <script defer src="vendor/leaflet-heat.js?v=__BUST__"></script>
-  <script defer src="https://unpkg.com/chart.js@4/dist/chart.umd.min.js"></script>
+  <script defer src="vendor/chart-4.umd.min.js?v=__BUST__"></script>
 </head>
 <body>
   <a class="skip-link" href="#app">Skip to content</a>
@@ -123,7 +116,6 @@
        so dependents always run after their dependencies. -->
   <script defer src="vendor/qrcode.js"></script>
   <script defer src="packet-helpers.js?v=__BUST__"></script>
-  <script defer src="chart-constants.js?v=__BUST__"></script>
   <script defer src="roles.js?v=__BUST__"></script>
   <script defer src="customize-v2.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script defer src="region-filter.js?v=__BUST__"></script>
@@ -146,7 +138,8 @@
   <script defer src="vendor/aes-ecb.js?v=__BUST__"></script>
   <script defer src="vendor/sha256-hmac.js?v=__BUST__"></script>
   <script defer src="channel-decrypt.js?v=__BUST__"></script>
-  <script defer src="vendor/jsqr.min.js"></script>
+  <!-- vendor/jsqr.min.js (~257 KB decoded) is now lazy-loaded by
+       channel-qr.js when the user actually opens the QR camera modal. -->
   <script defer src="channel-qr.js?v=__BUST__"></script>
   <script defer src="channel-colors.js?v=__BUST__"></script>
   <script defer src="channel-color-picker.js?v=__BUST__"></script>
@@ -158,15 +151,9 @@
   <script defer src="traces.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script defer src="path-inspector.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script defer src="analytics.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
-  <script defer src="audio.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
-  <script defer src="audio-v1-constellation.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
-  <script defer src="audio-v2-pulse.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
-  <script defer src="audio-v3-drone.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
-  <script defer src="audio-v4-chiptune.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
-  <script defer src="audio-v5-blaster.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
-  <script defer src="audio-v6-warzone.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
-  <script defer src="audio-v7-nggyu.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
-  <script defer src="audio-lab.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
+  <!-- audio.js + audio-v*.js voice modules + audio-lab.js (combined ~80 KB
+       compressed) are lazy-loaded by app.js's navigate() on first visit to
+       #/audio-lab. See lazyPageScripts['audio-lab']. -->
   <script defer src="drag-manager.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script defer src="live.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>
   <script defer src="observers.js?v=__BUST__" onerror="console.error('Failed to load:', this.src)"></script>

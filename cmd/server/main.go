@@ -395,6 +395,13 @@ func main() {
 	router := mux.NewRouter()
 	srv.RegisterRoutes(router)
 
+	// Keep already-seen /api/nodes cache keys warm. After a user hits a
+	// query shape (limit=2000, limit=10000&lastHeard=30d, …) the cache
+	// stores the bytes; this background refresh re-runs the build before
+	// TTL expiry so the next request always finds a warm entry and never
+	// pays the cold-miss cost. Idle when no keys are cached.
+	srv.StartCacheWarmers()
+
 	// WebSocket endpoint
 	router.HandleFunc("/ws", hub.ServeWS)
 
@@ -763,9 +770,22 @@ index.html not found
 			return
 		}
 
-		// Disable caching for JS/CSS/HTML
-		if filepath.Ext(path) == ".js" || filepath.Ext(path) == ".css" || filepath.Ext(path) == ".html" {
+		// Cache strategy: index.html references every JS/CSS with ?v=<bustValue>
+		// (set above), so versioned asset URLs are content-addressed for the
+		// lifetime of a server build. We can mark them immutable.
+		// HTML stays no-cache so deploys take effect immediately.
+		ext := filepath.Ext(path)
+		if ext == ".html" {
 			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		} else if r.URL.Query().Get("v") != "" {
+			// Versioned asset — safe to cache forever.
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else if ext == ".js" || ext == ".css" || ext == ".woff" || ext == ".woff2" ||
+			ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif" ||
+			ext == ".svg" || ext == ".ico" || ext == ".webp" {
+			// Unversioned static asset — cache for an hour so CDN/browsers can
+			// serve repeat visits, but redeploys aren't blocked for long.
+			w.Header().Set("Cache-Control", "public, max-age=3600")
 		}
 
 		fs.ServeHTTP(w, r)
