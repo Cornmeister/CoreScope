@@ -149,8 +149,9 @@ type Server struct {
 	// Per-key bytes-payload caches. Same singleflight semantics as
 	// singleKeyByteCache but keyed by a string so the same endpoint can
 	// cache distinct query-parameter combinations independently.
-	nodesListCache perKeyByteCache
-	channelsCache  perKeyByteCache
+	nodesListCache   perKeyByteCache
+	channelsCache    perKeyByteCache
+	bulkHealthCache  perKeyByteCache
 }
 
 // perKeyByteCache is the multi-key version of singleKeyByteCache — separate
@@ -2342,14 +2343,26 @@ func (s *Server) handleNodeHealth(w http.ResponseWriter, r *http.Request) {
 	writeError(w, 404, "Not found")
 }
 
+// bulkHealthCacheTTL caps how often /api/nodes/bulk-health runs its expensive
+// per-node packet scan (under the store read lock). Without it, every poll
+// re-scanned up to 200 nodes × their packets, starving ingest writers.
+const bulkHealthCacheTTL = 30 * time.Second
+const bulkHealthCacheHeader = "private, max-age=30, stale-while-revalidate=30"
+
 func (s *Server) handleBulkHealth(w http.ResponseWriter, r *http.Request) {
 	limit := clampLimit(r, 50)
 	if limit > 200 {
 		limit = 200
 	}
 
-	if s.store != nil {
-		region := r.URL.Query().Get("region")
+	if s.store == nil {
+		writeJSON(w, []BulkHealthEntry{})
+		return
+	}
+
+	region := r.URL.Query().Get("region")
+	cacheKey := fmt.Sprintf("l=%d&region=%s", limit, region)
+	s.bulkHealthCache.serve(w, r, cacheKey, bulkHealthCacheTTL, "handleBulkHealth GetBulkHealth", serveOpts{CacheControl: bulkHealthCacheHeader}, func() ([]byte, error) {
 		results := s.store.GetBulkHealth(limit, region)
 		// Filter blacklisted nodes
 		if len(s.cfg.NodeBlacklist) > 0 {
@@ -2359,14 +2372,10 @@ func (s *Server) handleBulkHealth(w http.ResponseWriter, r *http.Request) {
 					filtered = append(filtered, entry)
 				}
 			}
-			writeJSON(w, filtered)
-			return
+			results = filtered
 		}
-		writeJSON(w, results)
-		return
-	}
-
-	writeJSON(w, []BulkHealthEntry{})
+		return json.Marshal(results)
+	})
 }
 
 func (s *Server) handleNetworkStatus(w http.ResponseWriter, r *http.Request) {
@@ -3301,13 +3310,9 @@ func (s *Server) handleObserverDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Compute packetsLastHour from observations
+	// Compute packetsLastHour from observations for THIS observer only.
 	// observations.timestamp is INTEGER (Unix epoch) — use integer cutoff.
-	pktCounts := s.db.GetObserverPacketCounts(time.Now().Add(-1 * time.Hour).Unix())
-	plh := 0
-	if c, ok := pktCounts[id]; ok {
-		plh = c
-	}
+	plh := s.db.GetObserverPacketCount(id, time.Now().Add(-1*time.Hour).Unix())
 
 	ingestSources, _ := s.db.GetObserverSources(id)
 

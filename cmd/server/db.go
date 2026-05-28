@@ -2288,6 +2288,29 @@ func (db *DB) GetObserverPacketCounts(since int64) map[string]int {
 	return counts
 }
 
+// GetObserverPacketCount returns the packet count since `since` for a single
+// observer. The observer-detail page only needs one observer's count, so this
+// avoids the fleet-wide GROUP BY (GetObserverPacketCounts) that scanned every
+// observer's observations just to read one row.
+func (db *DB) GetObserverPacketCount(id string, since int64) int {
+	var cnt int
+	var err error
+	if db.isV3 {
+		err = db.conn.QueryRow(`SELECT COUNT(*)
+			FROM observations o
+			JOIN observers obs ON obs.rowid = o.observer_idx
+			WHERE obs.id = ? AND o.timestamp > ?`, id, since).Scan(&cnt)
+	} else {
+		err = db.conn.QueryRow(`SELECT COUNT(*)
+			FROM observations o
+			WHERE o.observer_id = ? AND o.timestamp > ?`, id, since).Scan(&cnt)
+	}
+	if err != nil {
+		return 0
+	}
+	return cnt
+}
+
 // ObserverPacketWindows holds packet counts for three time windows per observer.
 type ObserverPacketWindows struct{ Hour, Day, Week int }
 

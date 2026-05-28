@@ -9,27 +9,26 @@
  *       long   — 1 min resolution, 48 h window (2880 samples) → 6h/12h/24h/48h views
  *   - preloadFromServer() fetches GET /api/perf/history once on page load and
  *     merges the server-side 48 h ring buffer into the local buffers.
- *   - refresh() polls /api/perf every 10 s; the detail endpoints
- *     (/api/perf/io, /api/perf/sqlite, /api/perf/write-sources) every 30 s.
+ *   - refresh() polls /api/perf every 5 s; the detail endpoints
+ *     (/api/perf/io, /api/perf/sqlite, /api/perf/write-sources) and /api/health
+ *     are throttled to 30 s via loadPerfDetails()/loadHealthForCards().
  *
- * Server field-name note (this server diverged from the fork): the history
- * PerfSample emits only 17 fields — ts, cpuPercent, goroutines, lastPauseMs,
- * heapAllocMB, heapInuseMB, heapSysMB, totalSysMB, avgMs, cacheHitRate,
- * packetsInRAM, trackedMB, dbSizeMB, walSizeMB, wsClients, totalObservers,
- * onlineObservers. I/O, SQLite-perf, write-source and stale/offline-observer
- * metrics are NOT in the history payload — those charts fill live only.
+ * History payload: PerfSample carries the runtime/memory fields plus I/O,
+ * SQLite-perf, and stale/offline-observer metrics — and these share the same
+ * key names the live samples use, so those charts backfill directly from
+ * history. Write-source data is stored as cumulative counters (writeTxCum, …,
+ * writeSrcAt); preloadFromServer() diffs adjacent samples to reconstruct the
+ * per-second write rates the chart expects (mirroring writeSourceRates()).
  */
 'use strict';
 
 (function () {
-  let interval       = null; // /api/perf poll (REFRESH_MS)
-  let detailInterval = null; // detail endpoints poll (DETAIL_REFRESH_MS)
+  let interval = null; // /api/perf poll (every 5 s — see setInterval below)
 
   // --- History ring buffers ---
   const MAX_SAMPLES      = 720;   // short: 5 s × 720  = 1 h
   const MAX_LONG_SAMPLES = 2880;  // long : 60 s × 2880 = 48 h
-  const REFRESH_MS        = 10000;
-  const DETAIL_REFRESH_MS = 30000;
+  const DETAIL_REFRESH_MS = 30000; // /io,/sqlite,/write-sources,/health throttle
   const HISTORY_KEY      = 'cs-perf-history';
   const LONG_HISTORY_KEY = 'cs-perf-history-long';
   const history          = [];
@@ -344,10 +343,11 @@
 
   // --- Server-side history preload ---
   // Fetches /api/perf/history once on load and merges it into the local
-  // buffers, deduplicating by timestamp. The server only emits 17 fields per
-  // sample (no I/O / write-source / stale-offline data) — those chart keys
-  // stay undefined for history samples and render as gaps until live polling
-  // fills them. Degrades gracefully when history is empty (fresh server).
+  // buffers, deduplicating by timestamp. PerfSample shares the live sample key
+  // names for runtime/memory/io/sqlite/observer fields, so those charts
+  // backfill directly. Write-source data is stored as cumulative counters, so
+  // we diff adjacent samples below to reconstruct per-second rates. Degrades
+  // gracefully when history is empty (fresh server).
   async function preloadFromServer() {
     try {
       const res = await fetch('/api/perf/history');
@@ -355,6 +355,31 @@
       const data = await res.json();
       const samples = data.samples;
       if (!samples || samples.length === 0) return;
+
+      // Reconstruct write-source rates from cumulative counters (writeTxCum, …,
+      // writeSrcAt) by diffing adjacent samples — the server can only persist
+      // cumulative totals historically, but the Write Sources chart wants
+      // rates. Mirrors writeSourceRates() on the live path.
+      samples.sort(function (a, b) { return a.ts - b.ts; });
+      var prevW = null;
+      for (var wi = 0; wi < samples.length; wi++) {
+        var ws = samples[wi];
+        if (ws.writeTxCum == null || !ws.writeSrcAt) continue;
+        var atMs = Date.parse(ws.writeSrcAt);
+        if (!Number.isFinite(atMs)) continue;
+        if (prevW && atMs > prevW.atMs) {
+          var dt = (atMs - prevW.atMs) / 1000;
+          if (dt >= 0.5) {
+            ws.writeTxRate             = Math.max(0, ws.writeTxCum       - prevW.tx)       / dt;
+            ws.writeObsRate            = Math.max(0, ws.writeObsCum      - prevW.obs)      / dt;
+            ws.writeNodeUpsertRate     = Math.max(0, ws.writeNodeCum     - prevW.node)     / dt;
+            ws.writeObserverUpsertRate = Math.max(0, ws.writeObserverCum - prevW.observer) / dt;
+            ws.writeErrorRate          = Math.max(0, ws.writeErrCum      - prevW.err)      / dt;
+          }
+        }
+        prevW = { atMs: atMs, tx: ws.writeTxCum, obs: ws.writeObsCum,
+                  node: ws.writeNodeCum, observer: ws.writeObserverCum, err: ws.writeErrCum };
+      }
 
       // Long history — merge all server samples not already present (by ts).
       const existingTs = new Set(longHistory.map(function (s) { return s.ts; }));
@@ -489,16 +514,21 @@
     var el = document.getElementById('perfContent');
     if (!el) return;
     try {
-      // #1258: /api/health was awaited AFTER Promise.all, adding a full RTT
-      // (~50-200ms) on every 5s refresh. Issue it in parallel with the rest.
-      const [server, client, ioStats, sqliteStats, writeSources, health] = await Promise.all([
+      // /api/perf is polled every 5s for the live runtime/memory charts. The
+      // slow-moving detail endpoints (/io, /sqlite, /write-sources) and /health
+      // are throttled to DETAIL_REFRESH_MS (30s) via loadPerfDetails/
+      // loadHealthForCards, which return cached values between refreshes — so a
+      // 5s tick no longer re-fetches all five endpoints every cycle. All four
+      // run in parallel with /api/perf (a cache hit resolves immediately).
+      const [server, client, details, health] = await Promise.all([
         fetch('/api/perf').then(r => r.json()),
         Promise.resolve(window.apiPerf ? window.apiPerf() : null),
-        fetch('/api/perf/io').then(r => r.json()).catch(() => null),
-        fetch('/api/perf/sqlite').then(r => r.json()).catch(() => null),
-        fetch('/api/perf/write-sources').then(r => r.json()).catch(() => null),
-        fetch('/api/health').then(r => r.json()).catch(() => null)
+        loadPerfDetails(),
+        loadHealthForCards()
       ]);
+      const ioStats      = details ? details.ioStats : null;
+      const sqliteStats  = details ? details.sqliteStats : null;
+      const writeSources = details ? details.writeSources : null;
 
       pushSample(server, server.observerCounts || null, ioStats, sqliteStats, writeSources);
 
