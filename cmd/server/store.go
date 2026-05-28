@@ -220,6 +220,12 @@ type PacketStore struct {
 	// GetAnalyticsSubpathsBulk. Refreshed under s.mu.Lock() whenever spIndex
 	// changes so readers never copy the map under RLock.
 	spIndexSnap atomic.Value // stores *spIndexSnapshot
+	// lastSpSnapRefresh debounces incremental snapshot rebuilds. The snapshot
+	// is an O(n) copy of spIndex (~1M+ entries at scale); rebuilding it on every
+	// ~1s ingest batch is pure GC churn. Incremental writers refresh at most
+	// once per debounce window (see maybeRefreshSpIndexSnap); full rebuilds force
+	// an immediate refresh.
+	lastSpSnapRefresh time.Time
 	// Precomputed distance analytics: hop distances and path totals
 	// computed during Load() and incrementally updated on ingest.
 	distHops  []distHopRecord
@@ -2395,7 +2401,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 		addTxToPathHopIndex(s.byPathHop, tx)
 	}
 	if len(broadcastTxs) > 0 {
-		s.refreshSpIndexSnap()
+		s.maybeRefreshSpIndexSnap()
 	}
 	if len(broadcastTxs) > 0 {
 		s.invalidateRelayStatsCache()
@@ -2808,7 +2814,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		}
 	}
 	if pathHopMutated {
-		s.refreshSpIndexSnap()
+		s.maybeRefreshSpIndexSnap()
 		s.invalidateRelayStatsCache()
 	}
 
@@ -4119,7 +4125,7 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string, maxChunk int)
 		// Remove from path-hop index
 		removeTxFromPathHopIndex(s.byPathHop, tx)
 	}
-	s.refreshSpIndexSnap()
+	s.maybeRefreshSpIndexSnap()
 	s.invalidateRelayStatsCache()
 
 	// Batch-remove from byObserver: single pass per affected observer slice

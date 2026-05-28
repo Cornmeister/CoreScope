@@ -77,12 +77,35 @@ func (s *PacketStore) buildSubpathIndex() {
 // write to spIndex or spTotalPaths. Readers (GetAnalyticsSubpathsBulk) load
 // the snapshot without holding any lock, eliminating the O(n) map copy that
 // previously ran under RLock and blocked ingest writers.
+//
+// This is the forced/immediate variant — use it after a full rebuild. For the
+// high-frequency incremental write paths (per-batch ingest, eviction, path
+// rewrite) prefer maybeRefreshSpIndexSnap, which debounces the O(n) copy.
 func (s *PacketStore) refreshSpIndexSnap() {
 	snap := make(map[string]int, len(s.spIndex))
 	for k, v := range s.spIndex {
 		snap[k] = v
 	}
 	s.spIndexSnap.Store(&spIndexSnapshot{index: snap, totalPaths: s.spTotalPaths})
+	s.lastSpSnapRefresh = time.Now()
+}
+
+// maybeRefreshSpIndexSnap refreshes the snapshot only if the debounce window has
+// elapsed since the last refresh. Called under s.mu.Lock() from incremental
+// write paths that fire roughly once per second; the snapshot only feeds the
+// route-patterns bulk analytics, whose results are themselves cached for
+// rfCacheTTL, so a snapshot lagging by up to the debounce window adds no
+// observable staleness. The window is capped at rfCacheTTL so an operator who
+// configures a tighter analytics cache still gets a correspondingly fresh snapshot.
+func (s *PacketStore) maybeRefreshSpIndexSnap() {
+	window := s.rfCacheTTL
+	if window > 10*time.Second {
+		window = 10 * time.Second
+	}
+	if time.Since(s.lastSpSnapRefresh) < window {
+		return
+	}
+	s.refreshSpIndexSnap()
 }
 
 func (s *PacketStore) GetAnalyticsSubpaths(region string, minLen, maxLen, limit int) map[string]interface{} {
