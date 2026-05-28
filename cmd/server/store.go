@@ -214,9 +214,8 @@ type PacketStore struct {
 	// Precomputed subpath index: raw comma-joined hops → occurrence count.
 	// Built during Load(), incrementally updated on ingest. Avoids full
 	// packet iteration at query time (O(unique_subpaths) vs O(total_packets)).
-	spIndex      map[string]int        // "hop1,hop2" → count
-	spTxIndex    map[string][]*StoreTx // "hop1,hop2" → transmissions containing this subpath
-	spTotalPaths int                   // transmissions with paths >= 2 hops
+	spIndex      map[string]int // "hop1,hop2" → count
+	spTotalPaths int            // transmissions with paths >= 2 hops
 	// Atomic snapshot of spIndex+spTotalPaths for lock-free reads in
 	// GetAnalyticsSubpathsBulk. Refreshed under s.mu.Lock() whenever spIndex
 	// changes so readers never copy the map under RLock.
@@ -442,7 +441,6 @@ func NewPacketStore(db *DB, cfg *PacketStoreConfig, cacheTTLs ...map[string]inte
 		collisionCacheTTL:    3600 * time.Second,
 		invCooldown:          300 * time.Second,
 		spIndex:              make(map[string]int, 4096),
-		spTxIndex:            make(map[string][]*StoreTx, 4096),
 		advertPubkeys:        make(map[string]int),
 		lastSeenTouched:      make(map[string]time.Time),
 		clockSkew:            NewClockSkewEngine(),
@@ -2391,7 +2389,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 
 	// Incrementally update precomputed subpath index with new transmissions
 	for _, tx := range broadcastTxs {
-		if addTxToSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
+		if addTxToSubpathIndex(s.spIndex, tx) {
 			s.spTotalPaths++
 		}
 		addTxToPathHopIndex(s.byPathHop, tx)
@@ -2786,7 +2784,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 				// Temporarily set parsedPath to old hops for removal.
 				saved, savedFlag := tx.parsedPath, tx.pathParsed
 				tx.parsedPath, tx.pathParsed = oldHops, true
-				if removeTxFromSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
+				if removeTxFromSubpathIndex(s.spIndex, tx) {
 					s.spTotalPaths--
 				}
 				tx.parsedPath, tx.pathParsed = saved, savedFlag
@@ -2801,7 +2799,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 			}
 			// pickBestObservation already set pathParsed=false so
 			// addTxToSubpathIndex will re-parse the new path.
-			if addTxToSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
+			if addTxToSubpathIndex(s.spIndex, tx) {
 				s.spTotalPaths++
 			}
 			addTxToPathHopIndex(s.byPathHop, tx)
@@ -3713,7 +3711,7 @@ func removeTxFromSlice(idx map[string][]*StoreTx, key string, tx *StoreTx) {
 // usage and independent of GC state.
 //
 // Issue #743: Previous estimates missed major per-packet allocations:
-// - spTxIndex: O(path²) entries per tx (50-150MB at scale)
+// - spIndex: O(path²) subpath entries per tx (50-150MB at scale)
 // - Per-tx maps: obsKeys, observerSet (~11MB at scale)
 // - byPathHop index entries (20-40MB at scale)
 // Note: ResolvedPath per-obs overhead eliminated by #800 refactor.
@@ -3730,12 +3728,12 @@ const (
 	// Per path hop: byPathHop index entry (pointer + map bucket)
 	perPathHopBytes = 50
 
-	// Per subpath entry in spTxIndex: string key + slice append + pointer
+	// Per subpath entry in spIndex: string key + int count + map bucket overhead
 	perSubpathEntryBytes = 40
 )
 
 // estimateStoreTxBytes returns the estimated memory cost of a StoreTx (excluding observations).
-// Includes per-tx maps (obsKeys, observerSet), byPathHop entries, and spTxIndex subpath entries.
+// Includes per-tx maps (obsKeys, observerSet), byPathHop entries, and spIndex subpath entries.
 func estimateStoreTxBytes(tx *StoreTx) int64 {
 	base := int64(storeTxBaseBytes)
 	base += int64(len(tx.RawHex) + len(tx.Hash) + len(tx.DecodedJSON) + len(tx.PathJSON))
@@ -3748,7 +3746,7 @@ func estimateStoreTxBytes(tx *StoreTx) int64 {
 	hops := int64(len(txGetParsedPath(tx)))
 	base += hops * perPathHopBytes
 
-	// spTxIndex: O(path²) subpath combinations
+	// spIndex: O(path²) subpath combinations
 	if hops > 1 {
 		subpaths := hops * (hops - 1) / 2
 		base += subpaths * perSubpathEntryBytes
@@ -4117,7 +4115,7 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string, maxChunk int)
 		s.removeFromResolvedPubkeyIndex(tx.ID)
 
 		// Remove from subpath index
-		removeTxFromSubpathIndexFull(s.spIndex, s.spTxIndex, tx)
+		removeTxFromSubpathIndex(s.spIndex, tx)
 		// Remove from path-hop index
 		removeTxFromPathHopIndex(s.byPathHop, tx)
 	}

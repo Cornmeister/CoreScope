@@ -28,7 +28,6 @@ func newChannelTestStore(packets []*StoreTx) *PacketStore {
 		distCache:     make(map[string]*cachedResult),
 		subpathCache:  make(map[string]*cachedResult),
 		spIndex:       make(map[string]int),
-		spTxIndex:     make(map[string][]*StoreTx),
 		advertPubkeys: make(map[string]int),
 		lastSeenTouched: make(map[string]time.Time),
 		clockSkew:     NewClockSkewEngine(),

@@ -2427,24 +2427,23 @@ func TestSubpathTxIndexPopulated(t *testing.T) {
 	store := NewPacketStore(db, nil)
 	store.Load()
 
-	// spTxIndex must be populated alongside spIndex
-	if len(store.spTxIndex) == 0 {
-		t.Fatal("expected spTxIndex to be populated after Load()")
+	if len(store.spIndex) == 0 {
+		t.Fatal("expected spIndex to be populated after Load()")
 	}
 
-	// Every key in spIndex must also exist in spTxIndex with matching count
+	// GetSubpathDetail scans packets on demand instead of using a precomputed
+	// subpath→txs index. Its match count must equal the spIndex count for every
+	// subpath key, i.e. the scan reproduces the exact multiset the old index held.
 	for key, count := range store.spIndex {
-		txs, ok := store.spTxIndex[key]
-		if !ok {
-			t.Errorf("spTxIndex missing key %q that exists in spIndex", key)
-			continue
-		}
-		if len(txs) != count {
-			t.Errorf("spTxIndex[%q] has %d txs, spIndex count is %d", key, len(txs), count)
+		rawHops := strings.Split(key, ",")
+		detail := store.GetSubpathDetail(rawHops)
+		matches, _ := detail["totalMatches"].(int)
+		if matches != count {
+			t.Errorf("GetSubpathDetail(%q) totalMatches=%d, spIndex count=%d", key, matches, count)
 		}
 	}
 
-	// GetSubpathDetail should return correct match count via indexed lookup
+	// GetSubpathDetail should return correct match count via on-demand scan
 	detail := store.GetSubpathDetail([]string{"eeff", "0011"})
 	if detail == nil {
 		t.Fatal("expected non-nil detail for existing subpath")
