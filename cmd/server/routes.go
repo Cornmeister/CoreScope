@@ -705,7 +705,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 
 func (s *Server) backfillStatusMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.store != nil && s.store.backfillComplete.Load() {
+		if s.store != nil && s.store.backgroundLoadDone.Load() {
 			w.Header().Set("X-CoreScope-Status", "ready")
 		} else {
 			w.Header().Set("X-CoreScope-Status", "backfilling")
@@ -1269,16 +1269,17 @@ func (s *Server) buildStatsResponse() (*StatsResponse, error) {
 	}
 	counts := s.db.GetRoleCounts()
 
-	// Compute backfill progress
-	backfilling := s.store != nil && !s.store.backfillComplete.Load()
+	// Compute background-load (hot startup) progress. backgroundLoadProgress
+	// is 0–100; expose it here as a 0–1 fraction.
+	backfilling := s.store != nil && !s.store.backgroundLoadDone.Load()
 	var backfillProgress float64
-	if backfilling && s.store != nil && s.store.backfillTotal.Load() > 0 {
-		backfillProgress = float64(s.store.backfillProcessed.Load()) / float64(s.store.backfillTotal.Load())
+	if !backfilling {
+		backfillProgress = 1
+	} else if s.store != nil {
+		backfillProgress = float64(s.store.backgroundLoadProgress.Load()) / 100
 		if backfillProgress > 1 {
 			backfillProgress = 1
 		}
-	} else if !backfilling {
-		backfillProgress = 1
 	}
 
 	// Memory accounting (#832). storeDataMB is the in-store packet byte

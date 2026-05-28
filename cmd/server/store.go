@@ -318,12 +318,6 @@ type PacketStore struct {
 	// Clock skew detection engine.
 	clockSkew *ClockSkewEngine
 
-	// Async backfill state: set after backfillResolvedPathsAsync completes.
-	backfillComplete atomic.Bool
-	// Progress tracking for async backfill (total pending and processed so far).
-	backfillTotal     atomic.Int64 // set once at start of async backfill
-	backfillProcessed atomic.Int64
-
 	// Bounded cold load: oldest packet timestamp loaded into memory.
 	// Empty string means all data is in memory (no limit applied).
 	oldestLoaded string
@@ -1097,10 +1091,30 @@ func (s *PacketStore) loadBackgroundChunks() {
 	for {
 		s.mu.RLock()
 		oldest := s.oldestLoaded
+		tracked := s.trackedBytes
 		s.mu.RUnlock()
 
 		if oldest == "" {
 			break
+		}
+
+		// Stop filling history once the in-memory store hits its memory
+		// budget. The hot window (Load) honors maxMemoryMB, but this
+		// background fill previously loaded the entire retention window
+		// regardless, blowing past the budget and OOM-killing the process
+		// in a respawn loop. Mirror EvictStale's dual trigger
+		// (self-accounted trackedBytes OR actual Go heap) so the loader
+		// stops before the heap reaches GOMEMLIMIT. Older data stays on
+		// disk and is served via the SQL fallback.
+		if s.maxMemoryMB > 0 {
+			const heapTriggerFactor = 1.15
+			highWatermark := int64(s.maxMemoryMB) * 1048576
+			heapMB := s.estimatedMemoryMB()
+			if tracked > highWatermark || heapMB > float64(s.maxMemoryMB)*heapTriggerFactor {
+				log.Printf("[store] background loader: memory budget reached (tracked ~%.0fMB, heap ~%.0fMB, budget %dMB) — stopping history fill at oldestLoaded=%s; older data served via SQL fallback",
+					trackedBytesToMB(tracked), heapMB, s.maxMemoryMB, oldest)
+				break
+			}
 		}
 		chunkEnd, err := time.Parse(time.RFC3339, oldest)
 		if err != nil {
