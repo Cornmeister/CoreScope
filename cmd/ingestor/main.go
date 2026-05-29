@@ -594,6 +594,7 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 				BatteryMv:   meta.BatteryMv,
 				PacketsSent: meta.PacketsSent,
 				PacketsRecv: meta.PacketsRecv,
+				UptimeSecs:  meta.UptimeSecs,
 			}
 			if err := store.InsertMetrics(metricsData); err != nil {
 				log.Printf("MQTT [%s] metrics insert error: %v", tag, err)
