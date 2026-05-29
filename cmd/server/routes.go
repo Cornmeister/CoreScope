@@ -1805,11 +1805,23 @@ func (s *Server) handlePacketTimestamps(w http.ResponseWriter, r *http.Request) 
 		writeError(w, 400, "since required")
 		return
 	}
-	if s.store != nil {
-		writeJSON(w, s.store.GetTimestamps(since))
+	if s.store == nil {
+		writeJSON(w, []string{})
 		return
 	}
-	writeJSON(w, []string{})
+	// Each live client polls this with its own `since = now - scope`, so no two
+	// requests ever shared a result and every one ran a fresh O(n) tail scan —
+	// the most expensive recurring endpoint (p95 ~7s). Floor `since` to a 30s
+	// boundary so clients on the same scope coalesce onto one cached scan
+	// (ETag/304 + singleflight). Flooring DOWN only widens the window slightly;
+	// the client re-filters by its own start, so the sparkline is unchanged.
+	cacheSince := since
+	if t, err := time.Parse(time.RFC3339Nano, since); err == nil {
+		cacheSince = t.UTC().Truncate(30 * time.Second).Format("2006-01-02T15:04:05.000Z")
+	}
+	s.analyticsCache.serve(w, r, "timestamps|"+cacheSince, 15*time.Second, "handlePacketTimestamps", serveOpts{CacheControl: "private, max-age=15"}, func() ([]byte, error) {
+		return json.Marshal(s.store.GetTimestamps(cacheSince))
+	})
 }
 
 var hashPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
@@ -3223,22 +3235,25 @@ func (s *Server) handleChannelMessages(w http.ResponseWriter, r *http.Request) {
 	limit := queryInt(r, "limit", 100)
 	offset := queryInt(r, "offset", 0)
 	region := r.URL.Query().Get("region")
-	// Prefer DB for full history (in-memory store has limited retention)
-	if s.db != nil {
-		messages, total, err := s.db.GetChannelMessages(hash, limit, offset, region)
-		if err != nil {
-			writeInternalError(w, "handleChannelMessages GetChannelMessages", err)
-			return
+	// Cache per (hash,limit,offset,region): the store path re-scans + re-parses
+	// every type-5 packet on each request, so a short cache + singleflight
+	// stops repeated/concurrent loads of the same channel from re-scanning.
+	key := fmt.Sprintf("chanmsg|%s|%d|%d|%s", hash, limit, offset, region)
+	s.analyticsCache.serve(w, r, key, 30*time.Second, "handleChannelMessages", serveOpts{CacheControl: "private, max-age=30, stale-while-revalidate=30"}, func() ([]byte, error) {
+		// Prefer DB for full history (in-memory store has limited retention)
+		if s.db != nil {
+			messages, total, err := s.db.GetChannelMessages(hash, limit, offset, region)
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(ChannelMessagesResponse{Messages: messages, Total: total})
 		}
-		writeJSON(w, ChannelMessagesResponse{Messages: messages, Total: total})
-		return
-	}
-	if s.store != nil {
-		messages, total := s.store.GetChannelMessages(hash, limit, offset, region)
-		writeJSON(w, ChannelMessagesResponse{Messages: messages, Total: total})
-		return
-	}
-	writeJSON(w, ChannelMessagesResponse{Messages: []map[string]interface{}{}, Total: 0})
+		if s.store != nil {
+			messages, total := s.store.GetChannelMessages(hash, limit, offset, region)
+			return json.Marshal(ChannelMessagesResponse{Messages: messages, Total: total})
+		}
+		return json.Marshal(ChannelMessagesResponse{Messages: []map[string]interface{}{}, Total: 0})
+	})
 }
 
 // observersListCacheTTL caps how often /api/observers re-scans the DB.

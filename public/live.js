@@ -1241,7 +1241,7 @@
     let mapCenter = [37.45, -122.0];
     let mapZoom = 9;
     try {
-      const mapCfg = await (await fetch('/api/config/map')).json();
+      const mapCfg = await api('/config/map', { ttl: 3600000 });
       if (Array.isArray(mapCfg.center) && mapCfg.center.length === 2) mapCenter = mapCfg.center;
       if (typeof mapCfg.zoom === 'number') mapZoom = mapCfg.zoom;
     } catch {}
@@ -1415,7 +1415,7 @@
       // (cmd/server/types.go ObserverListResponse) — NOT a top-level array.
       // Bug #1136: previously parsed as array → map empty → region filter
       // dropped every packet.
-      fetch('/api/observers').then(function(r) { return r.json(); }).then(function(data) {
+      api('/observers', { ttl: 120000 }).then(function(data) {
         setObserverIataMap(buildObserverIataMap(data));
       }).catch(function() { /* leave map empty; filter will hide all when active */ });
       RegionFilter.init(rfEl, { dropdown: true });
@@ -2105,8 +2105,15 @@
 
     // Fetch historical timestamps for timeline, then start refresh
     fetchTimelineTimestamps().then(() => updateTimeline());
+    // Redraw every 30s so the window slides while idle. The live WS buffer
+    // already supplies new packets (merged in updateTimelineNow), so we do NOT
+    // re-pull the full historical timestamp set every tick — the old code reset
+    // timelineFetchedScope each 30s, defeating fetchTimelineTimestamps' own
+    // dedup guard and hammering the most expensive endpoint. Reconcile the
+    // historical set only every ~5 min (every 10th tick).
+    let _tlRefreshTick = 0;
     _timelineRefreshInterval = setInterval(() => {
-      VCR.timelineFetchedScope = 0; // force refetch
+      if (++_tlRefreshTick % 10 === 0) VCR.timelineFetchedScope = 0;
       fetchTimelineTimestamps().then(() => updateTimeline());
     }, 30000);
 
