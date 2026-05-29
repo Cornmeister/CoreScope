@@ -239,137 +239,133 @@ func (s *Server) handleNeighborGraph(w http.ResponseWriter, r *http.Request) {
 	region := r.URL.Query().Get("region")
 	roleFilter := strings.ToLower(r.URL.Query().Get("role"))
 
-	// Cache marshalled bytes (ETag/304 + singleflight) keyed by the filter
-	// params — the result is identical for all users with the same filters.
-	key := "neighbor|mc=" + strconv.Itoa(minCount) + "|ms=" + strconv.FormatFloat(minScore, 'g', -1, 64) + "|region=" + region + "|role=" + roleFilter
-	s.analyticsCache.serve(w, r, key, analyticsCacheTTL, "handleNeighborGraph", serveOpts{CacheControl: analyticsCacheHeader}, func() ([]byte, error) {
-		graph := s.getNeighborGraph()
-		allEdges := graph.AllEdges()
-		now := time.Now()
+	graph := s.getNeighborGraph()
+	allEdges := graph.AllEdges()
+	now := time.Now()
 
-		// Resolve region observers if filtering.
-		var regionObs map[string]bool
-		if region != "" && s.store != nil {
-			regionObs = s.store.resolveRegionObservers(region)
+	// Resolve region observers if filtering.
+	var regionObs map[string]bool
+	if region != "" && s.store != nil {
+		regionObs = s.store.resolveRegionObservers(region)
+	}
+
+	nodeMap := s.buildNodeInfoMap()
+	nodeSet := make(map[string]bool)
+	var filteredEdges []GraphEdge
+	ambiguousCount := 0
+
+	for _, e := range allEdges {
+		score := e.Score(now)
+		if e.Count < minCount || score < minScore {
+			continue
 		}
 
-		nodeMap := s.buildNodeInfoMap()
-		nodeSet := make(map[string]bool)
-		var filteredEdges []GraphEdge
-		ambiguousCount := 0
-
-		for _, e := range allEdges {
-			score := e.Score(now)
-			if e.Count < minCount || score < minScore {
+		// Role filter: at least one endpoint must match the role.
+		if roleFilter != "" && nodeMap != nil {
+			aInfo, aOK := nodeMap[strings.ToLower(e.NodeA)]
+			bInfo, bOK := nodeMap[strings.ToLower(e.NodeB)]
+			aMatch := aOK && strings.EqualFold(aInfo.Role, roleFilter)
+			bMatch := bOK && strings.EqualFold(bInfo.Role, roleFilter)
+			if !aMatch && !bMatch {
 				continue
 			}
+		}
 
-			// Role filter: at least one endpoint must match the role.
-			if roleFilter != "" && nodeMap != nil {
-				aInfo, aOK := nodeMap[strings.ToLower(e.NodeA)]
-				bInfo, bOK := nodeMap[strings.ToLower(e.NodeB)]
-				aMatch := aOK && strings.EqualFold(aInfo.Role, roleFilter)
-				bMatch := bOK && strings.EqualFold(bInfo.Role, roleFilter)
-				if !aMatch && !bMatch {
-					continue
+		// Region filter: at least one observer must be in the region.
+		if regionObs != nil {
+			match := false
+			for obs := range e.Observers {
+				if regionObs[obs] {
+					match = true
+					break
 				}
 			}
-
-			// Region filter: at least one observer must be in the region.
-			if regionObs != nil {
-				match := false
-				for obs := range e.Observers {
-					if regionObs[obs] {
-						match = true
-						break
-					}
-				}
-				if !match {
-					continue
-				}
-			}
-
-			// Filter blacklisted nodes from graph.
-			if s.cfg != nil && (s.cfg.IsBlacklisted(e.NodeA) || s.cfg.IsBlacklisted(e.NodeB)) {
+			if !match {
 				continue
 			}
+		}
 
-			ge := GraphEdge{
-				Source:        e.NodeA,
-				Target:        e.NodeB,
-				Weight:        e.Count,
-				Score:         score,
-				Bidirectional: true,
-				Ambiguous:     e.Ambiguous,
-			}
-			if e.SNRCount > 0 {
-				avg := e.AvgSNR()
-				ge.AvgSNR = &avg
-			}
+		// Filter blacklisted nodes from graph.
+		if s.cfg != nil && (s.cfg.IsBlacklisted(e.NodeA) || s.cfg.IsBlacklisted(e.NodeB)) {
+			continue
+		}
 
-			if e.Ambiguous {
-				ambiguousCount++
-				// For ambiguous edges, use prefix as target.
-				if e.NodeB == "" {
-					ge.Target = "prefix:" + e.Prefix
-				}
-			}
+		ge := GraphEdge{
+			Source:        e.NodeA,
+			Target:        e.NodeB,
+			Weight:        e.Count,
+			Score:         score,
+			Bidirectional: true,
+			Ambiguous:     e.Ambiguous,
+		}
+		if e.SNRCount > 0 {
+			avg := e.AvgSNR()
+			ge.AvgSNR = &avg
+		}
 
-			filteredEdges = append(filteredEdges, ge)
-
-			// Track nodes.
-			if e.NodeA != "" && !strings.HasPrefix(e.NodeA, "prefix:") {
-				nodeSet[e.NodeA] = true
-			}
-			if e.NodeB != "" && !strings.HasPrefix(e.NodeB, "prefix:") {
-				nodeSet[e.NodeB] = true
+		if e.Ambiguous {
+			ambiguousCount++
+			// For ambiguous edges, use prefix as target.
+			if e.NodeB == "" {
+				ge.Target = "prefix:" + e.Prefix
 			}
 		}
 
-		// Build node list.
-		// Count neighbors per node from filtered edges.
-		neighborCounts := make(map[string]int)
-		for _, ge := range filteredEdges {
-			neighborCounts[ge.Source]++
-			neighborCounts[ge.Target]++
-		}
+		filteredEdges = append(filteredEdges, ge)
 
-		var nodes []GraphNode
-		for pk := range nodeSet {
-			gn := GraphNode{Pubkey: pk, NeighborCount: neighborCounts[pk]}
-			if info, ok := nodeMap[strings.ToLower(pk)]; ok {
-				gn.Name = info.Name
-				gn.Role = info.Role
-			}
-			nodes = append(nodes, gn)
+		// Track nodes.
+		if e.NodeA != "" && !strings.HasPrefix(e.NodeA, "prefix:") {
+			nodeSet[e.NodeA] = true
 		}
+		if e.NodeB != "" && !strings.HasPrefix(e.NodeB, "prefix:") {
+			nodeSet[e.NodeB] = true
+		}
+	}
 
-		if filteredEdges == nil {
-			filteredEdges = []GraphEdge{}
-		}
-		if nodes == nil {
-			nodes = []GraphNode{}
-		}
+	// Build node list.
+	// Count neighbors per node from filtered edges.
+	neighborCounts := make(map[string]int)
+	for _, ge := range filteredEdges {
+		neighborCounts[ge.Source]++
+		neighborCounts[ge.Target]++
+	}
 
-		avgCluster := 0.0
-		if len(nodes) > 0 {
-			avgCluster = float64(len(filteredEdges)*2) / float64(len(nodes))
+	var nodes []GraphNode
+	for pk := range nodeSet {
+		gn := GraphNode{Pubkey: pk, NeighborCount: neighborCounts[pk]}
+		if info, ok := nodeMap[strings.ToLower(pk)]; ok {
+			gn.Name = info.Name
+			gn.Role = info.Role
 		}
+		nodes = append(nodes, gn)
+	}
 
-		resp := NeighborGraphResponse{
-			Nodes: nodes,
-			Edges: filteredEdges,
-			Stats: GraphStats{
-				TotalNodes:          len(nodes),
-				TotalEdges:          len(filteredEdges),
-				AmbiguousEdges:      ambiguousCount,
-				AvgClusterSize:      avgCluster,
-				RejectedEdgesGeoFar: atomic.LoadUint64(&graph.RejectedEdgesGeoFar),
-			},
-		}
+	if filteredEdges == nil {
+		filteredEdges = []GraphEdge{}
+	}
+	if nodes == nil {
+		nodes = []GraphNode{}
+	}
 
-		return json.Marshal(resp)
-	})
+	avgCluster := 0.0
+	if len(nodes) > 0 {
+		avgCluster = float64(len(filteredEdges)*2) / float64(len(nodes))
+	}
+
+	resp := NeighborGraphResponse{
+		Nodes: nodes,
+		Edges: filteredEdges,
+		Stats: GraphStats{
+			TotalNodes:          len(nodes),
+			TotalEdges:          len(filteredEdges),
+			AmbiguousEdges:      ambiguousCount,
+			AvgClusterSize:      avgCluster,
+			RejectedEdgesGeoFar: atomic.LoadUint64(&graph.RejectedEdgesGeoFar),
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
