@@ -529,6 +529,15 @@ func (c *Config) normalizePacketStoreConfig() {
 	if c.PacketStore == nil {
 		c.PacketStore = defaultPacketStoreConfig()
 	}
+	// Env override for the in-memory store budget. Coolify file-mount
+	// (config.json) updates don't reliably propagate to the running container on
+	// pull-deploys, but env vars do — so this is the dependable knob for tuning
+	// memory on a constrained host. PACKETSTORE_MAX_MEMORY_MB=0 means unlimited.
+	if v := os.Getenv("PACKETSTORE_MAX_MEMORY_MB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.PacketStore.MaxMemoryMB = n
+		}
+	}
 }
 
 // sanitizeCORS rejects an unsafe CORS configuration. A "*" wildcard origin
