@@ -15,32 +15,32 @@ import (
 // ─── Neighbor API response types ───────────────────────────────────────────────
 
 type NeighborResponse struct {
-	Node              string             `json:"node"`
-	Neighbors         []NeighborEntry    `json:"neighbors"`
-	TotalObservations int                `json:"total_observations"`
+	Node              string          `json:"node"`
+	Neighbors         []NeighborEntry `json:"neighbors"`
+	TotalObservations int             `json:"total_observations"`
 }
 
 type NeighborEntry struct {
-	Pubkey      *string          `json:"pubkey"`
-	Prefix      string           `json:"prefix"`
-	Name        *string          `json:"name"`
-	Role        *string          `json:"role"`
-	Count       int              `json:"count"`
-	Score       float64          `json:"score"`
-	FirstSeen   string           `json:"first_seen"`
-	LastSeen    string           `json:"last_seen"`
-	AvgSNR      *float64         `json:"avg_snr"`
-	DistanceKm  *float64         `json:"distance_km,omitempty"`
-	Observers   []string         `json:"observers"`
-	Ambiguous   bool             `json:"ambiguous"`
-	Unresolved  bool             `json:"unresolved,omitempty"`
-	Candidates  []CandidateEntry `json:"candidates,omitempty"`
+	Pubkey     *string          `json:"pubkey"`
+	Prefix     string           `json:"prefix"`
+	Name       *string          `json:"name"`
+	Role       *string          `json:"role"`
+	Count      int              `json:"count"`
+	Score      float64          `json:"score"`
+	FirstSeen  string           `json:"first_seen"`
+	LastSeen   string           `json:"last_seen"`
+	AvgSNR     *float64         `json:"avg_snr"`
+	DistanceKm *float64         `json:"distance_km,omitempty"`
+	Observers  []string         `json:"observers"`
+	Ambiguous  bool             `json:"ambiguous"`
+	Unresolved bool             `json:"unresolved,omitempty"`
+	Candidates []CandidateEntry `json:"candidates,omitempty"`
 }
 
 type CandidateEntry struct {
-	Pubkey string  `json:"pubkey"`
-	Name   string  `json:"name"`
-	Role   string  `json:"role"`
+	Pubkey string `json:"pubkey"`
+	Name   string `json:"name"`
+	Role   string `json:"role"`
 }
 
 type NeighborGraphResponse struct {
@@ -239,133 +239,137 @@ func (s *Server) handleNeighborGraph(w http.ResponseWriter, r *http.Request) {
 	region := r.URL.Query().Get("region")
 	roleFilter := strings.ToLower(r.URL.Query().Get("role"))
 
-	graph := s.getNeighborGraph()
-	allEdges := graph.AllEdges()
-	now := time.Now()
+	// Cache marshalled bytes (ETag/304 + singleflight) keyed by the filter
+	// params — the result is identical for all users with the same filters.
+	key := "neighbor|mc=" + strconv.Itoa(minCount) + "|ms=" + strconv.FormatFloat(minScore, 'g', -1, 64) + "|region=" + region + "|role=" + roleFilter
+	s.analyticsCache.serve(w, r, key, analyticsCacheTTL, "handleNeighborGraph", serveOpts{CacheControl: analyticsCacheHeader}, func() ([]byte, error) {
+		graph := s.getNeighborGraph()
+		allEdges := graph.AllEdges()
+		now := time.Now()
 
-	// Resolve region observers if filtering.
-	var regionObs map[string]bool
-	if region != "" && s.store != nil {
-		regionObs = s.store.resolveRegionObservers(region)
-	}
-
-	nodeMap := s.buildNodeInfoMap()
-	nodeSet := make(map[string]bool)
-	var filteredEdges []GraphEdge
-	ambiguousCount := 0
-
-	for _, e := range allEdges {
-		score := e.Score(now)
-		if e.Count < minCount || score < minScore {
-			continue
+		// Resolve region observers if filtering.
+		var regionObs map[string]bool
+		if region != "" && s.store != nil {
+			regionObs = s.store.resolveRegionObservers(region)
 		}
 
-		// Role filter: at least one endpoint must match the role.
-		if roleFilter != "" && nodeMap != nil {
-			aInfo, aOK := nodeMap[strings.ToLower(e.NodeA)]
-			bInfo, bOK := nodeMap[strings.ToLower(e.NodeB)]
-			aMatch := aOK && strings.EqualFold(aInfo.Role, roleFilter)
-			bMatch := bOK && strings.EqualFold(bInfo.Role, roleFilter)
-			if !aMatch && !bMatch {
+		nodeMap := s.buildNodeInfoMap()
+		nodeSet := make(map[string]bool)
+		var filteredEdges []GraphEdge
+		ambiguousCount := 0
+
+		for _, e := range allEdges {
+			score := e.Score(now)
+			if e.Count < minCount || score < minScore {
 				continue
 			}
-		}
 
-		// Region filter: at least one observer must be in the region.
-		if regionObs != nil {
-			match := false
-			for obs := range e.Observers {
-				if regionObs[obs] {
-					match = true
-					break
+			// Role filter: at least one endpoint must match the role.
+			if roleFilter != "" && nodeMap != nil {
+				aInfo, aOK := nodeMap[strings.ToLower(e.NodeA)]
+				bInfo, bOK := nodeMap[strings.ToLower(e.NodeB)]
+				aMatch := aOK && strings.EqualFold(aInfo.Role, roleFilter)
+				bMatch := bOK && strings.EqualFold(bInfo.Role, roleFilter)
+				if !aMatch && !bMatch {
+					continue
 				}
 			}
-			if !match {
+
+			// Region filter: at least one observer must be in the region.
+			if regionObs != nil {
+				match := false
+				for obs := range e.Observers {
+					if regionObs[obs] {
+						match = true
+						break
+					}
+				}
+				if !match {
+					continue
+				}
+			}
+
+			// Filter blacklisted nodes from graph.
+			if s.cfg != nil && (s.cfg.IsBlacklisted(e.NodeA) || s.cfg.IsBlacklisted(e.NodeB)) {
 				continue
 			}
-		}
 
-		// Filter blacklisted nodes from graph.
-		if s.cfg != nil && (s.cfg.IsBlacklisted(e.NodeA) || s.cfg.IsBlacklisted(e.NodeB)) {
-			continue
-		}
+			ge := GraphEdge{
+				Source:        e.NodeA,
+				Target:        e.NodeB,
+				Weight:        e.Count,
+				Score:         score,
+				Bidirectional: true,
+				Ambiguous:     e.Ambiguous,
+			}
+			if e.SNRCount > 0 {
+				avg := e.AvgSNR()
+				ge.AvgSNR = &avg
+			}
 
-		ge := GraphEdge{
-			Source:        e.NodeA,
-			Target:        e.NodeB,
-			Weight:        e.Count,
-			Score:         score,
-			Bidirectional: true,
-			Ambiguous:     e.Ambiguous,
-		}
-		if e.SNRCount > 0 {
-			avg := e.AvgSNR()
-			ge.AvgSNR = &avg
-		}
+			if e.Ambiguous {
+				ambiguousCount++
+				// For ambiguous edges, use prefix as target.
+				if e.NodeB == "" {
+					ge.Target = "prefix:" + e.Prefix
+				}
+			}
 
-		if e.Ambiguous {
-			ambiguousCount++
-			// For ambiguous edges, use prefix as target.
-			if e.NodeB == "" {
-				ge.Target = "prefix:" + e.Prefix
+			filteredEdges = append(filteredEdges, ge)
+
+			// Track nodes.
+			if e.NodeA != "" && !strings.HasPrefix(e.NodeA, "prefix:") {
+				nodeSet[e.NodeA] = true
+			}
+			if e.NodeB != "" && !strings.HasPrefix(e.NodeB, "prefix:") {
+				nodeSet[e.NodeB] = true
 			}
 		}
 
-		filteredEdges = append(filteredEdges, ge)
-
-		// Track nodes.
-		if e.NodeA != "" && !strings.HasPrefix(e.NodeA, "prefix:") {
-			nodeSet[e.NodeA] = true
+		// Build node list.
+		// Count neighbors per node from filtered edges.
+		neighborCounts := make(map[string]int)
+		for _, ge := range filteredEdges {
+			neighborCounts[ge.Source]++
+			neighborCounts[ge.Target]++
 		}
-		if e.NodeB != "" && !strings.HasPrefix(e.NodeB, "prefix:") {
-			nodeSet[e.NodeB] = true
+
+		var nodes []GraphNode
+		for pk := range nodeSet {
+			gn := GraphNode{Pubkey: pk, NeighborCount: neighborCounts[pk]}
+			if info, ok := nodeMap[strings.ToLower(pk)]; ok {
+				gn.Name = info.Name
+				gn.Role = info.Role
+			}
+			nodes = append(nodes, gn)
 		}
-	}
 
-	// Build node list.
-	// Count neighbors per node from filtered edges.
-	neighborCounts := make(map[string]int)
-	for _, ge := range filteredEdges {
-		neighborCounts[ge.Source]++
-		neighborCounts[ge.Target]++
-	}
-
-	var nodes []GraphNode
-	for pk := range nodeSet {
-		gn := GraphNode{Pubkey: pk, NeighborCount: neighborCounts[pk]}
-		if info, ok := nodeMap[strings.ToLower(pk)]; ok {
-			gn.Name = info.Name
-			gn.Role = info.Role
+		if filteredEdges == nil {
+			filteredEdges = []GraphEdge{}
 		}
-		nodes = append(nodes, gn)
-	}
+		if nodes == nil {
+			nodes = []GraphNode{}
+		}
 
-	if filteredEdges == nil {
-		filteredEdges = []GraphEdge{}
-	}
-	if nodes == nil {
-		nodes = []GraphNode{}
-	}
+		avgCluster := 0.0
+		if len(nodes) > 0 {
+			avgCluster = float64(len(filteredEdges)*2) / float64(len(nodes))
+		}
 
-	avgCluster := 0.0
-	if len(nodes) > 0 {
-		avgCluster = float64(len(filteredEdges)*2) / float64(len(nodes))
-	}
+		resp := NeighborGraphResponse{
+			Nodes: nodes,
+			Edges: filteredEdges,
+			Stats: GraphStats{
+				TotalNodes:          len(nodes),
+				TotalEdges:          len(filteredEdges),
+				AmbiguousEdges:      ambiguousCount,
+				AvgClusterSize:      avgCluster,
+				RejectedEdgesGeoFar: atomic.LoadUint64(&graph.RejectedEdgesGeoFar),
+			},
+		}
 
-	resp := NeighborGraphResponse{
-		Nodes: nodes,
-		Edges: filteredEdges,
-		Stats: GraphStats{
-			TotalNodes:          len(nodes),
-			TotalEdges:          len(filteredEdges),
-			AmbiguousEdges:      ambiguousCount,
-			AvgClusterSize:      avgCluster,
-			RejectedEdgesGeoFar: atomic.LoadUint64(&graph.RejectedEdgesGeoFar),
-		},
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+		return json.Marshal(resp)
+	})
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────

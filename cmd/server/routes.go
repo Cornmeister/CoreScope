@@ -149,10 +149,23 @@ type Server struct {
 	// Per-key bytes-payload caches. Same singleflight semantics as
 	// singleKeyByteCache but keyed by a string so the same endpoint can
 	// cache distinct query-parameter combinations independently.
-	nodesListCache   perKeyByteCache
-	channelsCache    perKeyByteCache
-	bulkHealthCache  perKeyByteCache
+	nodesListCache  perKeyByteCache
+	channelsCache   perKeyByteCache
+	bulkHealthCache perKeyByteCache
+	// analyticsCache serves the large, identical-for-all-users analytics
+	// payloads (topology/rf/channels/distance/neighbor-graph + audio-lab,
+	// network-status) from cached marshalled bytes with ETag/304 and
+	// singleflight, keyed by endpoint+region+window. Without it these were
+	// re-marshalled and re-sent in full to every request, and concurrent
+	// region/window misses each triggered a separate multi-second recompute.
+	analyticsCache perKeyByteCache
 }
+
+// analyticsCacheTTL / header bound how often the (slow-changing) analytics
+// payloads are recomputed+remarshalled. 60s matches the background recomputer
+// cadence; stale-while-revalidate keeps responses instant during refresh.
+const analyticsCacheTTL = 60 * time.Second
+const analyticsCacheHeader = "private, max-age=60, stale-while-revalidate=120"
 
 // perKeyByteCache is the multi-key version of singleKeyByteCache — separate
 // TTL'd entries for each distinct cache key, with per-key singleflight so
@@ -2379,13 +2392,15 @@ func (s *Server) handleBulkHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleNetworkStatus(w http.ResponseWriter, r *http.Request) {
-	ht := s.cfg.GetHealthThresholds()
-	result, err := s.db.GetNetworkStatus(ht)
-	if err != nil {
-		writeInternalError(w, "handleNetworkStatus GetNetworkStatus", err)
-		return
-	}
-	writeJSON(w, result)
+	// Identical for all users; cache the bytes (ETag/304) for a short window.
+	s.analyticsCache.serve(w, r, "network-status", 30*time.Second, "handleNetworkStatus", serveOpts{CacheControl: "private, max-age=30, stale-while-revalidate=30"}, func() ([]byte, error) {
+		ht := s.cfg.GetHealthThresholds()
+		result, err := s.db.GetNetworkStatus(ht)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(result)
+	})
 }
 
 func (s *Server) handleNodePaths(w http.ResponseWriter, r *http.Request) {
@@ -2769,7 +2784,10 @@ func (s *Server) handleAnalyticsRF(w http.ResponseWriter, r *http.Request) {
 	region := r.URL.Query().Get("region")
 	window := ParseTimeWindow(r)
 	if s.store != nil {
-		writeJSON(w, s.store.GetAnalyticsRFWithWindow(region, window))
+		key := "rf|" + region + "|" + window.CacheKey()
+		s.analyticsCache.serve(w, r, key, analyticsCacheTTL, "handleAnalyticsRF", serveOpts{CacheControl: analyticsCacheHeader}, func() ([]byte, error) {
+			return json.Marshal(s.store.GetAnalyticsRFWithWindow(region, window))
+		})
 		return
 	}
 	writeJSON(w, RFAnalyticsResponse{
@@ -2790,11 +2808,14 @@ func (s *Server) handleAnalyticsTopology(w http.ResponseWriter, r *http.Request)
 	region := r.URL.Query().Get("region")
 	window := ParseTimeWindow(r)
 	if s.store != nil {
-		data := s.store.GetAnalyticsTopologyWithWindow(region, window)
-		if s.cfg != nil && len(s.cfg.NodeBlacklist) > 0 {
-			data = s.filterBlacklistedFromTopology(data)
-		}
-		writeJSON(w, data)
+		key := "topology|" + region + "|" + window.CacheKey()
+		s.analyticsCache.serve(w, r, key, analyticsCacheTTL, "handleAnalyticsTopology", serveOpts{CacheControl: analyticsCacheHeader}, func() ([]byte, error) {
+			data := s.store.GetAnalyticsTopologyWithWindow(region, window)
+			if s.cfg != nil && len(s.cfg.NodeBlacklist) > 0 {
+				data = s.filterBlacklistedFromTopology(data)
+			}
+			return json.Marshal(data)
+		})
 		return
 	}
 	writeJSON(w, TopologyResponse{
@@ -2813,7 +2834,10 @@ func (s *Server) handleAnalyticsChannels(w http.ResponseWriter, r *http.Request)
 	if s.store != nil {
 		region := r.URL.Query().Get("region")
 		window := ParseTimeWindow(r)
-		writeJSON(w, s.store.GetAnalyticsChannelsWithWindow(region, window))
+		key := "achannels|" + region + "|" + window.CacheKey()
+		s.analyticsCache.serve(w, r, key, analyticsCacheTTL, "handleAnalyticsChannels", serveOpts{CacheControl: analyticsCacheHeader}, func() ([]byte, error) {
+			return json.Marshal(s.store.GetAnalyticsChannelsWithWindow(region, window))
+		})
 		return
 	}
 	channels, _ := s.db.GetChannels()
@@ -2833,7 +2857,9 @@ func (s *Server) handleAnalyticsChannels(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleAnalyticsDistance(w http.ResponseWriter, r *http.Request) {
 	region := r.URL.Query().Get("region")
 	if s.store != nil {
-		writeJSON(w, s.store.GetAnalyticsDistance(region))
+		s.analyticsCache.serve(w, r, "distance|"+region, analyticsCacheTTL, "handleAnalyticsDistance", serveOpts{CacheControl: analyticsCacheHeader}, func() ([]byte, error) {
+			return json.Marshal(s.store.GetAnalyticsDistance(region))
+		})
 		return
 	}
 	writeJSON(w, DistanceAnalyticsResponse{
@@ -3797,63 +3823,67 @@ func (s *Server) handleIATACoords(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAudioLabBuckets(w http.ResponseWriter, r *http.Request) {
-	buckets := map[string][]AudioLabPacket{}
+	// Sampled buckets barely change; cache bytes (ETag/304, singleflight) so the
+	// full-store scan under RLock runs at most once per minute, not per request.
+	s.analyticsCache.serve(w, r, "audiolab-buckets", 60*time.Second, "handleAudioLabBuckets", serveOpts{CacheControl: "private, max-age=60, stale-while-revalidate=60"}, func() ([]byte, error) {
+		buckets := map[string][]AudioLabPacket{}
 
-	if s.store != nil {
-		// Use in-memory store (matches Node.js pktStore.packets approach)
-		s.store.mu.RLock()
-		byType := map[string][]*StoreTx{}
-		for _, tx := range s.store.packets {
-			if tx.RawHex == "" {
-				continue
-			}
-			typeName := "UNKNOWN"
-			if tx.DecodedJSON != "" {
-				var d map[string]interface{}
-				if err := json.Unmarshal([]byte(tx.DecodedJSON), &d); err == nil {
-					if t, ok := d["type"].(string); ok && t != "" {
-						typeName = t
+		if s.store != nil {
+			// Use in-memory store (matches Node.js pktStore.packets approach)
+			s.store.mu.RLock()
+			byType := map[string][]*StoreTx{}
+			for _, tx := range s.store.packets {
+				if tx.RawHex == "" {
+					continue
+				}
+				typeName := "UNKNOWN"
+				if tx.DecodedJSON != "" {
+					var d map[string]interface{}
+					if err := json.Unmarshal([]byte(tx.DecodedJSON), &d); err == nil {
+						if t, ok := d["type"].(string); ok && t != "" {
+							typeName = t
+						}
 					}
 				}
-			}
-			if typeName == "UNKNOWN" && tx.PayloadType != nil {
-				if name, ok := payloadTypeNames[*tx.PayloadType]; ok {
-					typeName = name
+				if typeName == "UNKNOWN" && tx.PayloadType != nil {
+					if name, ok := payloadTypeNames[*tx.PayloadType]; ok {
+						typeName = name
+					}
 				}
+				byType[typeName] = append(byType[typeName], tx)
 			}
-			byType[typeName] = append(byType[typeName], tx)
-		}
-		s.store.mu.RUnlock()
+			s.store.mu.RUnlock()
 
-		for typeName, pkts := range byType {
-			sort.Slice(pkts, func(i, j int) bool {
-				return len(pkts[i].RawHex) < len(pkts[j].RawHex)
-			})
-			count := min(8, len(pkts))
-			picked := make([]AudioLabPacket, 0, count)
-			for i := 0; i < count; i++ {
-				idx := (i * len(pkts)) / count
-				tx := pkts[idx]
-				pt := 0
-				if tx.PayloadType != nil {
-					pt = *tx.PayloadType
-				}
-				picked = append(picked, AudioLabPacket{
-					Hash:             strOrNil(tx.Hash),
-					RawHex:           strOrNil(tx.RawHex),
-					DecodedJSON:      strOrNil(tx.DecodedJSON),
-					ObservationCount: max(tx.ObservationCount, 1),
-					PayloadType:      pt,
-					PathJSON:         strOrNil(tx.PathJSON),
-					ObserverID:       strOrNil(tx.ObserverID),
-					Timestamp:        strOrNil(tx.FirstSeen),
+			for typeName, pkts := range byType {
+				sort.Slice(pkts, func(i, j int) bool {
+					return len(pkts[i].RawHex) < len(pkts[j].RawHex)
 				})
+				count := min(8, len(pkts))
+				picked := make([]AudioLabPacket, 0, count)
+				for i := 0; i < count; i++ {
+					idx := (i * len(pkts)) / count
+					tx := pkts[idx]
+					pt := 0
+					if tx.PayloadType != nil {
+						pt = *tx.PayloadType
+					}
+					picked = append(picked, AudioLabPacket{
+						Hash:             strOrNil(tx.Hash),
+						RawHex:           strOrNil(tx.RawHex),
+						DecodedJSON:      strOrNil(tx.DecodedJSON),
+						ObservationCount: max(tx.ObservationCount, 1),
+						PayloadType:      pt,
+						PathJSON:         strOrNil(tx.PathJSON),
+						ObserverID:       strOrNil(tx.ObserverID),
+						Timestamp:        strOrNil(tx.FirstSeen),
+					})
+				}
+				buckets[typeName] = picked
 			}
-			buckets[typeName] = picked
 		}
-	}
 
-	writeJSON(w, AudioLabBucketsResponse{Buckets: buckets})
+		return json.Marshal(AudioLabBucketsResponse{Buckets: buckets})
+	})
 }
 
 // --- Helpers ---
