@@ -1796,10 +1796,10 @@ func (s *Server) handlePacketTimestamps(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if s.store != nil {
-		writeJSON(w, s.store.GetTimestamps(since))
+		writeJSON(w, s.store.GetTimestampHistogram(since))
 		return
 	}
-	writeJSON(w, []string{})
+	writeJSON(w, TimestampHistogram{Step: timestampHistogramStepMs, Counts: []int{}})
 }
 
 var hashPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)

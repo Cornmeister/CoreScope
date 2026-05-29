@@ -169,7 +169,7 @@
     speed: 1,            // replay speed: 1, 2, 4, 8
     replayTimer: null,
     timelineScope: 3600000, // 1h default ms
-    timelineTimestamps: [], // historical timestamps from DB for sparkline
+    timelineHistogram: null, // {base, step, counts} density histogram from DB for sparkline
     timelineFetchedScope: 0, // last fetched scope to avoid redundant fetches
     replayGen: 0,            // generation counter — incremented on each replay/rewind to discard stale async results
   };
@@ -937,8 +937,9 @@
     try {
       const resp = await fetch(`/api/packets/timestamps?since=${encodeURIComponent(since)}`);
       if (resp.ok) {
-        const timestamps = await resp.json(); // array of ISO strings
-        VCR.timelineTimestamps = timestamps.map(t => new Date(t).getTime());
+        // Compact density histogram {base, step, counts} on absolute clock bins;
+        // re-binned client-side into the sliding window in updateTimelineNow.
+        VCR.timelineHistogram = await resp.json();
         VCR.timelineFetchedScope = scopeMs;
       }
     } catch(e) { /* ignore */ }
@@ -971,28 +972,30 @@
     const scopeMs = VCR.timelineScope;
     const startTs = now - scopeMs;
 
-    // Merge historical DB timestamps with live buffer timestamps
-    const allTimestamps = [];
-    VCR.timelineTimestamps.forEach(ts => {
-      if (ts >= startTs) allTimestamps.push(ts);
-    });
-    VCR.buffer.forEach(entry => {
-      if (entry.ts >= startTs) allTimestamps.push(entry.ts);
-    });
-
-    if (allTimestamps.length === 0) return;
-
-    // Draw density sparkline
+    // Re-bin the DB histogram + live buffer into the sliding 100-bucket window.
+    // The histogram uses absolute-clock bins (independent of fetch time), so as
+    // `now` advances each render the same data re-bins correctly into the moving
+    // window. Recent packets come from the live buffer at full resolution.
     const buckets = 100;
     const counts = new Array(buckets).fill(0);
     let maxCount = 0;
-    allTimestamps.forEach(ts => {
+    const add = (ts, n) => {
+      if (ts < startTs) return;
       const bucket = Math.floor((ts - startTs) / scopeMs * buckets);
       if (bucket >= 0 && bucket < buckets) {
-        counts[bucket]++;
+        counts[bucket] += n;
         if (counts[bucket] > maxCount) maxCount = counts[bucket];
       }
-    });
+    };
+
+    const hist = VCR.timelineHistogram;
+    if (hist && hist.counts) {
+      for (let i = 0; i < hist.counts.length; i++) {
+        const c = hist.counts[i];
+        if (c) add(hist.base + i * hist.step, c);
+      }
+    }
+    VCR.buffer.forEach(entry => add(entry.ts, 1));
 
     if (maxCount === 0) return;
 

@@ -2206,9 +2206,16 @@ func TestStoreGetTimestamps(t *testing.T) {
 	store := NewPacketStore(db, nil)
 	store.Load()
 
-	ts := store.GetTimestamps("2000-01-01")
-	if len(ts) < 1 {
-		t.Error("expected >=1 timestamps")
+	hist := store.GetTimestampHistogram("2000-01-01")
+	if hist.Step != timestampHistogramStepMs {
+		t.Errorf("expected step %d, got %d", timestampHistogramStepMs, hist.Step)
+	}
+	var total int
+	for _, c := range hist.Counts {
+		total += c
+	}
+	if total < 1 {
+		t.Error("expected >=1 packet counted in histogram")
 	}
 }
 

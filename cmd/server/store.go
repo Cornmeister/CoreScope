@@ -2016,7 +2016,21 @@ func (s *PacketStore) GetObservationsForHash(hash string) []map[string]interface
 }
 
 // GetTimestamps returns transmission first_seen timestamps after since, in ASC order.
-func (s *PacketStore) GetTimestamps(since string) []string {
+// TimestampHistogram is a compact density representation of packet arrival
+// times: counts per fixed-width absolute-clock bin. The client re-bins it into
+// its sliding timeline window, avoiding shipping every raw timestamp.
+type TimestampHistogram struct {
+	Base   int64 `json:"base"`   // epoch ms of the first bin's start (absolute clock, not fetch time)
+	Step   int64 `json:"step"`   // bin width in ms
+	Counts []int `json:"counts"` // packet count per bin; bin i covers [base+i*step, base+(i+1)*step)
+}
+
+// timestampHistogramStepMs is the bin width. 1 minute is fine resolution for
+// the live timeline (smallest scope is 1h → 60 bins); finer detail for recent
+// packets comes from merging the live WS buffer client-side at full resolution.
+const timestampHistogramStepMs int64 = 60000
+
+func (s *PacketStore) GetTimestampHistogram(since string) TimestampHistogram {
 	// Snapshot the slice header under a brief RLock (O(1)). Elements are
 	// *StoreTx pointers that are never mutated after ingest, so reading them
 	// outside the lock is safe — same pattern as GetAnalyticsSubpathsBulk's
@@ -2026,20 +2040,34 @@ func (s *PacketStore) GetTimestamps(since string) []string {
 	snap := s.packets
 	s.mu.RUnlock()
 
-	// packets sorted oldest-first — scan from tail until we reach items older than since
-	var result []string
-	for i := len(snap) - 1; i >= 0; i-- {
-		tx := snap[i]
-		if tx.FirstSeen <= since {
-			break
+	// packets are sorted oldest-first by FirstSeen (ISO-8601 UTC, so lexical
+	// order == chronological order). Binary-search the first one newer than
+	// `since`, then scan forward; bins are then monotonically non-decreasing
+	// so we can fill the counts slice in one pass without a map.
+	lo := sort.Search(len(snap), func(i int) bool { return snap[i].FirstSeen > since })
+
+	var base int64
+	var counts []int
+	for i := lo; i < len(snap); i++ {
+		t, err := time.Parse(time.RFC3339, snap[i].FirstSeen)
+		if err != nil {
+			continue
 		}
-		result = append(result, tx.FirstSeen)
+		bin := t.UnixMilli() / timestampHistogramStepMs
+		if counts == nil {
+			base = bin
+			counts = []int{0}
+		}
+		idx := int(bin - base)
+		for idx >= len(counts) {
+			counts = append(counts, 0)
+		}
+		counts[idx]++
 	}
-	// result is currently newest-first; reverse to return ASC order
-	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
-		result[i], result[j] = result[j], result[i]
+	if counts == nil {
+		return TimestampHistogram{Step: timestampHistogramStepMs, Counts: []int{}}
 	}
-	return result
+	return TimestampHistogram{Base: base * timestampHistogramStepMs, Step: timestampHistogramStepMs, Counts: counts}
 }
 
 // QueryMultiNodePackets filters packets matching any of the given pubkeys.
