@@ -3282,6 +3282,10 @@ func (s *Server) handleObservers(w http.ResponseWriter, r *http.Request) {
 		}
 		nodeLocations := s.db.GetNodeLocationsByKeys(observerIDs)
 
+		// Batch lookup: MQTT source/broker names per observer (one query) so the
+		// UI can filter the list by ingestor/source.
+		obsSources := s.db.GetAllObserverSourceNames()
+
 		result := make([]ObserverResp, 0, len(observers))
 		for _, o := range observers {
 			// Defense in depth: skip observers that are in the blacklist
@@ -3307,7 +3311,8 @@ func (s *Server) handleObservers(w http.ResponseWriter, r *http.Request) {
 				LastPacketAt:    o.LastPacketAt,
 				PacketsLastHour: plh,
 				Lat:             lat, Lon: lon, NodeRole: nodeRole,
-				Repeat: o.Repeat,
+				Repeat:  o.Repeat,
+				Sources: obsSources[o.ID],
 			})
 		}
 		return json.Marshal(ObserverListResponse{
@@ -3496,6 +3501,7 @@ func (s *Server) handleObserverAnalytics(w http.ResponseWriter, r *http.Request)
 
 	packetTypes := map[string]int{}
 	timelineCounts := map[int64]int{}
+	timelineTypeCounts := map[int64]map[int]int{} // bucketUnix -> payloadType -> count (for stacked timeline)
 	nodeBucketSets := map[int64]map[string]struct{}{}
 	snrBuckets := map[int]*SnrDistributionEntry{}
 	// rssiAgg accumulates (sum, count) per bucket so we can compute a weighted
@@ -3514,6 +3520,10 @@ func (s *Server) handleObserverAnalytics(w http.ResponseWriter, r *http.Request)
 			timelineCounts[agg.BucketUnix] += agg.Count
 			activeHourBuckets[agg.HourUnix] = struct{}{}
 			packetTypes[strconv.Itoa(agg.PayloadType)] += agg.Count
+			if timelineTypeCounts[agg.BucketUnix] == nil {
+				timelineTypeCounts[agg.BucketUnix] = map[int]int{}
+			}
+			timelineTypeCounts[agg.BucketUnix][agg.PayloadType] += agg.Count
 			if agg.CntRSSI > 0 {
 				acc := rssiAgg[agg.BucketUnix]
 				if acc == nil {
@@ -3594,6 +3604,10 @@ func (s *Server) handleObserverAnalytics(w http.ResponseWriter, r *http.Request)
 			timelineCounts[bk]++
 			activeHourBuckets[ts.UTC().Truncate(time.Hour).Unix()] = struct{}{}
 			packetTypes[strconv.Itoa(obs.PayloadType)]++
+			if timelineTypeCounts[bk] == nil {
+				timelineTypeCounts[bk] = map[int]int{}
+			}
+			timelineTypeCounts[bk][obs.PayloadType]++
 			if nodeBucketSets[bk] == nil {
 				nodeBucketSets[bk] = map[string]struct{}{}
 			}
@@ -3668,6 +3682,24 @@ func (s *Server) handleObserverAnalytics(w http.ResponseWriter, r *http.Request)
 		return out
 	}
 
+	// Stacked timeline: same buckets as Timeline, each split by payload type.
+	buildTimelineByType := func() []StackedTimeBucket {
+		keys := make([]int64, 0, len(timelineTypeCounts))
+		for k := range timelineTypeCounts {
+			keys = append(keys, k)
+		}
+		sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+		out := make([]StackedTimeBucket, 0, len(keys))
+		for _, k := range keys {
+			types := make(map[string]int, len(timelineTypeCounts[k]))
+			for pt, c := range timelineTypeCounts[k] {
+				types[strconv.Itoa(pt)] = c
+			}
+			out = append(out, StackedTimeBucket{Label: formatLabel(time.Unix(k, 0)), Types: types})
+		}
+		return out
+	}
+
 	nodeCounts := make(map[int64]int, len(nodeBucketSets))
 	for k, nodes := range nodeBucketSets {
 		nodeCounts[k] = len(nodes)
@@ -3718,6 +3750,7 @@ func (s *Server) handleObserverAnalytics(w http.ResponseWriter, r *http.Request)
 
 	resp := ObserverAnalyticsResponse{
 		Timeline:        buildTimeline(timelineCounts),
+		TimelineByType:  buildTimelineByType(),
 		PacketTypes:     packetTypes,
 		NodesTimeline:   buildTimeline(nodeCounts),
 		SnrDistribution: snrDistribution,

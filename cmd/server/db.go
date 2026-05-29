@@ -22,13 +22,13 @@ const routeTypeTransportSQL = "route_type IN (0, 3)"
 
 // DB wraps a read-only connection to the MeshCore SQLite database.
 type DB struct {
-	conn             *sql.DB
-	path             string // filesystem path to the database file
-	isV3             bool   // v3 schema: observer_idx in observations (vs observer_id in v2)
-	hasResolvedPath  bool   // observations table has resolved_path column
-	hasObsRawHex     bool   // observations table has raw_hex column (#881)
-	hasScopeName     bool   // transmissions.scope_name column exists (#899)
-	hasDefaultScope  bool   // nodes.default_scope column exists (#899)
+	conn            *sql.DB
+	path            string // filesystem path to the database file
+	isV3            bool   // v3 schema: observer_idx in observations (vs observer_id in v2)
+	hasResolvedPath bool   // observations table has resolved_path column
+	hasObsRawHex    bool   // observations table has raw_hex column (#881)
+	hasScopeName    bool   // transmissions.scope_name column exists (#899)
+	hasDefaultScope bool   // nodes.default_scope column exists (#899)
 
 	// Channel list cache (60s TTL) — avoids repeated GROUP BY scans (#762)
 	channelsCacheMu  sync.Mutex
@@ -44,7 +44,7 @@ type DB struct {
 	// Prepared statements for the hottest repeated single-row lookups
 	// (review item #5). Prepared lazily on first use; nil means "fall back
 	// to conn.QueryRow". stmtMu guards (re)assignment.
-	stmtMu               sync.Mutex
+	stmtMu                    sync.Mutex
 	resolvedPathByObsPrepared bool
 	resolvedPathByObsStmt     *sql.Stmt
 }
@@ -289,7 +289,7 @@ func (db *DB) scanTransmissionRow(rows *sql.Rows) map[string]interface{} {
 
 // Node represents a row from the nodes table.
 type Node struct {
-	PublicKey     string   `json:"public_key"`
+	PublicKey    string   `json:"public_key"`
 	Name         *string  `json:"name"`
 	Role         *string  `json:"role"`
 	Lat          *float64 `json:"lat"`
@@ -601,20 +601,20 @@ func (db *DB) GetAllRoleCounts() map[string]int {
 
 // PacketQuery holds filter params for packet listing.
 type PacketQuery struct {
-	Limit    int
-	Offset   int
-	Type     *int
-	Route    *int
-	Observer string
-	Hash     string
-	Since    string
-	Until    string
-	Region   string
-	Area     string   // area key; filters by transmitting node's GPS position
-	Node     string
-	Channel  string // channel_hash filter (#812). Plain names like "#test"/"public" or "enc_<HEX>" for encrypted
-	Order               string // ASC or DESC
-	ExpandObservations  bool   // when true, include observation sub-maps in txToMap output
+	Limit              int
+	Offset             int
+	Type               *int
+	Route              *int
+	Observer           string
+	Hash               string
+	Since              string
+	Until              string
+	Region             string
+	Area               string // area key; filters by transmitting node's GPS position
+	Node               string
+	Channel            string // channel_hash filter (#812). Plain names like "#test"/"public" or "enc_<HEX>" for encrypted
+	Order              string // ASC or DESC
+	ExpandObservations bool   // when true, include observation sub-maps in txToMap output
 
 	// regionObserversResolved, when non-nil, holds the observer-ID set for
 	// Region pre-resolved by the caller BEFORE acquiring s.mu. filterPackets
@@ -933,7 +933,6 @@ func (db *DB) resolveNodePubkey(nodeIDOrName string) string {
 	return pk
 }
 
-
 // GetTransmissionByID fetches from transmissions table with observer data.
 func (db *DB) GetTransmissionByID(id int) (map[string]interface{}, error) {
 	selectCols, observerJoin := db.transmissionBaseSQL()
@@ -979,7 +978,6 @@ func (db *DB) GetObservationsForHash(hash string) []map[string]interface{} {
 	obsByTx := db.getObservationsForTransmissions([]int{txID})
 	return obsByTx[txID]
 }
-
 
 // GetNodes returns filtered, paginated node list.
 func (db *DB) GetNodes(limit, offset int, role, search, before, lastHeard, sortBy, region string) ([]map[string]interface{}, int, map[string]int, error) {
@@ -1159,7 +1157,6 @@ func (db *DB) GetNodeByPubkey(pubkey string) (map[string]interface{}, error) {
 	}
 	return nil, nil
 }
-
 
 // GetRecentTransmissionsForNode returns recent transmissions originated by a
 // node, identified by exact pubkey match on the indexed from_pubkey column
@@ -1570,6 +1567,30 @@ func (db *DB) GetObserverSources(id string) ([]ObserverSource, error) {
 	return out, nil
 }
 
+// GetAllObserverSourceNames returns, for every observer, the distinct set of
+// MQTT broker/source names that have relayed data for it. One query for the
+// whole list (vs N GetObserverSources calls), used to attach source labels to
+// the observer list so the UI can filter observers by ingestor/MQTT source.
+func (db *DB) GetAllObserverSourceNames() map[string][]string {
+	out := map[string][]string{}
+	rows, err := db.conn.Query(
+		`SELECT observer_id, name FROM observer_sources
+		 WHERE name != '' GROUP BY observer_id, name ORDER BY observer_id, name`,
+	)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var obsID, name string
+		if err := rows.Scan(&obsID, &name); err != nil {
+			continue
+		}
+		out[obsID] = append(out[obsID], name)
+	}
+	return out
+}
+
 // GetObserverIdsForRegion returns observer IDs for given IATA codes.
 func (db *DB) GetObserverIdsForRegion(regionParam string) ([]string, error) {
 	codes := normalizeRegionCodes(regionParam)
@@ -1646,7 +1667,6 @@ func (db *DB) GetDistinctIATAs() ([]string, error) {
 	}
 	return codes, nil
 }
-
 
 // GetNetworkStatus returns overall network health status.
 func (db *DB) GetNetworkStatus(healthThresholds HealthThresholds) (map[string]interface{}, error) {
@@ -2220,8 +2240,6 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 
 	return messages, total, nil
 }
-
-
 
 // GetNewTransmissionsSince returns new transmissions after a given ID for WebSocket polling.
 func (db *DB) GetNewTransmissionsSince(lastID int, limit int) ([]map[string]interface{}, error) {
@@ -3144,7 +3162,7 @@ func (db *DB) GetScopeStats(window string) (*ScopeStatsResponse, error) {
 			COALESCE(SUM(CASE WHEN scope_name IS NULL THEN 1 ELSE 0 END), 0) AS unscoped,
 			COALESCE(SUM(CASE WHEN scope_name = '' THEN 1 ELSE 0 END), 0) AS unknown_scope
 		FROM transmissions
-		WHERE ` + routeTypeTransportSQL + ` AND first_seen >= ?
+		WHERE `+routeTypeTransportSQL+` AND first_seen >= ?
 	`, since)
 	if err := row.Scan(
 		&resp.Summary.TransportTotal,
@@ -3159,7 +3177,7 @@ func (db *DB) GetScopeStats(window string) (*ScopeStatsResponse, error) {
 	rows, err := db.conn.Query(`
 		SELECT scope_name, COUNT(*) AS cnt
 		FROM transmissions
-		WHERE ` + routeTypeTransportSQL + ` AND scope_name IS NOT NULL AND scope_name != '' AND first_seen >= ?
+		WHERE `+routeTypeTransportSQL+` AND scope_name IS NOT NULL AND scope_name != '' AND first_seen >= ?
 		GROUP BY scope_name
 		ORDER BY cnt DESC
 	`, since)
@@ -3186,7 +3204,7 @@ func (db *DB) GetScopeStats(window string) (*ScopeStatsResponse, error) {
 			COUNT(scope_name) AS scoped,
 			SUM(CASE WHEN scope_name IS NULL THEN 1 ELSE 0 END) AS unscoped
 		FROM transmissions
-		WHERE ` + routeTypeTransportSQL + ` AND first_seen >= ?
+		WHERE `+routeTypeTransportSQL+` AND first_seen >= ?
 		GROUP BY bucket
 		ORDER BY bucket
 	`, bucketExpr)

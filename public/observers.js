@@ -16,6 +16,7 @@
   let sortState = { col: null, dir: 'asc' };
   let hideStale = false;
   let hideOffline = false;
+  let sourceFilter = ''; // '' = all MQTT sources
 
   var STATS_OPEN_KEY = 'meshcore-obs-stats-open';
 
@@ -89,6 +90,7 @@
     try {
       hideStale   = localStorage.getItem('meshcore-obs-hide-stale')   === '1';
       hideOffline = localStorage.getItem('meshcore-obs-hide-offline') === '1';
+      sourceFilter = localStorage.getItem('meshcore-obs-source') || '';
     } catch (e) {}
   }
 
@@ -311,6 +313,11 @@ reboot</code></pre>
           span.textContent = code;
         });
       }
+      if (e.target.id === 'obsSourceFilter') {
+        sourceFilter = e.target.value;
+        try { localStorage.setItem('meshcore-obs-source', sourceFilter); } catch (e) {}
+        render();
+      }
     };
     app.addEventListener('change', changeHandler);
     // Email input — show/hide and update the mqtt.email line live
@@ -503,9 +510,14 @@ reboot</code></pre>
 
     // Apply region filter
     const selectedRegions = RegionFilter.getSelected();
-    const filtered = selectedRegions
+    let filtered = selectedRegions
       ? observers.filter(o => o.iata && selectedRegions.includes(o.iata))
       : observers;
+
+    // Apply MQTT-source filter (observers relayed by the selected broker/source)
+    if (sourceFilter) {
+      filtered = filtered.filter(o => Array.isArray(o.sources) && o.sources.indexOf(sourceFilter) !== -1);
+    }
 
     renderStatsGrid(filtered);
 
@@ -540,11 +552,18 @@ reboot</code></pre>
       ? `${visible.length}/${filtered.length}`
       : `${filtered.length}`;
 
+    // MQTT-source filter dropdown — distinct source names across ALL observers
+    // (not just the currently-filtered set) so the user can switch freely.
+    const allSources = Array.from(new Set([].concat.apply([], observers.map(o => o.sources || [])))).sort();
+    const sourceFilterHtml = allSources.length
+      ? `<span class="obs-stat">📥 <select id="obsSourceFilter" class="obs-source-select" title="Filter observers by MQTT source/broker"><option value="">All sources</option>${allSources.map(s => `<option value="${escapeHtml(s)}"${s === sourceFilter ? ' selected' : ''}>${escapeHtml(s)}</option>`).join('')}</select></span>`
+      : '';
+
     const summaryHtml = `
         <span class="obs-stat"><span class="health-dot health-green">●</span> ${online} Online</span>
         <span class="obs-stat"><span class="health-dot health-yellow">▲</span> ${stale} Stale <button class="obs-filter-btn${hideStale ? ' active' : ''}" data-action="toggle-hide-stale" title="${hideStale ? 'Show stale observers' : 'Hide stale observers'}">${hideStale ? 'show' : 'hide'}</button></span>
         <span class="obs-stat"><span class="health-dot health-red">✕</span> ${offline} Offline <button class="obs-filter-btn${hideOffline ? ' active' : ''}" data-action="toggle-hide-offline" title="${hideOffline ? 'Show offline observers' : 'Hide offline observers'}">${hideOffline ? 'show' : 'hide'}</button></span>
-        <span class="obs-stat">📡 ${totalLabel} Total</span>`;
+        <span class="obs-stat">📡 ${totalLabel} Total</span>${sourceFilterHtml}`;
 
     const tbodyHtml = sorted.map(o => {
       const h = healthStatus(o);
@@ -553,7 +572,6 @@ reboot</code></pre>
             <td><span class="health-dot ${h.cls}" title="${h.label}">${shape}</span> ${h.label}</td>
             <td class="mono">${o.name || o.id}</td>
             <td>${o.radio ? 'SF' + (o.radio.split(',')[2] || '?') : '<span class="text-muted">—</span>'}</td>
-            <td>${packetBadge(o)}</td>
             <td>${o.iata ? `<span class="badge-region">${o.iata}</span>` : '—'}</td>
             <td>${timeAgo(o.last_seen)}</td>
             <td>${(function() {
@@ -565,7 +583,7 @@ reboot</code></pre>
             <td>${uptimeStr(o)}</td>
             <td>${(o.packet_count || 0).toLocaleString()}</td>
             <td>${sparkBar(o.packetsLastHour || 0, maxPktsHr)}</td>
-            <td>${o.last_packet_at ? timeAgo(o.last_packet_at) : '<span class="text-muted">—</span>'}</td>
+            <td>${packetBadge(o)}</td>
           </tr>`;
     }).join('');
 
@@ -593,7 +611,7 @@ reboot</code></pre>
         <div class="obs-table-scroll table-fluid-wrap"><table class="data-table obs-table" id="obsTable">
           <caption class="sr-only">Observer status and statistics</caption>
         <thead><tr>
-          ${sortTh('Status','status')}${sortTh('Name','name')}${sortTh('SF','sf',2)}${sortTh('Packet Health','forwarding',2)}${sortTh('Region','region',3)}${sortTh('Last Status','last_seen',3)}
+          ${sortTh('Status','status')}${sortTh('Name','name')}${sortTh('SF','sf',2)}${sortTh('Region','region',3)}${sortTh('Last Status','last_seen',3)}
           ${sortTh('Clock Offset','clock_offset',4)}${sortTh('Uptime','uptime',4)}${sortTh('Total Packets','packets',5)}${sortTh('Packets/Hour','packets_hr',5)}${sortTh('Last Packet','last_packet',5)}
         </tr></thead>
         <tbody>${tbodyHtml}</tbody>
