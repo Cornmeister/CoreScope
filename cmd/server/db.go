@@ -1809,17 +1809,26 @@ func (db *DB) GetChannels(region ...string) ([]map[string]interface{}, error) {
 				ORDER BY last_activity DESC`, regionPlaceholder)
 		}
 	} else {
-		querySQL = `SELECT channel_hash,
-				COUNT(*) AS msg_count,
-				MAX(first_seen) AS last_activity,
-				(SELECT t2.decoded_json FROM transmissions t2
-				 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
-				 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
-			FROM transmissions t
-			WHERE payload_type = 5
-			AND channel_hash IS NOT NULL
-			AND channel_hash NOT LIKE 'enc_%%'
-			GROUP BY channel_hash
+		// Single-pass window-function form: the old query ran a correlated
+		// subquery per channel (latest sample_json) on top of an unbounded
+		// GROUP BY, scanning type-5 transmissions O(channels+1) times. Here one
+		// scan partitions by channel_hash: ROW_NUMBER picks the newest row
+		// (rn=1) so its first_seen IS MAX(first_seen) and its decoded_json IS the
+		// old subquery's sample, and COUNT(*) OVER gives msg_count. Equivalent
+		// output, far less work. (Region-filtered branches above keep their
+		// JOIN-based form.)
+		querySQL = `WITH ranked AS (
+				SELECT channel_hash, first_seen, decoded_json,
+					ROW_NUMBER() OVER (PARTITION BY channel_hash ORDER BY first_seen DESC) AS rn,
+					COUNT(*) OVER (PARTITION BY channel_hash) AS msg_count
+				FROM transmissions
+				WHERE payload_type = 5
+				AND channel_hash IS NOT NULL
+				AND channel_hash NOT LIKE 'enc_%%'
+			)
+			SELECT channel_hash, msg_count, first_seen AS last_activity, decoded_json AS sample_json
+			FROM ranked
+			WHERE rn = 1
 			ORDER BY last_activity DESC`
 	}
 
