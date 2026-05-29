@@ -977,6 +977,9 @@ type ObserverResp struct {
 	NodeRole        interface{}      `json:"nodeRole"`
 	Repeat          interface{}      `json:"repeat,omitempty"`
 	IngestSources   []ObserverSource `json:"ingestSources,omitempty"`
+	// Sources is the distinct set of MQTT broker/source names that relay this
+	// observer — attached to the list response so the UI can filter by source.
+	Sources []string `json:"sources,omitempty"`
 }
 
 type ObserverListResponse struct {
@@ -1047,12 +1050,21 @@ type ObsPathSample struct {
 
 type ObserverAnalyticsResponse struct {
 	Timeline        []TimeBucket             `json:"timeline"`
+	TimelineByType  []StackedTimeBucket      `json:"timelineByType"`
 	PacketTypes     map[string]int           `json:"packetTypes"`
 	NodesTimeline   []TimeBucket             `json:"nodesTimeline"`
 	SnrDistribution []SnrDistributionEntry   `json:"snrDistribution"`
 	UptimeTimeline  []TimeBucket             `json:"uptimeTimeline"`
 	RssiTimeline    []RssiTimelineEntry      `json:"rssiTimeline"`
 	RecentPackets   []map[string]interface{} `json:"recentPackets"`
+}
+
+// StackedTimeBucket is one time bucket with a per-payload-type breakdown, used to
+// render the packets-over-time chart as a stacked bar (absorbing the separate
+// packet-types doughnut). Types maps payload_type (as string) -> count.
+type StackedTimeBucket struct {
+	Label string         `json:"label"`
+	Types map[string]int `json:"types"`
 }
 
 // ─── Traces ────────────────────────────────────────────────────────────────────

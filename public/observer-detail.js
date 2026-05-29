@@ -10,6 +10,8 @@
   let wsHandler = null;
   let brokerTickTimer = null;
   let lastObs = null;
+  let hideStaleBrokers = (function () { try { return localStorage.getItem('obs-hide-stale-brokers') === '1'; } catch (e) { return false; } })();
+  const STALE_BROKER_MS = 86400000; // 1 day
 
   function destroyCharts() {
     charts.forEach(c => { try { c.destroy(); } catch {} });
@@ -147,9 +149,19 @@
       el.innerHTML = '';
       return;
     }
+    var now = Date.now();
+    var isStale = function (s) {
+      var t = new Date(s.last_seen).getTime();
+      return isFinite(t) && (now - t) > STALE_BROKER_MS;
+    };
+    var staleCount = obs.ingestSources.filter(isStale).length;
+    var shown = hideStaleBrokers ? obs.ingestSources.filter(function (s) { return !isStale(s); }) : obs.ingestSources;
+    var toggleHtml = staleCount > 0
+      ? '<button id="obsBrokerStaleToggle" style="margin-left:8px;font-size:0.78em;padding:1px 8px;border:1px solid var(--border);border-radius:4px;background:' + (hideStaleBrokers ? 'var(--accent,#3b82f6);color:#fff' : 'transparent;color:var(--text-muted)') + ';cursor:pointer" title="Brokers with no packets for over 24h">' + (hideStaleBrokers ? ('show ' + staleCount + ' hidden') : ('hide ' + staleCount + ' stale')) + '</button>'
+      : '';
     el.innerHTML = `
       <div class="node-full-card" style="margin-bottom:20px;padding:12px">
-        <h4 style="margin:0 0 8px">Broker Sources</h4>
+        <h4 style="margin:0 0 8px">Broker Sources${toggleHtml}</h4>
         <table style="width:100%;border-collapse:collapse;font-size:0.85em">
           <thead>
             <tr style="text-align:left;color:var(--text-muted)">
@@ -160,7 +172,7 @@
             </tr>
           </thead>
           <tbody>
-            ${obs.ingestSources.map(function(s) {
+            ${shown.map(function(s) {
               return '<tr>' +
                 '<td style="padding:4px 8px 4px 0">' + (s.name || s.host) + '<br><span style="color:var(--text-muted);font-size:0.82em;font-family:var(--mono)">' + s.host + '</span></td>' +
                 '<td style="padding:4px 8px 4px 0;font-family:var(--mono)">' + (s.packetCount || 0).toLocaleString() + '</td>' +
@@ -171,6 +183,12 @@
           </tbody>
         </table>
       </div>`;
+    var tbtn = document.getElementById('obsBrokerStaleToggle');
+    if (tbtn) tbtn.addEventListener('click', function () {
+      hideStaleBrokers = !hideStaleBrokers;
+      try { localStorage.setItem('obs-hide-stale-brokers', hideStaleBrokers ? '1' : '0'); } catch (e) {}
+      renderBrokerSources(obs);
+    });
   }
 
   function renderDetail(obs, analytics, obsSkew, metrics) {
@@ -287,8 +305,7 @@
         </div>
       </div>` : ''}
       <div class="obs-charts" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:16px">
-        ${(analytics.timeline && analytics.timeline.length > 0) ? `<div class="chart-card" style="padding:12px"><h3 style="margin:0 0 8px;font-size:0.95em">Packets Over Time</h3><canvas id="obsTimeChart" role="img" aria-label="Packets over time chart"></canvas></div>` : ''}
-        ${analytics.packetTypes ? `<div class="chart-card" style="padding:12px"><h3 style="margin:0 0 8px;font-size:0.95em">Packet Types</h3><div style="max-width:280px;margin:0 auto"><canvas id="obsTypeChart" role="img" aria-label="Packet types chart"></canvas></div></div>` : ''}
+        ${(analytics.timelineByType && analytics.timelineByType.length > 0) ? `<div class="chart-card" style="padding:12px"><h3 style="margin:0 0 8px;font-size:0.95em">Packets Over Time (by type)</h3><canvas id="obsTimeChart" role="img" aria-label="Packets over time by type chart"></canvas></div>` : ''}
         ${(analytics.nodesTimeline && analytics.nodesTimeline.length > 0) ? `<div class="chart-card" style="padding:12px"><h3 style="margin:0 0 8px;font-size:0.95em">Unique Nodes Heard</h3><canvas id="obsNodesChart" role="img" aria-label="Unique nodes heard chart"></canvas></div>` : ''}
         ${(analytics.snrDistribution && analytics.snrDistribution.length > 0) ? `<div class="chart-card" style="padding:12px"><h3 style="margin:0 0 8px;font-size:0.95em">SNR Distribution</h3><canvas id="obsSnrChart" role="img" aria-label="SNR distribution chart"></canvas></div>` : ''}
         ${uptimePoints.length > 0 ? `<div class="chart-card" style="padding:12px"><h3 style="margin:0 0 8px;font-size:0.95em">Uptime</h3><canvas id="obsUptimeChart" role="img" aria-label="Uptime chart"></canvas></div>` : ''}
@@ -305,11 +322,8 @@
       </div>`;
 
     // Pre-compute data sets (referenced in template above and render calls below)
-    if (analytics.timeline && analytics.timeline.length > 0) {
-      renderTimelineChart(analytics.timeline);
-    }
-    if (analytics.packetTypes) {
-      renderTypeChart(analytics.packetTypes);
+    if (analytics.timelineByType && analytics.timelineByType.length > 0) {
+      renderTimelineChart(analytics.timelineByType);
     }
     if (analytics.nodesTimeline && analytics.nodesTimeline.length > 0) {
       renderNodesChart(analytics.nodesTimeline);
@@ -344,47 +358,34 @@
     renderBrokerSources(obs);
   }
 
-  function renderTimelineChart(timeline) {
+  // Stacked bar: packets per time bucket, split by payload type. Absorbs the
+  // former separate "Packet Types" doughnut — the per-type totals are the sum of
+  // each colour's stack, and the legend gives the type breakdown.
+  function renderTimelineChart(buckets) {
     const ctx = document.getElementById('obsTimeChart');
     if (!ctx) return;
+    const typeSet = {};
+    buckets.forEach(b => { if (b.types) Object.keys(b.types).forEach(k => { typeSet[k] = true; }); });
+    const typeKeys = Object.keys(typeSet).sort((a, b) => Number(a) - Number(b));
+    const labels = buckets.map(b => b.label);
+    const datasets = typeKeys.map((k, i) => ({
+      label: PAYLOAD_LABELS[k] || 'Type ' + k,
+      data: buckets.map(b => (b.types && b.types[k]) || 0),
+      backgroundColor: CHART_COLORS[i % CHART_COLORS.length] + 'cc',
+      borderColor: CHART_COLORS[i % CHART_COLORS.length],
+      borderWidth: 1,
+      stack: 'pkts',
+    }));
     const c = new Chart(ctx, {
       type: 'bar',
-      data: {
-        labels: timeline.map(t => t.label),
-        datasets: [{
-          label: 'Packets',
-          data: timeline.map(t => t.count),
-          backgroundColor: CHART_COLORS[0] + '80',
-          borderColor: CHART_COLORS[0],
-          borderWidth: 1,
-        }]
-      },
+      data: { labels: labels, datasets: datasets },
       options: {
         responsive: true, maintainAspectRatio: true,
-        plugins: { legend: { display: false } },
+        plugins: { legend: { display: true, position: 'bottom', labels: { boxWidth: 12 } } },
         scales: {
-          x: { ticks: { maxRotation: 45, autoSkip: true, maxTicksLimit: 12 } },
-          y: { beginAtZero: true, ticks: { precision: 0 } }
+          x: { stacked: true, ticks: { maxRotation: 45, autoSkip: true, maxTicksLimit: 12 } },
+          y: { stacked: true, beginAtZero: true, ticks: { precision: 0 } }
         }
-      }
-    });
-    charts.push(c);
-  }
-
-  function renderTypeChart(types) {
-    const ctx = document.getElementById('obsTypeChart');
-    if (!ctx) return;
-    const labels = Object.keys(types).map(k => PAYLOAD_LABELS[k] || 'Type ' + k);
-    const values = Object.values(types);
-    const c = new Chart(ctx, {
-      type: 'doughnut',
-      data: {
-        labels: labels,
-        datasets: [{ data: values, backgroundColor: CHART_COLORS.slice(0, labels.length) }]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: true,
-        plugins: { legend: { position: 'bottom', labels: { boxWidth: 12 } } }
       }
     });
     charts.push(c);

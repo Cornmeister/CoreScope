@@ -16,6 +16,7 @@
   let sortState = { col: null, dir: 'asc' };
   let hideStale = false;
   let hideOffline = false;
+  let sourceFilter = ''; // '' = all MQTT sources
 
   var STATS_OPEN_KEY = 'meshcore-obs-stats-open';
 
@@ -89,6 +90,7 @@
     try {
       hideStale   = localStorage.getItem('meshcore-obs-hide-stale')   === '1';
       hideOffline = localStorage.getItem('meshcore-obs-hide-offline') === '1';
+      sourceFilter = localStorage.getItem('meshcore-obs-source') || '';
     } catch (e) {}
   }
 
@@ -221,6 +223,7 @@ reboot</code></pre>
         </div>
 		<hr class="section-divider">
         <div id="obsRegionFilter" class="region-filter-container"></div>
+        <div id="obsSourceFilter" class="obs-source-filter" style="margin:10px 0 4px"></div>
         <div id="obsContent">${PageState.loading('Loading observers…')}</div>
       </div>`;
     RegionFilter.init(document.getElementById('obsRegionFilter'));
@@ -497,15 +500,60 @@ reboot</code></pre>
       statBlock('Top Regions', byRegion);
   }
 
+  // Renders the MQTT-source filter into its own stable container. Called on every
+  // render() but the <select> element is created once and its <option>s are only
+  // rebuilt when the set of sources actually changes — so a 30s auto-refresh
+  // never tears down an open dropdown mid-selection. Styled inline to match the
+  // page's other inputs (IATA select).
+  function renderSourceFilter() {
+    const wrap = document.getElementById('obsSourceFilter');
+    if (!wrap) return;
+    const allSources = Array.from(new Set([].concat.apply([], observers.map(o => o.sources || [])))).sort();
+    if (allSources.length === 0) { wrap.innerHTML = ''; return; }
+
+    let sel = wrap.querySelector('select');
+    if (!sel) {
+      wrap.innerHTML =
+        '<label style="display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--text-muted)">' +
+        '<span>📥 MQTT source</span>' +
+        '<select id="obsSourceSelect" title="Filter observers by MQTT source/broker" ' +
+        'style="padding:5px 28px 5px 10px;border:1px solid var(--border);border-radius:6px;' +
+        'background:var(--input-bg);color:var(--text);font-size:13px;cursor:pointer"></select></label>';
+      sel = wrap.querySelector('select');
+      sel.addEventListener('change', function () {
+        sourceFilter = sel.value;
+        try { localStorage.setItem('meshcore-obs-source', sourceFilter); } catch (e) {}
+        render();
+      });
+    }
+    // Rebuild options only when the source set changed (preserves an open dropdown).
+    const sig = allSources.join('|');
+    if (sel.dataset.sig !== sig) {
+      sel.innerHTML = '<option value="">All sources</option>' +
+        allSources.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+      sel.dataset.sig = sig;
+    }
+    if (sel.value !== sourceFilter) sel.value = sourceFilter;
+  }
+
   function render() {
     const el = document.getElementById('obsContent');
     if (!el) return;
 
+    // Keep the source filter present/updated regardless of filter results, so a
+    // selection that yields zero observers can still be changed back.
+    renderSourceFilter();
+
     // Apply region filter
     const selectedRegions = RegionFilter.getSelected();
-    const filtered = selectedRegions
+    let filtered = selectedRegions
       ? observers.filter(o => o.iata && selectedRegions.includes(o.iata))
       : observers;
+
+    // Apply MQTT-source filter (observers relayed by the selected broker/source)
+    if (sourceFilter) {
+      filtered = filtered.filter(o => Array.isArray(o.sources) && o.sources.indexOf(sourceFilter) !== -1);
+    }
 
     renderStatsGrid(filtered);
 
@@ -553,7 +601,6 @@ reboot</code></pre>
             <td><span class="health-dot ${h.cls}" title="${h.label}">${shape}</span> ${h.label}</td>
             <td class="mono">${o.name || o.id}</td>
             <td>${o.radio ? 'SF' + (o.radio.split(',')[2] || '?') : '<span class="text-muted">—</span>'}</td>
-            <td>${packetBadge(o)}</td>
             <td>${o.iata ? `<span class="badge-region">${o.iata}</span>` : '—'}</td>
             <td>${timeAgo(o.last_seen)}</td>
             <td>${(function() {
@@ -565,7 +612,7 @@ reboot</code></pre>
             <td>${uptimeStr(o)}</td>
             <td>${(o.packet_count || 0).toLocaleString()}</td>
             <td>${sparkBar(o.packetsLastHour || 0, maxPktsHr)}</td>
-            <td>${o.last_packet_at ? timeAgo(o.last_packet_at) : '<span class="text-muted">—</span>'}</td>
+            <td>${packetBadge(o)}</td>
           </tr>`;
     }).join('');
 
@@ -593,7 +640,7 @@ reboot</code></pre>
         <div class="obs-table-scroll table-fluid-wrap"><table class="data-table obs-table" id="obsTable">
           <caption class="sr-only">Observer status and statistics</caption>
         <thead><tr>
-          ${sortTh('Status','status')}${sortTh('Name','name')}${sortTh('SF','sf',2)}${sortTh('Packet Health','forwarding',2)}${sortTh('Region','region',3)}${sortTh('Last Status','last_seen',3)}
+          ${sortTh('Status','status')}${sortTh('Name','name')}${sortTh('SF','sf',2)}${sortTh('Region','region',3)}${sortTh('Last Status','last_seen',3)}
           ${sortTh('Clock Offset','clock_offset',4)}${sortTh('Uptime','uptime',4)}${sortTh('Total Packets','packets',5)}${sortTh('Packets/Hour','packets_hr',5)}${sortTh('Last Packet','last_packet',5)}
         </tr></thead>
         <tbody>${tbodyHtml}</tbody>
