@@ -223,6 +223,7 @@ reboot</code></pre>
         </div>
 		<hr class="section-divider">
         <div id="obsRegionFilter" class="region-filter-container"></div>
+        <div id="obsSourceFilter" class="obs-source-filter" style="margin:10px 0 4px"></div>
         <div id="obsContent">${PageState.loading('Loading observers…')}</div>
       </div>`;
     RegionFilter.init(document.getElementById('obsRegionFilter'));
@@ -312,11 +313,6 @@ reboot</code></pre>
         app.querySelectorAll('.obs-iata-val').forEach(function (span) {
           span.textContent = code;
         });
-      }
-      if (e.target.id === 'obsSourceFilter') {
-        sourceFilter = e.target.value;
-        try { localStorage.setItem('meshcore-obs-source', sourceFilter); } catch (e) {}
-        render();
       }
     };
     app.addEventListener('change', changeHandler);
@@ -504,9 +500,49 @@ reboot</code></pre>
       statBlock('Top Regions', byRegion);
   }
 
+  // Renders the MQTT-source filter into its own stable container. Called on every
+  // render() but the <select> element is created once and its <option>s are only
+  // rebuilt when the set of sources actually changes — so a 30s auto-refresh
+  // never tears down an open dropdown mid-selection. Styled inline to match the
+  // page's other inputs (IATA select).
+  function renderSourceFilter() {
+    const wrap = document.getElementById('obsSourceFilter');
+    if (!wrap) return;
+    const allSources = Array.from(new Set([].concat.apply([], observers.map(o => o.sources || [])))).sort();
+    if (allSources.length === 0) { wrap.innerHTML = ''; return; }
+
+    let sel = wrap.querySelector('select');
+    if (!sel) {
+      wrap.innerHTML =
+        '<label style="display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--text-muted)">' +
+        '<span>📥 MQTT source</span>' +
+        '<select id="obsSourceSelect" title="Filter observers by MQTT source/broker" ' +
+        'style="padding:5px 28px 5px 10px;border:1px solid var(--border);border-radius:6px;' +
+        'background:var(--input-bg);color:var(--text);font-size:13px;cursor:pointer"></select></label>';
+      sel = wrap.querySelector('select');
+      sel.addEventListener('change', function () {
+        sourceFilter = sel.value;
+        try { localStorage.setItem('meshcore-obs-source', sourceFilter); } catch (e) {}
+        render();
+      });
+    }
+    // Rebuild options only when the source set changed (preserves an open dropdown).
+    const sig = allSources.join('|');
+    if (sel.dataset.sig !== sig) {
+      sel.innerHTML = '<option value="">All sources</option>' +
+        allSources.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+      sel.dataset.sig = sig;
+    }
+    if (sel.value !== sourceFilter) sel.value = sourceFilter;
+  }
+
   function render() {
     const el = document.getElementById('obsContent');
     if (!el) return;
+
+    // Keep the source filter present/updated regardless of filter results, so a
+    // selection that yields zero observers can still be changed back.
+    renderSourceFilter();
 
     // Apply region filter
     const selectedRegions = RegionFilter.getSelected();
@@ -552,18 +588,11 @@ reboot</code></pre>
       ? `${visible.length}/${filtered.length}`
       : `${filtered.length}`;
 
-    // MQTT-source filter dropdown — distinct source names across ALL observers
-    // (not just the currently-filtered set) so the user can switch freely.
-    const allSources = Array.from(new Set([].concat.apply([], observers.map(o => o.sources || [])))).sort();
-    const sourceFilterHtml = allSources.length
-      ? `<span class="obs-stat">📥 <select id="obsSourceFilter" class="obs-source-select" title="Filter observers by MQTT source/broker"><option value="">All sources</option>${allSources.map(s => `<option value="${escapeHtml(s)}"${s === sourceFilter ? ' selected' : ''}>${escapeHtml(s)}</option>`).join('')}</select></span>`
-      : '';
-
     const summaryHtml = `
         <span class="obs-stat"><span class="health-dot health-green">●</span> ${online} Online</span>
         <span class="obs-stat"><span class="health-dot health-yellow">▲</span> ${stale} Stale <button class="obs-filter-btn${hideStale ? ' active' : ''}" data-action="toggle-hide-stale" title="${hideStale ? 'Show stale observers' : 'Hide stale observers'}">${hideStale ? 'show' : 'hide'}</button></span>
         <span class="obs-stat"><span class="health-dot health-red">✕</span> ${offline} Offline <button class="obs-filter-btn${hideOffline ? ' active' : ''}" data-action="toggle-hide-offline" title="${hideOffline ? 'Show offline observers' : 'Hide offline observers'}">${hideOffline ? 'show' : 'hide'}</button></span>
-        <span class="obs-stat">📡 ${totalLabel} Total</span>${sourceFilterHtml}`;
+        <span class="obs-stat">📡 ${totalLabel} Total</span>`;
 
     const tbodyHtml = sorted.map(o => {
       const h = healthStatus(o);
