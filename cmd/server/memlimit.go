@@ -14,16 +14,16 @@ import (
 //
 // Precedence (first match wins):
 //  1. "env"     — GOMEMLIMIT env var present: operator override, the runtime
-//                 already parsed it; we leave it alone.
+//     already parsed it; we leave it alone.
 //  2. "cgroup"  — a finite container memory limit (docker --memory / Coolify
-//                 "memory limit"): GOMEMLIMIT = 90% of it. PREFERRED: set a
-//                 per-environment container limit and the process auto-tunes
-//                 (a 2.5 GiB staging box vs a larger prod host) with no code or
-//                 env change.
+//     "memory limit"): GOMEMLIMIT = 90% of it. PREFERRED: set a
+//     per-environment container limit and the process auto-tunes
+//     (a 2.5 GiB staging box vs a larger prod host) with no code or
+//     env change.
 //  3. "host"    — no container cap: derive from total host RAM, but
-//                 conservatively (50%, always reserving ≥1 GiB) because the
-//                 host may be shared with other containers. Set a container
-//                 limit instead for a tighter, safer fit.
+//     conservatively (50%, always reserving ≥1 GiB) because the
+//     host may be shared with other containers. Set a container
+//     limit instead for a tighter, safer fit.
 //  4. "derived" — legacy fallback: packetStore.maxMemoryMB * 1.5.
 //  5. "none"    — nothing to derive from.
 //
@@ -102,13 +102,22 @@ func isSaneLimit(v int64) bool {
 }
 
 // hostMemTotal reads MemTotal from /proc/meminfo in bytes, 0 on failure.
-func hostMemTotal() int64 {
+func hostMemTotal() int64 { return meminfoField("MemTotal:") }
+
+// hostMemAvailable reads MemAvailable from /proc/meminfo in bytes, 0 on failure.
+// MemAvailable = the kernel's estimate of memory available for new allocations
+// without swapping (free + reclaimable page cache), so it reflects real
+// headroom on a host shared with other containers.
+func hostMemAvailable() int64 { return meminfoField("MemAvailable:") }
+
+// meminfoField returns the bytes value of a /proc/meminfo line (e.g. "MemTotal:").
+func meminfoField(key string) int64 {
 	b, err := os.ReadFile("/proc/meminfo")
 	if err != nil {
 		return 0
 	}
 	for _, line := range strings.Split(string(b), "\n") {
-		if strings.HasPrefix(line, "MemTotal:") {
+		if strings.HasPrefix(line, key) {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
 				if kb, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
