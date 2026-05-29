@@ -2094,6 +2094,11 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) buildNodesResponse(r *http.Request) ([]byte, error) {
 	q := r.URL.Query()
+	// fields=map → the Map / area-map views only plot markers and read ~9 of
+	// the ~24 node fields. Return the slim set and skip the expensive
+	// relay/usefulness/bridge enrichment, cutting the limit=10000 payload from
+	// ~323 KB to ~100 KB gzip and the per-node store work.
+	slim := q.Get("fields") == "map"
 	// /api/nodes accepts limits up to the node count (Map page asks for 10000
 	// to plot every node). The handlePackets clamp doesn't apply here — there
 	// is no per-node bloat concern equivalent to per-packet observations.
@@ -2124,7 +2129,7 @@ func (s *Server) buildNodesResponse(r *http.Request) ([]byte, error) {
 				break
 			}
 		}
-		if needsRelay {
+		if needsRelay && !slim {
 			relayMap = s.store.GetRepeaterRelayInfoMap(relayWindow)
 			usefulMap = s.store.GetRepeaterUsefulnessScoreMap()
 		}
@@ -2208,6 +2213,19 @@ func (s *Server) buildNodesResponse(r *http.Request) ([]byte, error) {
 			}
 			nodes = filtered
 			total = len(filtered)
+		}
+	}
+	if slim {
+		// Keep only the fields the map markers actually read.
+		for _, n := range nodes {
+			for k := range n {
+				switch k {
+				case "public_key", "name", "role", "lat", "lon", "last_seen", "last_heard",
+					"hash_size", "advert_count", "multi_byte_status", "multi_byte_evidence":
+				default:
+					delete(n, k)
+				}
+			}
 		}
 	}
 	return json.Marshal(NodeListResponse{Nodes: nodes, Total: total, Counts: counts})
