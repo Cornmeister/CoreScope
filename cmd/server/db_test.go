@@ -51,7 +51,8 @@ func setupTestDB(t *testing.T) *DB {
 			uptime_secs INTEGER,
 			noise_floor REAL,
 			inactive INTEGER DEFAULT 0,
-			last_packet_at TEXT DEFAULT NULL
+			last_packet_at TEXT DEFAULT NULL,
+			repeat TEXT DEFAULT NULL
 		);
 
 		CREATE TABLE transmissions (
@@ -1237,7 +1238,8 @@ func setupTestDBV2(t *testing.T) *DB {
 			last_seen TEXT,
 			first_seen TEXT,
 			packet_count INTEGER DEFAULT 0,
-			last_packet_at TEXT DEFAULT NULL
+			last_packet_at TEXT DEFAULT NULL,
+			repeat TEXT DEFAULT NULL
 		);
 
 		CREATE TABLE transmissions (
