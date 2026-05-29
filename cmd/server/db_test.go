@@ -51,7 +51,8 @@ func setupTestDB(t *testing.T) *DB {
 			uptime_secs INTEGER,
 			noise_floor REAL,
 			inactive INTEGER DEFAULT 0,
-			last_packet_at TEXT DEFAULT NULL
+			last_packet_at TEXT DEFAULT NULL,
+			repeat TEXT DEFAULT NULL
 		);
 
 		CREATE TABLE transmissions (
@@ -92,6 +93,7 @@ func setupTestDB(t *testing.T) *DB {
 			battery_mv INTEGER,
 			packets_sent INTEGER,
 			packets_recv INTEGER,
+			uptime_secs INTEGER,
 			PRIMARY KEY (observer_id, timestamp)
 		);
 
@@ -1237,7 +1239,8 @@ func setupTestDBV2(t *testing.T) *DB {
 			last_seen TEXT,
 			first_seen TEXT,
 			packet_count INTEGER DEFAULT 0,
-			last_packet_at TEXT DEFAULT NULL
+			last_packet_at TEXT DEFAULT NULL,
+			repeat TEXT DEFAULT NULL
 		);
 
 		CREATE TABLE transmissions (
@@ -1878,6 +1881,43 @@ func TestGetObserverMetrics(t *testing.T) {
 	}
 	if len(metrics2) != 2 {
 		t.Errorf("expected 2 metrics with until filter, got %d", len(metrics2))
+	}
+}
+
+// TestGetObserverMetricsUptime verifies uptime_secs is read from observer_metrics
+// and passed through as a gauge (not delta'd) so the uptime chart can render (#5).
+func TestGetObserverMetricsUptime(t *testing.T) {
+	db := setupTestDB(t)
+	seedTestData(t, db)
+
+	now := time.Now().UTC()
+	t1 := now.Add(-2 * time.Hour).Format(time.RFC3339)
+	t2 := now.Add(-1 * time.Hour).Format(time.RFC3339)
+	db.conn.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor, uptime_secs) VALUES (?, ?, ?, ?)",
+		"obs1", t1, -110.0, 3600)
+	db.conn.Exec("INSERT INTO observer_metrics (observer_id, timestamp, noise_floor, uptime_secs) VALUES (?, ?, ?, ?)",
+		"obs1", t2, -109.0, 7200)
+
+	since := now.Add(-3 * time.Hour).Format(time.RFC3339)
+	metrics, _, err := db.GetObserverMetrics("obs1", since, "", "5m", 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var withUptime int
+	for _, m := range metrics {
+		if m.UptimeSecs != nil {
+			withUptime++
+		}
+	}
+	if withUptime != 2 {
+		t.Fatalf("expected 2 samples with uptime_secs, got %d", withUptime)
+	}
+	// Gauge passthrough: values returned as-is (not deltas), including the first sample.
+	if metrics[0].UptimeSecs == nil || *metrics[0].UptimeSecs != 3600 {
+		t.Errorf("first uptime_secs = %v, want 3600", metrics[0].UptimeSecs)
+	}
+	if metrics[1].UptimeSecs == nil || *metrics[1].UptimeSecs != 7200 {
+		t.Errorf("second uptime_secs = %v, want 7200", metrics[1].UptimeSecs)
 	}
 }
 

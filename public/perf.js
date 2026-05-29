@@ -118,8 +118,11 @@
       ]
     },
     {
-      // I/O metrics are NOT in /api/perf/history — these charts fill live only
-      // (from the /api/perf/io + /api/perf/sqlite + /api/perf/write-sources polls).
+      // I/O / SQLite-perf / write-source metrics are included in
+      // /api/perf/history (write rates are derived client-side from the
+      // cumulative writeTxCum/… counters + writeSrcAt), so these charts restore
+      // on refresh; the /api/perf/io + /sqlite + /write-sources polls keep them
+      // current between history reloads.
       category: 'I/O',
       charts: [
         {
@@ -154,8 +157,8 @@
       category: 'Connections',
       charts: [
         {
-          // staleObservers / offlineObservers come from /api/perf live only —
-          // the history PerfSample carries only total + online.
+          // All four observer states (total/online/stale/offline) are carried in
+          // the history PerfSample, so this chart restores on refresh.
           id: 'observers', label: 'Observers',
           datasets: [
             { key: 'totalObservers',   label: 'Total',   color: '#a78bfa' },

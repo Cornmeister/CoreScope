@@ -439,6 +439,17 @@ func applySchema(db *sql.DB) error {
 		log.Println("[migration] packets_sent/packets_recv columns added")
 	}
 
+	// Migration: add uptime_secs column to observer_metrics so the device uptime
+	// time-series (and its reboot drops) can be charted on the observer detail
+	// page. Device-reported gauge (seconds since boot); backfills forward only.
+	row = db.QueryRow("SELECT 1 FROM _migrations WHERE name = 'observer_metrics_uptime_v1'")
+	if row.Scan(&migDone) != nil {
+		log.Println("[migration] Adding uptime_secs column to observer_metrics...")
+		db.Exec(`ALTER TABLE observer_metrics ADD COLUMN uptime_secs INTEGER`)
+		db.Exec(`INSERT INTO _migrations (name) VALUES ('observer_metrics_uptime_v1')`)
+		log.Println("[migration] uptime_secs column added")
+	}
+
 	// Migration: add channel_hash column for fast channel queries (#762)
 	row = db.QueryRow("SELECT 1 FROM _migrations WHERE name = 'channel_hash_v1'")
 	if row.Scan(&migDone) != nil {
@@ -604,21 +615,21 @@ func applySchema(db *sql.DB) error {
 	row = db.QueryRow("SELECT 1 FROM _migrations WHERE name = 'observer_sources_name_v1'")
 	if row.Scan(&migDone) != nil {
 		db.Exec(`ALTER TABLE observer_sources ADD COLUMN name TEXT NOT NULL DEFAULT ''`) //nolint:errcheck
-		db.Exec(`INSERT INTO _migrations (name) VALUES ('observer_sources_name_v1')`)   //nolint:errcheck
+		db.Exec(`INSERT INTO _migrations (name) VALUES ('observer_sources_name_v1')`)    //nolint:errcheck
 	}
 
 	// Migration: add packet_count column to observer_sources (idempotent)
 	row = db.QueryRow("SELECT 1 FROM _migrations WHERE name = 'observer_sources_packet_count_v1'")
 	if row.Scan(&migDone) != nil {
 		db.Exec(`ALTER TABLE observer_sources ADD COLUMN packet_count INTEGER NOT NULL DEFAULT 0`) //nolint:errcheck
-		db.Exec(`INSERT INTO _migrations (name) VALUES ('observer_sources_packet_count_v1')`)     //nolint:errcheck
+		db.Exec(`INSERT INTO _migrations (name) VALUES ('observer_sources_packet_count_v1')`)      //nolint:errcheck
 	}
 
 	// Migration: add status_count column to observer_sources (idempotent)
 	row = db.QueryRow("SELECT 1 FROM _migrations WHERE name = 'observer_sources_status_count_v1'")
 	if row.Scan(&migDone) != nil {
 		db.Exec(`ALTER TABLE observer_sources ADD COLUMN status_count INTEGER NOT NULL DEFAULT 0`) //nolint:errcheck
-		db.Exec(`INSERT INTO _migrations (name) VALUES ('observer_sources_status_count_v1')`)     //nolint:errcheck
+		db.Exec(`INSERT INTO _migrations (name) VALUES ('observer_sources_status_count_v1')`)      //nolint:errcheck
 	}
 
 	// Migration: add repeat column to observers (Cornmeister-specific; lost in upstream merge).
@@ -771,8 +782,8 @@ func (s *Store) prepareStatements() error {
 	}
 
 	s.stmtUpsertMetrics, err = s.db.Prepare(`
-		INSERT OR REPLACE INTO observer_metrics (observer_id, timestamp, noise_floor, tx_air_secs, rx_air_secs, recv_errors, battery_mv, packets_sent, packets_recv)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT OR REPLACE INTO observer_metrics (observer_id, timestamp, noise_floor, tx_air_secs, rx_air_secs, recv_errors, battery_mv, packets_sent, packets_recv, uptime_secs)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
@@ -1093,6 +1104,7 @@ type MetricsData struct {
 	BatteryMv   *int
 	PacketsSent *int
 	PacketsRecv *int
+	UptimeSecs  *int64
 }
 
 // InsertMetrics inserts a metrics sample for an observer using ingestor wall clock.
@@ -1100,7 +1112,7 @@ func (s *Store) InsertMetrics(data *MetricsData) error {
 	ts := RoundToInterval(time.Now().UTC(), s.sampleIntervalSec)
 	tsStr := ts.Format(time.RFC3339)
 
-	var nf, txAir, rxAir, recvErr, batt, pktSent, pktRecv interface{}
+	var nf, txAir, rxAir, recvErr, batt, pktSent, pktRecv, uptime interface{}
 	if data.NoiseFloor != nil {
 		nf = *data.NoiseFloor
 	}
@@ -1122,8 +1134,11 @@ func (s *Store) InsertMetrics(data *MetricsData) error {
 	if data.PacketsRecv != nil {
 		pktRecv = *data.PacketsRecv
 	}
+	if data.UptimeSecs != nil {
+		uptime = *data.UptimeSecs
+	}
 
-	_, err := s.stmtUpsertMetrics.Exec(data.ObserverID, tsStr, nf, txAir, rxAir, recvErr, batt, pktSent, pktRecv)
+	_, err := s.stmtUpsertMetrics.Exec(data.ObserverID, tsStr, nf, txAir, rxAir, recvErr, batt, pktSent, pktRecv, uptime)
 	if err != nil {
 		s.Stats.WriteErrors.Add(1)
 		return fmt.Errorf("insert metrics: %w", err)

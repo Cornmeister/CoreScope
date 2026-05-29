@@ -950,12 +950,25 @@ const _loadedScriptSrcs = (function () {
   return set;
 })();
 
+// Cache-bust token for lazy-loaded modules. The eager scripts in index.html are
+// loaded with ?v=__BUST__ (server-start timestamp), but lazy page modules were
+// fetched with no query — so after a deploy browsers served the stale cached
+// module for up to the 4h max-age. Reuse app.js's own ?v= so lazy modules bust
+// in lockstep with every deploy.
+const _BUST = (function () {
+  try {
+    var tag = document.querySelector('script[src*="app.js?v="]');
+    if (tag) { var m = tag.src.match(/[?&]v=([^&]+)/); if (m) return m[1]; }
+  } catch (e) {}
+  return '';
+})();
+
 function _loadScriptOnce(src) {
   const key = src.split('?')[0];
   if (_loadedScriptSrcs.has(key)) return Promise.resolve();
   return new Promise(function (resolve) {
     const s = document.createElement('script');
-    s.src = src;
+    s.src = _BUST ? src + (src.indexOf('?') >= 0 ? '&' : '?') + 'v=' + _BUST : src;
     s.async = false; // preserve insertion/execution order across the bundle
     s.onload = function () { _loadedScriptSrcs.add(key); resolve(); };
     s.onerror = function () { console.error('[lazy] failed to load', src); resolve(); };
