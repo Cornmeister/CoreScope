@@ -4383,6 +4383,59 @@ func TestGetChannelMessagesAfterIngest(t *testing.T) {
 	}
 }
 
+// TestEvictStale_CleansChannelIndex verifies the byChannel index is pruned on
+// eviction (mirrors TestEvictStale_CleansNodeIndexes for the channel index).
+func TestEvictStale_CleansChannelIndex(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	seedTestData(t, db) // sets up observers (observer_idx=1) + a recent #test msg
+
+	now := time.Now().UTC()
+	old := now.Add(-48 * time.Hour).Format(time.RFC3339)
+	for i, ch := range []string{"#evictA", "#evictB"} {
+		hash := fmt.Sprintf("evictmsg%010d", i)
+		dj := fmt.Sprintf(`{"type":"CHAN","channel":"%s","text":"u: old","sender":"u"}`, ch)
+		if _, err := db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json)
+			VALUES ('FE', ?, ?, 1, 5, ?)`, hash, old, dj); err != nil {
+			t.Fatal(err)
+		}
+		var txID int
+		db.conn.QueryRow("SELECT id FROM transmissions WHERE hash=?", hash).Scan(&txID)
+		if _, err := db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+			VALUES (?, 1, 5.0, -90, '[]', ?)`, txID, now.Add(-48*time.Hour).Unix()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	store := NewPacketStore(db, nil)
+	store.Load()
+
+	// Old CHAN packets must be indexed by channel after Load.
+	if len(store.byChannel["#evictA"]) != 1 || len(store.byChannel["#evictB"]) != 1 {
+		t.Fatalf("expected #evictA/#evictB indexed, got A=%d B=%d",
+			len(store.byChannel["#evictA"]), len(store.byChannel["#evictB"]))
+	}
+	if msgs, _ := store.GetChannelMessages("#evictA", 100, 0); len(msgs) != 1 {
+		t.Fatalf("expected 1 message for #evictA before eviction, got %d", len(msgs))
+	}
+
+	store.retentionHours = 24 // packets are 48h old → evicted
+	if n := store.EvictStale(); n < 2 {
+		t.Fatalf("expected >=2 evicted, got %d", n)
+	}
+
+	// Channel index entries for the evicted channels must be gone (not just empty).
+	if _, ok := store.byChannel["#evictA"]; ok {
+		t.Errorf("#evictA should be removed from byChannel after eviction")
+	}
+	if _, ok := store.byChannel["#evictB"]; ok {
+		t.Errorf("#evictB should be removed from byChannel after eviction")
+	}
+	if msgs, total := store.GetChannelMessages("#evictA", 100, 0); len(msgs) != 0 || total != 0 {
+		t.Errorf("expected 0 messages for #evictA after eviction, got len=%d total=%d", len(msgs), total)
+	}
+}
+
 // --- resolveRegionObservers caching ---
 
 func TestResolveRegionObserversCaching(t *testing.T) {

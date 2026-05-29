@@ -145,6 +145,7 @@ type PacketStore struct {
 	byPathHop     map[string][]*StoreTx      // lowercase hop/pubkey → transmissions with that hop in path
 	relayTimes    map[string][]int64         // lowercase pubkey → sorted unix-millis of relay events (full pubkeys only)
 	byPayloadType map[int][]*StoreTx         // payload_type → transmissions
+	byChannel     map[string][]*StoreTx      // channel hash → type-5 CHAN transmissions (pointers, oldest-first)
 	loaded        bool
 	totalObs      int
 	insertCount   int64
@@ -427,6 +428,7 @@ func NewPacketStore(db *DB, cfg *PacketStoreConfig, cacheTTLs ...map[string]inte
 		relayTimes:    make(map[string][]int64),
 		nodeHashes:    make(map[string]map[string]bool),
 		byPayloadType: make(map[int][]*StoreTx),
+		byChannel:     make(map[string][]*StoreTx),
 		rfCache:       make(map[string]*cachedResult),
 		topoCache:     make(map[string]*cachedResult),
 		hashCache:     make(map[string]*cachedResult),
@@ -632,6 +634,7 @@ func (s *PacketStore) Load() error {
 				pt := *tx.PayloadType
 				s.byPayloadType[pt] = append(s.byPayloadType[pt], tx)
 			}
+			s.indexByChannel(tx)
 			s.trackAdvertPubkey(tx)
 			s.trackedBytes += estimateStoreTxBytes(tx)
 			atomic.AddInt64(&s.insertCount, 1)
@@ -1006,6 +1009,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 				pt := *tx.PayloadType
 				s.byPayloadType[pt] = append(s.byPayloadType[pt], tx)
 			}
+			s.indexByChannel(tx)
 			s.trackAdvertPubkey(tx)
 		}
 		s.refreshStatsSnapshotLocked()
@@ -1281,6 +1285,30 @@ func pathLen(pathJSON string) int {
 // indexByNode indexes a transmission under all pubkeys found in its decoded
 // JSON. Resolved path pubkeys are handled separately via the decode-window.
 // Returns true if any genuinely new node was discovered.
+// indexByChannel adds a type-5 CHAN transmission to byChannel (channel hash →
+// txs). Pointer index — no payload is copied, so the cost is one slice entry per
+// type-5 message (comparable to byNode). Parses only the minimal {type,channel}
+// fields and does not cache the full decoded map. Key mirrors GetChannelMessages
+// exactly: empty channel → "unknown"; only Type=="CHAN" is indexed. Caller holds
+// s.mu.Lock().
+func (s *PacketStore) indexByChannel(tx *StoreTx) {
+	if tx.PayloadType == nil || *tx.PayloadType != 5 || tx.DecodedJSON == "" {
+		return
+	}
+	var d struct {
+		Type    string `json:"type"`
+		Channel string `json:"channel"`
+	}
+	if json.Unmarshal([]byte(tx.DecodedJSON), &d) != nil || d.Type != "CHAN" {
+		return
+	}
+	ch := d.Channel
+	if ch == "" {
+		ch = "unknown"
+	}
+	s.byChannel[ch] = append(s.byChannel[ch], tx)
+}
+
 func (s *PacketStore) indexByNode(tx *StoreTx) bool {
 	// Track which pubkeys have been indexed for this packet to avoid duplicates.
 	indexed := make(map[string]bool)
@@ -2322,6 +2350,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 				// so GetChannelMessages reverse iteration stays correct
 				s.byPayloadType[pt] = append(s.byPayloadType[pt], tx)
 			}
+			s.indexByChannel(tx)
 			s.trackAdvertPubkey(tx)
 			s.trackedBytes += estimateStoreTxBytes(tx)
 			atomic.AddInt64(&s.insertCount, 1)
@@ -4081,6 +4110,7 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string, maxChunk int)
 	affectedObservers := make(map[string]struct{})
 	affectedPayloadTypes := make(map[int]struct{})
 	affectedNodes := make(map[string]struct{})
+	affectedChannels := make(map[string]struct{})
 
 	// First pass: remove from primary indexes (byHash, byTxID, byObsID),
 	// collect IDs for batch secondary index cleanup, and handle non-index work
@@ -4111,6 +4141,17 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string, maxChunk int)
 		if tx.DecodedJSON != "" {
 			var decoded map[string]interface{}
 			if json.Unmarshal([]byte(tx.DecodedJSON), &decoded) == nil {
+				// Collect affected channel keys (mirror indexByChannel) from the
+				// same decode pass, so byChannel can be batch-pruned below.
+				if tx.PayloadType != nil && *tx.PayloadType == 5 {
+					if t, _ := decoded["type"].(string); t == "CHAN" {
+						ch, _ := decoded["channel"].(string)
+						if ch == "" {
+							ch = "unknown"
+						}
+						affectedChannels[ch] = struct{}{}
+					}
+				}
 				for _, field := range []string{"pubKey", "destPubKey", "srcPubKey"} {
 					if v, ok := decoded[field].(string); ok && v != "" {
 						if hashes, ok := s.nodeHashes[v]; ok {
@@ -4201,6 +4242,22 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string, maxChunk int)
 			delete(s.byNode, nodeKey)
 		} else {
 			s.byNode[nodeKey] = filtered
+		}
+	}
+
+	// Batch-remove from byChannel: single pass per affected channel slice
+	for ch := range affectedChannels {
+		chList := s.byChannel[ch]
+		filtered := chList[:0]
+		for _, t := range chList {
+			if _, evicted := evictedTxIDs[t.ID]; !evicted {
+				filtered = append(filtered, t)
+			}
+		}
+		if len(filtered) == 0 {
+			delete(s.byChannel, ch)
+		} else {
+			s.byChannel[ch] = filtered
 		}
 	}
 
