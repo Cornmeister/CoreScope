@@ -2256,15 +2256,18 @@ func TestGetChannelsNoRegionQueryEquivalence(t *testing.T) {
 		FROM transmissions t
 		WHERE payload_type = 5 AND channel_hash IS NOT NULL AND channel_hash NOT LIKE 'enc_%'
 		GROUP BY channel_hash ORDER BY last_activity DESC`
-	newSQL := `WITH ranked AS (
-			SELECT channel_hash, first_seen, decoded_json,
-				ROW_NUMBER() OVER (PARTITION BY channel_hash ORDER BY first_seen DESC) AS rn,
-				COUNT(*) OVER (PARTITION BY channel_hash) AS msg_count
+	newSQL := `SELECT t.channel_hash, agg.msg_count, agg.last_activity AS last_activity,
+			t.decoded_json AS sample_json
+		FROM (
+			SELECT channel_hash, COUNT(*) AS msg_count, MAX(first_seen) AS last_activity
 			FROM transmissions
 			WHERE payload_type = 5 AND channel_hash IS NOT NULL AND channel_hash NOT LIKE 'enc_%'
-		)
-		SELECT channel_hash, msg_count, first_seen AS last_activity, decoded_json AS sample_json
-		FROM ranked WHERE rn = 1 ORDER BY last_activity DESC`
+			GROUP BY channel_hash
+		) agg
+		JOIN transmissions t ON t.channel_hash = agg.channel_hash
+			AND t.first_seen = agg.last_activity AND t.payload_type = 5
+		GROUP BY t.channel_hash
+		ORDER BY last_activity DESC`
 
 	dump := func(q string) string {
 		r, err := db.conn.Query(q)
