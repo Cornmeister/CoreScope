@@ -333,7 +333,17 @@
       data = longHistory.filter(function (s) { return s.ts >= cutoff; });
     } else {
       cutoff = now - (TIMEFRAME_MS[timeframe] || 300000);
-      data = history.filter(function (s) { return s.ts >= cutoff; });
+      // The dense 5 s buffer only covers the recent past (and is empty right
+      // after a fresh load or server restart), so on its own 15m/30m/1h would
+      // show the same handful of recent points as 5m. Backfill the older part
+      // of the window from the 1-min long buffer; the 5 s samples keep the
+      // recent detail. Both buffers are kept in ascending ts order, and the
+      // long fill is strictly older than the oldest short sample, so the
+      // concatenation stays ordered without dedup.
+      const shortData   = history.filter(function (s) { return s.ts >= cutoff; });
+      const oldestShort = shortData.length ? shortData[0].ts : Infinity;
+      const longFill    = longHistory.filter(function (s) { return s.ts >= cutoff && s.ts < oldestShort; });
+      data = longFill.concat(shortData);
     }
     if (data.length === 0 || data[0].ts > cutoff + 60000) {
       return [{ ts: cutoff }].concat(data);
