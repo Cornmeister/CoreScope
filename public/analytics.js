@@ -260,10 +260,11 @@
       // channels: region + window (no area per original PR intent)
       const chanQS = (rqs + tws).slice(1);
       const sepChan = chanQS ? '?' + chanQS : '';
+      _topoReachQS = sepWin; // window/region params reused by the lazy reach fetch
       const [hashData, rfData, topoData, chanData, collisionData] = await Promise.all([
         api('/analytics/hash-sizes' + sepBase, { ttl: CLIENT_TTL.analyticsRF }),
         api('/analytics/rf' + sepWin, { ttl: CLIENT_TTL.analyticsRF }),
-        api('/analytics/topology' + sepWin, { ttl: CLIENT_TTL.analyticsRF }),
+        api('/analytics/topology' + sepWin + (sepWin ? '&' : '?') + 'reach=0', { ttl: CLIENT_TTL.analyticsRF }),
         api('/analytics/channels' + sepChan, { ttl: CLIENT_TTL.analyticsRF }),
         api('/analytics/hash-collisions' + sepBase, { ttl: CLIENT_TTL.analyticsRF }),
       ]);
@@ -627,7 +628,13 @@
   }
 
   // ===================== TOPOLOGY =====================
+  // Per-observer reachability is split out of the topology payload (which omits
+  // it via reach=0) and lazy-loaded from /api/analytics/topology/reach. Cache
+  // is keyed by observer id and reset whenever topology reloads.
+  let _reachCache = {};
+  let _topoReachQS = '';
   function renderTopology(el, topo) {
+    _reachCache = {};
     el.innerHTML = `
       <div class="analytics-row">
         <div class="analytics-card flex-1">
@@ -674,7 +681,7 @@
           ${topo.observers.map((o, i) => `<button class="tab-btn ${i === 0 ? 'active' : ''}" data-obs="${o.id}">${esc(o.name)}</button>`).join('')}
           <button class="tab-btn" data-obs="__all">All Observers</button>
         </div>` : ''}
-        <div id="reachContent">${renderPerObserverReach(topo.perObserverReach, topo.observers[0]?.id)}</div>
+        <div id="reachContent"><div class="text-muted">Loading…</div></div>
       </div>
 
       ${topo.multiObsNodes.length ? `<div class="analytics-card">
@@ -684,7 +691,7 @@
       </div>` : ''}
     `;
 
-    // Observer selector event handling
+    // Observer selector event handling — reach data is lazy-loaded per observer.
     const selector = document.getElementById('obsSelector');
     if (selector) {
       initTabBar(selector);
@@ -693,11 +700,43 @@
         if (!btn) return;
         selector.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-        const obsId = btn.dataset.obs;
-        document.getElementById('reachContent').innerHTML =
-          obsId === '__all' ? renderAllObserversReach(topo.perObserverReach) : renderPerObserverReach(topo.perObserverReach, obsId);
+        loadReach(btn.dataset.obs);
       });
     }
+    // Initial reach for the first observer (or the single observer w/o selector).
+    const firstObs = topo.observers && topo.observers[0] ? topo.observers[0].id : null;
+    if (firstObs) {
+      loadReach(firstObs);
+    } else {
+      const rc = document.getElementById('reachContent');
+      if (rc) rc.innerHTML = '<div class="text-muted">No path data</div>';
+    }
+  }
+
+  // Fetch one observer's reachability (or __all) on demand from the split-out
+  // endpoint; cache per observer for the loaded topology.
+  function loadReach(obsId) {
+    const el = document.getElementById('reachContent');
+    if (!el || !obsId) return;
+    if (_reachCache[obsId]) {
+      el.innerHTML = obsId === '__all'
+        ? renderAllObserversReach(_reachCache[obsId])
+        : renderPerObserverReach(_reachCache[obsId], obsId);
+      return;
+    }
+    el.innerHTML = '<div class="text-muted">Loading…</div>';
+    const sep = _topoReachQS ? _topoReachQS + '&' : '?';
+    api('/analytics/topology/reach' + sep + 'observer=' + encodeURIComponent(obsId), { ttl: CLIENT_TTL.analyticsRF })
+      .then(reach => {
+        _reachCache[obsId] = reach || {};
+        // Ignore a late response if the user switched tabs meanwhile.
+        const active = document.querySelector('#obsSelector .tab-btn.active');
+        if (active && active.dataset.obs !== obsId) return;
+        el.innerHTML = obsId === '__all'
+          ? renderAllObserversReach(_reachCache[obsId])
+          : renderPerObserverReach(_reachCache[obsId], obsId);
+      })
+      .catch(() => { el.innerHTML = '<div class="text-muted">Failed to load reachability</div>'; });
   }
 
   function renderRepeaterTable(repeaters) {

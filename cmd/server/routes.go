@@ -675,6 +675,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/analytics/roles", s.handleAnalyticsRoles).Methods("GET")
 	r.HandleFunc("/api/analytics/rf", s.handleAnalyticsRF).Methods("GET")
 	r.HandleFunc("/api/analytics/topology", s.handleAnalyticsTopology).Methods("GET")
+	r.HandleFunc("/api/analytics/topology/reach", s.handleAnalyticsTopologyReach).Methods("GET")
 	r.HandleFunc("/api/analytics/channels", s.handleAnalyticsChannels).Methods("GET")
 	r.HandleFunc("/api/analytics/distance", s.handleAnalyticsDistance).Methods("GET")
 	r.HandleFunc("/api/analytics/hash-sizes", s.handleAnalyticsHashSizes).Methods("GET")
@@ -2812,6 +2813,12 @@ func (s *Server) handleAnalyticsTopology(w http.ResponseWriter, r *http.Request)
 		if s.cfg != nil && len(s.cfg.NodeBlacklist) > 0 {
 			data = s.filterBlacklistedFromTopology(data)
 		}
+		// reach=0: omit the large perObserverReach map (~4.5MB / 1.3MB gzip).
+		// The client lazy-loads it per observer via /api/analytics/topology/reach,
+		// shrinking the base topology payload by ~95%.
+		if r.URL.Query().Get("reach") == "0" {
+			data["perObserverReach"] = map[string]interface{}{}
+		}
 		writeJSON(w, data)
 		return
 	}
@@ -2825,6 +2832,36 @@ func (s *Server) handleAnalyticsTopology(w http.ResponseWriter, r *http.Request)
 		MultiObsNodes:    []MultiObsNode{},
 		BestPathList:     []BestPathEntry{},
 	})
+}
+
+// handleAnalyticsTopologyReach serves one observer's reachability rings (or the
+// full map when observer=__all) split out of the main topology payload so that
+// payload stays small. Reuses the (store-cached) topology computation.
+func (s *Server) handleAnalyticsTopologyReach(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeJSON(w, map[string]interface{}{})
+		return
+	}
+	region := r.URL.Query().Get("region")
+	window := ParseTimeWindow(r)
+	data := s.store.GetAnalyticsTopologyWithWindow(region, window)
+	if s.cfg != nil && len(s.cfg.NodeBlacklist) > 0 {
+		data = s.filterBlacklistedFromTopology(data)
+	}
+	reach, _ := data["perObserverReach"].(map[string]interface{})
+	if reach == nil {
+		reach = map[string]interface{}{}
+	}
+	obs := r.URL.Query().Get("observer")
+	if obs == "" || obs == "__all" {
+		writeJSON(w, reach) // full map for the "All Observers" tab
+		return
+	}
+	out := map[string]interface{}{}
+	if v, ok := reach[obs]; ok {
+		out[obs] = v
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) handleAnalyticsChannels(w http.ResponseWriter, r *http.Request) {
