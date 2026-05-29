@@ -84,7 +84,7 @@ func isHexLower(s string) bool {
 // loops that resolve hops outside any per-tx scope (subpath/topology
 // aggregations). Caller passes the slice of txs to consider; we union the
 // per-tx contexts with de-dup. Used by call sites that read from precomputed
-// indices (s.spIndex, s.spTxIndex) or that resolve user-supplied hops.
+// indices (s.spIndex) or that resolve user-supplied hops.
 //
 // Result is order-independent in semantics; iteration order is deterministic
 // only modulo Go's map iteration (acceptable — the resolver's tier-2 averages

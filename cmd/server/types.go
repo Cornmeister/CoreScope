@@ -281,6 +281,12 @@ type GoRuntimeStats struct {
 	// TotalSysMB is runtime.MemStats.Sys — total memory obtained from the OS
 	// for the Go runtime (heap + stacks + everything Go-managed), in MB.
 	TotalSysMB float64 `json:"totalSysMB"`
+	// Host memory from /proc/meminfo (the container shares the host's view):
+	// HostMemTotalMB is physical RAM; HostMemAvailableMB is what the kernel
+	// estimates is available for new allocations (free + reclaimable). Used to
+	// size this process's memory budget vs. co-located containers.
+	HostMemTotalMB     float64 `json:"hostMemTotalMB,omitempty"`
+	HostMemAvailableMB float64 `json:"hostMemAvailableMB,omitempty"`
 }
 
 // ObserverCounts is the observer health breakdown surfaced on /api/perf.

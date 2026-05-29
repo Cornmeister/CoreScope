@@ -2206,9 +2206,94 @@ func TestStoreGetTimestamps(t *testing.T) {
 	store := NewPacketStore(db, nil)
 	store.Load()
 
-	ts := store.GetTimestamps("2000-01-01")
-	if len(ts) < 1 {
-		t.Error("expected >=1 timestamps")
+	hist := store.GetTimestampHistogram("2000-01-01")
+	if hist.Step != timestampHistogramStepMs {
+		t.Errorf("expected step %d, got %d", timestampHistogramStepMs, hist.Step)
+	}
+	var total int
+	for _, c := range hist.Counts {
+		total += c
+	}
+	if total < 1 {
+		t.Error("expected >=1 packet counted in histogram")
+	}
+}
+
+// TestGetChannelsNoRegionQueryEquivalence guards the window-function rewrite of
+// the no-region GetChannels query: it must return exactly what the old
+// correlated-subquery + GROUP BY form returned (per-channel msg_count, latest
+// first_seen as last_activity, and the newest row's decoded_json as sample).
+func TestGetChannelsNoRegionQueryEquivalence(t *testing.T) {
+	db := setupTestDBv2(t)
+	defer db.Close()
+
+	// Multiple channels, distinct first_seen per row (unambiguous "latest"),
+	// plus rows that must be excluded: a non-type-5 packet and an enc_ channel.
+	rows := []struct {
+		hash, ts, ch, dj string
+		ptype            int
+	}{
+		{"h1", "2026-05-01T10:00:00Z", "#alpha", `{"text":"a: first","sender":"a"}`, 5},
+		{"h2", "2026-05-01T10:05:00Z", "#alpha", `{"text":"b: latest","sender":"b"}`, 5},
+		{"h3", "2026-05-01T09:00:00Z", "#beta", `{"text":"c: only","sender":"c"}`, 5},
+		{"h4", "2026-05-01T11:00:00Z", "#alpha", `{"text":"d: newest","sender":"d"}`, 5},
+		{"h5", "2026-05-01T12:00:00Z", "#beta", `{"text":"e: newest","sender":"e"}`, 5},
+		{"h6", "2026-05-01T13:00:00Z", "enc_secret", `{"text":"x"}`, 5},          // excluded: enc_
+		{"h7", "2026-05-01T14:00:00Z", "#alpha", `{"text":"not a channel"}`, 4}, // excluded: not type 5
+	}
+	for _, r := range rows {
+		if _, err := db.conn.Exec(
+			`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, channel_hash, decoded_json)
+			 VALUES ('00', ?, ?, 1, ?, ?, ?)`, r.hash, r.ts, r.ptype, r.ch, r.dj); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	oldSQL := `SELECT channel_hash, COUNT(*) AS msg_count, MAX(first_seen) AS last_activity,
+			(SELECT t2.decoded_json FROM transmissions t2
+			 WHERE t2.channel_hash = t.channel_hash AND t2.payload_type = 5
+			 ORDER BY t2.first_seen DESC LIMIT 1) AS sample_json
+		FROM transmissions t
+		WHERE payload_type = 5 AND channel_hash IS NOT NULL AND channel_hash NOT LIKE 'enc_%'
+		GROUP BY channel_hash ORDER BY last_activity DESC`
+	newSQL := `SELECT t.channel_hash, agg.msg_count, agg.last_activity AS last_activity,
+			t.decoded_json AS sample_json
+		FROM (
+			SELECT channel_hash, COUNT(*) AS msg_count, MAX(first_seen) AS last_activity
+			FROM transmissions
+			WHERE payload_type = 5 AND channel_hash IS NOT NULL AND channel_hash NOT LIKE 'enc_%'
+			GROUP BY channel_hash
+		) agg
+		JOIN transmissions t ON t.channel_hash = agg.channel_hash
+			AND t.first_seen = agg.last_activity AND t.payload_type = 5
+		GROUP BY t.channel_hash
+		ORDER BY last_activity DESC`
+
+	dump := func(q string) string {
+		r, err := db.conn.Query(q)
+		if err != nil {
+			t.Fatalf("query failed: %v", err)
+		}
+		defer r.Close()
+		var b strings.Builder
+		for r.Next() {
+			var ch, la, sj sql.NullString
+			var cnt int
+			if err := r.Scan(&ch, &cnt, &la, &sj); err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprintf(&b, "%s|%d|%s|%s\n", ch.String, cnt, la.String, sj.String)
+		}
+		return b.String()
+	}
+
+	got, want := dump(newSQL), dump(oldSQL)
+	if got != want {
+		t.Errorf("window query differs from correlated-subquery query.\nNEW:\n%s\nOLD:\n%s", got, want)
+	}
+	// Sanity: enc_ and non-type-5 excluded → exactly 2 channels.
+	if n := strings.Count(want, "\n"); n != 2 {
+		t.Errorf("expected 2 channels, got %d:\n%s", n, want)
 	}
 }
 
@@ -2427,24 +2512,23 @@ func TestSubpathTxIndexPopulated(t *testing.T) {
 	store := NewPacketStore(db, nil)
 	store.Load()
 
-	// spTxIndex must be populated alongside spIndex
-	if len(store.spTxIndex) == 0 {
-		t.Fatal("expected spTxIndex to be populated after Load()")
+	if len(store.spIndex) == 0 {
+		t.Fatal("expected spIndex to be populated after Load()")
 	}
 
-	// Every key in spIndex must also exist in spTxIndex with matching count
+	// GetSubpathDetail scans packets on demand instead of using a precomputed
+	// subpath→txs index. Its match count must equal the spIndex count for every
+	// subpath key, i.e. the scan reproduces the exact multiset the old index held.
 	for key, count := range store.spIndex {
-		txs, ok := store.spTxIndex[key]
-		if !ok {
-			t.Errorf("spTxIndex missing key %q that exists in spIndex", key)
-			continue
-		}
-		if len(txs) != count {
-			t.Errorf("spTxIndex[%q] has %d txs, spIndex count is %d", key, len(txs), count)
+		rawHops := strings.Split(key, ",")
+		detail := store.GetSubpathDetail(rawHops)
+		matches, _ := detail["totalMatches"].(int)
+		if matches != count {
+			t.Errorf("GetSubpathDetail(%q) totalMatches=%d, spIndex count=%d", key, matches, count)
 		}
 	}
 
-	// GetSubpathDetail should return correct match count via indexed lookup
+	// GetSubpathDetail should return correct match count via on-demand scan
 	detail := store.GetSubpathDetail([]string{"eeff", "0011"})
 	if detail == nil {
 		t.Fatal("expected non-nil detail for existing subpath")
@@ -4296,6 +4380,59 @@ func TestGetChannelMessagesAfterIngest(t *testing.T) {
 	lastMsg := msgs[len(msgs)-1]
 	if lastMsg["text"] != "brand new message" {
 		t.Errorf("newest message should be 'brand new message', got %q", lastMsg["text"])
+	}
+}
+
+// TestEvictStale_CleansChannelIndex verifies the byChannel index is pruned on
+// eviction (mirrors TestEvictStale_CleansNodeIndexes for the channel index).
+func TestEvictStale_CleansChannelIndex(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	seedTestData(t, db) // sets up observers (observer_idx=1) + a recent #test msg
+
+	now := time.Now().UTC()
+	old := now.Add(-48 * time.Hour).Format(time.RFC3339)
+	for i, ch := range []string{"#evictA", "#evictB"} {
+		hash := fmt.Sprintf("evictmsg%010d", i)
+		dj := fmt.Sprintf(`{"type":"CHAN","channel":"%s","text":"u: old","sender":"u"}`, ch)
+		if _, err := db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json)
+			VALUES ('FE', ?, ?, 1, 5, ?)`, hash, old, dj); err != nil {
+			t.Fatal(err)
+		}
+		var txID int
+		db.conn.QueryRow("SELECT id FROM transmissions WHERE hash=?", hash).Scan(&txID)
+		if _, err := db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+			VALUES (?, 1, 5.0, -90, '[]', ?)`, txID, now.Add(-48*time.Hour).Unix()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	store := NewPacketStore(db, nil)
+	store.Load()
+
+	// Old CHAN packets must be indexed by channel after Load.
+	if len(store.byChannel["#evictA"]) != 1 || len(store.byChannel["#evictB"]) != 1 {
+		t.Fatalf("expected #evictA/#evictB indexed, got A=%d B=%d",
+			len(store.byChannel["#evictA"]), len(store.byChannel["#evictB"]))
+	}
+	if msgs, _ := store.GetChannelMessages("#evictA", 100, 0); len(msgs) != 1 {
+		t.Fatalf("expected 1 message for #evictA before eviction, got %d", len(msgs))
+	}
+
+	store.retentionHours = 24 // packets are 48h old → evicted
+	if n := store.EvictStale(); n < 2 {
+		t.Fatalf("expected >=2 evicted, got %d", n)
+	}
+
+	// Channel index entries for the evicted channels must be gone (not just empty).
+	if _, ok := store.byChannel["#evictA"]; ok {
+		t.Errorf("#evictA should be removed from byChannel after eviction")
+	}
+	if _, ok := store.byChannel["#evictB"]; ok {
+		t.Errorf("#evictB should be removed from byChannel after eviction")
+	}
+	if msgs, total := store.GetChannelMessages("#evictA", 100, 0); len(msgs) != 0 || total != 0 {
+		t.Errorf("expected 0 messages for #evictA after eviction, got len=%d total=%d", len(msgs), total)
 	}
 }
 

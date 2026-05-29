@@ -15,12 +15,6 @@ import (
 // increments their counts in the index.  Returns true if the tx contributed
 // (path had ≥ 2 hops).
 func addTxToSubpathIndex(idx map[string]int, tx *StoreTx) bool {
-	return addTxToSubpathIndexFull(idx, nil, tx)
-}
-
-// addTxToSubpathIndexFull is like addTxToSubpathIndex but also appends
-// tx to txIdx for each subpath key (if txIdx is non-nil).
-func addTxToSubpathIndexFull(idx map[string]int, txIdx map[string][]*StoreTx, tx *StoreTx) bool {
 	hops := txGetParsedPath(tx)
 	if len(hops) < 2 {
 		return false
@@ -30,9 +24,6 @@ func addTxToSubpathIndexFull(idx map[string]int, txIdx map[string][]*StoreTx, tx
 		for start := 0; start <= len(hops)-l; start++ {
 			key := strings.ToLower(strings.Join(hops[start:start+l], ","))
 			idx[key]++
-			if txIdx != nil {
-				txIdx[key] = append(txIdx[key], tx)
-			}
 		}
 	}
 	return true
@@ -42,12 +33,6 @@ func addTxToSubpathIndexFull(idx map[string]int, txIdx map[string][]*StoreTx, tx
 // decrements counts for all raw subpaths of tx.  Returns true if the tx
 // had a path.
 func removeTxFromSubpathIndex(idx map[string]int, tx *StoreTx) bool {
-	return removeTxFromSubpathIndexFull(idx, nil, tx)
-}
-
-// removeTxFromSubpathIndexFull is like removeTxFromSubpathIndex but also
-// removes tx from txIdx for each subpath key (if txIdx is non-nil).
-func removeTxFromSubpathIndexFull(idx map[string]int, txIdx map[string][]*StoreTx, tx *StoreTx) bool {
 	hops := txGetParsedPath(tx)
 	if len(hops) < 2 {
 		return false
@@ -59,18 +44,6 @@ func removeTxFromSubpathIndexFull(idx map[string]int, txIdx map[string][]*StoreT
 			idx[key]--
 			if idx[key] <= 0 {
 				delete(idx, key)
-			}
-			if txIdx != nil {
-				txs := txIdx[key]
-				for i, t := range txs {
-					if t == tx {
-						txIdx[key] = append(txs[:i], txs[i+1:]...)
-						break
-					}
-				}
-				if len(txIdx[key]) == 0 {
-					delete(txIdx, key)
-				}
 			}
 		}
 	}
@@ -88,10 +61,9 @@ type spIndexSnapshot struct {
 // Must be called with s.mu held.
 func (s *PacketStore) buildSubpathIndex() {
 	s.spIndex = make(map[string]int, 4096)
-	s.spTxIndex = make(map[string][]*StoreTx, 4096)
 	s.spTotalPaths = 0
 	for _, tx := range s.packets {
-		if addTxToSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
+		if addTxToSubpathIndex(s.spIndex, tx) {
 			s.spTotalPaths++
 		}
 	}
@@ -105,12 +77,35 @@ func (s *PacketStore) buildSubpathIndex() {
 // write to spIndex or spTotalPaths. Readers (GetAnalyticsSubpathsBulk) load
 // the snapshot without holding any lock, eliminating the O(n) map copy that
 // previously ran under RLock and blocked ingest writers.
+//
+// This is the forced/immediate variant — use it after a full rebuild. For the
+// high-frequency incremental write paths (per-batch ingest, eviction, path
+// rewrite) prefer maybeRefreshSpIndexSnap, which debounces the O(n) copy.
 func (s *PacketStore) refreshSpIndexSnap() {
 	snap := make(map[string]int, len(s.spIndex))
 	for k, v := range s.spIndex {
 		snap[k] = v
 	}
 	s.spIndexSnap.Store(&spIndexSnapshot{index: snap, totalPaths: s.spTotalPaths})
+	s.lastSpSnapRefresh = time.Now()
+}
+
+// maybeRefreshSpIndexSnap refreshes the snapshot only if the debounce window has
+// elapsed since the last refresh. Called under s.mu.Lock() from incremental
+// write paths that fire roughly once per second; the snapshot only feeds the
+// route-patterns bulk analytics, whose results are themselves cached for
+// rfCacheTTL, so a snapshot lagging by up to the debounce window adds no
+// observable staleness. The window is capped at rfCacheTTL so an operator who
+// configures a tighter analytics cache still gets a correspondingly fresh snapshot.
+func (s *PacketStore) maybeRefreshSpIndexSnap() {
+	window := s.rfCacheTTL
+	if window > 10*time.Second {
+		window = 10 * time.Second
+	}
+	if time.Since(s.lastSpSnapRefresh) < window {
+		return
+	}
+	s.refreshSpIndexSnap()
 }
 
 func (s *PacketStore) GetAnalyticsSubpaths(region string, minLen, maxLen, limit int) map[string]interface{} {
@@ -435,11 +430,38 @@ func (s *PacketStore) GetSubpathDetail(rawHops []string) map[string]interface{} 
 
 	_, pm := s.getCachedNodesAndPM()
 
-	// Build the subpath key the same way the index does (lowercase, comma-joined)
-	spKey := strings.ToLower(strings.Join(rawHops, ","))
+	// Build the lowercased target hop sequence the same way the index does.
+	target := make([]string, len(rawHops))
+	for i, h := range rawHops {
+		target[i] = strings.ToLower(h)
+	}
 
-	// Direct lookup instead of scanning all packets
-	matchedTxs := s.spTxIndex[spKey]
+	// On-demand scan: collect the txs whose path contains the requested hop
+	// sequence as a contiguous run. A tx is appended once per occurrence so the
+	// resulting multiset matches the precomputed subpath count exactly. This is
+	// O(n_packets) but only runs on this rare, user-triggered detail lookup —
+	// far cheaper overall than maintaining a permanent subpath→txs index.
+	var matchedTxs []*StoreTx
+	if len(target) >= 2 {
+		for _, tx := range s.packets {
+			hops := txGetParsedPath(tx)
+			if len(hops) < len(target) {
+				continue
+			}
+			for start := 0; start+len(target) <= len(hops); start++ {
+				match := true
+				for i, t := range target {
+					if strings.ToLower(hops[start+i]) != t {
+						match = false
+						break
+					}
+				}
+				if match {
+					matchedTxs = append(matchedTxs, tx)
+				}
+			}
+		}
+	}
 
 	// Hop-disambiguation context: union over the matched txs that produced
 	// this subpath. This is the right scope — those are the packets that

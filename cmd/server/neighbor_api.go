@@ -15,32 +15,32 @@ import (
 // ─── Neighbor API response types ───────────────────────────────────────────────
 
 type NeighborResponse struct {
-	Node              string             `json:"node"`
-	Neighbors         []NeighborEntry    `json:"neighbors"`
-	TotalObservations int                `json:"total_observations"`
+	Node              string          `json:"node"`
+	Neighbors         []NeighborEntry `json:"neighbors"`
+	TotalObservations int             `json:"total_observations"`
 }
 
 type NeighborEntry struct {
-	Pubkey      *string          `json:"pubkey"`
-	Prefix      string           `json:"prefix"`
-	Name        *string          `json:"name"`
-	Role        *string          `json:"role"`
-	Count       int              `json:"count"`
-	Score       float64          `json:"score"`
-	FirstSeen   string           `json:"first_seen"`
-	LastSeen    string           `json:"last_seen"`
-	AvgSNR      *float64         `json:"avg_snr"`
-	DistanceKm  *float64         `json:"distance_km,omitempty"`
-	Observers   []string         `json:"observers"`
-	Ambiguous   bool             `json:"ambiguous"`
-	Unresolved  bool             `json:"unresolved,omitempty"`
-	Candidates  []CandidateEntry `json:"candidates,omitempty"`
+	Pubkey     *string          `json:"pubkey"`
+	Prefix     string           `json:"prefix"`
+	Name       *string          `json:"name"`
+	Role       *string          `json:"role"`
+	Count      int              `json:"count"`
+	Score      float64          `json:"score"`
+	FirstSeen  string           `json:"first_seen"`
+	LastSeen   string           `json:"last_seen"`
+	AvgSNR     *float64         `json:"avg_snr"`
+	DistanceKm *float64         `json:"distance_km,omitempty"`
+	Observers  []string         `json:"observers"`
+	Ambiguous  bool             `json:"ambiguous"`
+	Unresolved bool             `json:"unresolved,omitempty"`
+	Candidates []CandidateEntry `json:"candidates,omitempty"`
 }
 
 type CandidateEntry struct {
-	Pubkey string  `json:"pubkey"`
-	Name   string  `json:"name"`
-	Role   string  `json:"role"`
+	Pubkey string `json:"pubkey"`
+	Name   string `json:"name"`
+	Role   string `json:"role"`
 }
 
 type NeighborGraphResponse struct {

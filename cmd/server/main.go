@@ -199,8 +199,9 @@ func main() {
 		log.Printf("[security] WARNING: API key is weak or a known default — write endpoints are vulnerable")
 	}
 
-	// Apply Go runtime soft memory limit (#836).
-	// Honors GOMEMLIMIT if set; otherwise derives from packetStore.maxMemoryMB.
+	// Apply Go runtime soft memory limit (#836). Honors GOMEMLIMIT if set;
+	// otherwise auto-derives from the container's cgroup limit, then host RAM,
+	// then packetStore.maxMemoryMB — so it scales with the machine.
 	{
 		_, envSet := os.LookupEnv("GOMEMLIMIT")
 		maxMB := 0
@@ -211,8 +212,12 @@ func main() {
 		switch source {
 		case "env":
 			log.Printf("[memlimit] using GOMEMLIMIT from environment (%s)", os.Getenv("GOMEMLIMIT"))
+		case "cgroup":
+			log.Printf("[memlimit] derived from container memory limit → %d MiB (90%% of cgroup cap)", limit/(1024*1024))
+		case "host":
+			log.Printf("[memlimit] derived from host RAM → %d MiB (no container cap set; recommend setting one for a tighter fit)", limit/(1024*1024))
 		case "derived":
-			log.Printf("[memlimit] derived from packetStore.maxMemoryMB=%d → %d MiB (1.5x headroom)", maxMB, limit/(1024*1024))
+			log.Printf("[memlimit] derived from packetStore.maxMemoryMB=%d → %d MiB (1.5x headroom; no cgroup/host info)", maxMB, limit/(1024*1024))
 		default:
 			log.Printf("[memlimit] no soft memory limit set (GOMEMLIMIT unset, packetStore.maxMemoryMB=0); recommend setting one to avoid container OOM-kill")
 		}

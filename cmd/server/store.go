@@ -145,6 +145,7 @@ type PacketStore struct {
 	byPathHop     map[string][]*StoreTx      // lowercase hop/pubkey → transmissions with that hop in path
 	relayTimes    map[string][]int64         // lowercase pubkey → sorted unix-millis of relay events (full pubkeys only)
 	byPayloadType map[int][]*StoreTx         // payload_type → transmissions
+	byChannel     map[string][]*StoreTx      // channel hash → type-5 CHAN transmissions (pointers, oldest-first)
 	loaded        bool
 	totalObs      int
 	insertCount   int64
@@ -214,13 +215,18 @@ type PacketStore struct {
 	// Precomputed subpath index: raw comma-joined hops → occurrence count.
 	// Built during Load(), incrementally updated on ingest. Avoids full
 	// packet iteration at query time (O(unique_subpaths) vs O(total_packets)).
-	spIndex      map[string]int        // "hop1,hop2" → count
-	spTxIndex    map[string][]*StoreTx // "hop1,hop2" → transmissions containing this subpath
-	spTotalPaths int                   // transmissions with paths >= 2 hops
+	spIndex      map[string]int // "hop1,hop2" → count
+	spTotalPaths int            // transmissions with paths >= 2 hops
 	// Atomic snapshot of spIndex+spTotalPaths for lock-free reads in
 	// GetAnalyticsSubpathsBulk. Refreshed under s.mu.Lock() whenever spIndex
 	// changes so readers never copy the map under RLock.
 	spIndexSnap atomic.Value // stores *spIndexSnapshot
+	// lastSpSnapRefresh debounces incremental snapshot rebuilds. The snapshot
+	// is an O(n) copy of spIndex (~1M+ entries at scale); rebuilding it on every
+	// ~1s ingest batch is pure GC churn. Incremental writers refresh at most
+	// once per debounce window (see maybeRefreshSpIndexSnap); full rebuilds force
+	// an immediate refresh.
+	lastSpSnapRefresh time.Time
 	// Precomputed distance analytics: hop distances and path totals
 	// computed during Load() and incrementally updated on ingest.
 	distHops  []distHopRecord
@@ -317,12 +323,6 @@ type PacketStore struct {
 
 	// Clock skew detection engine.
 	clockSkew *ClockSkewEngine
-
-	// Async backfill state: set after backfillResolvedPathsAsync completes.
-	backfillComplete atomic.Bool
-	// Progress tracking for async backfill (total pending and processed so far).
-	backfillTotal     atomic.Int64 // set once at start of async backfill
-	backfillProcessed atomic.Int64
 
 	// Bounded cold load: oldest packet timestamp loaded into memory.
 	// Empty string means all data is in memory (no limit applied).
@@ -428,6 +428,7 @@ func NewPacketStore(db *DB, cfg *PacketStoreConfig, cacheTTLs ...map[string]inte
 		relayTimes:    make(map[string][]int64),
 		nodeHashes:    make(map[string]map[string]bool),
 		byPayloadType: make(map[int][]*StoreTx),
+		byChannel:     make(map[string][]*StoreTx),
 		rfCache:       make(map[string]*cachedResult),
 		topoCache:     make(map[string]*cachedResult),
 		hashCache:     make(map[string]*cachedResult),
@@ -448,7 +449,6 @@ func NewPacketStore(db *DB, cfg *PacketStoreConfig, cacheTTLs ...map[string]inte
 		collisionCacheTTL:    3600 * time.Second,
 		invCooldown:          300 * time.Second,
 		spIndex:              make(map[string]int, 4096),
-		spTxIndex:            make(map[string][]*StoreTx, 4096),
 		advertPubkeys:        make(map[string]int),
 		lastSeenTouched:      make(map[string]time.Time),
 		clockSkew:            NewClockSkewEngine(),
@@ -634,6 +634,7 @@ func (s *PacketStore) Load() error {
 				pt := *tx.PayloadType
 				s.byPayloadType[pt] = append(s.byPayloadType[pt], tx)
 			}
+			s.indexByChannel(tx)
 			s.trackAdvertPubkey(tx)
 			s.trackedBytes += estimateStoreTxBytes(tx)
 			atomic.AddInt64(&s.insertCount, 1)
@@ -1008,6 +1009,7 @@ func (s *PacketStore) loadChunk(from, to time.Time) error {
 				pt := *tx.PayloadType
 				s.byPayloadType[pt] = append(s.byPayloadType[pt], tx)
 			}
+			s.indexByChannel(tx)
 			s.trackAdvertPubkey(tx)
 		}
 		s.refreshStatsSnapshotLocked()
@@ -1097,10 +1099,30 @@ func (s *PacketStore) loadBackgroundChunks() {
 	for {
 		s.mu.RLock()
 		oldest := s.oldestLoaded
+		tracked := s.trackedBytes
 		s.mu.RUnlock()
 
 		if oldest == "" {
 			break
+		}
+
+		// Stop filling history once the in-memory store hits its memory
+		// budget. The hot window (Load) honors maxMemoryMB, but this
+		// background fill previously loaded the entire retention window
+		// regardless, blowing past the budget and OOM-killing the process
+		// in a respawn loop. Mirror EvictStale's dual trigger
+		// (self-accounted trackedBytes OR actual Go heap) so the loader
+		// stops before the heap reaches GOMEMLIMIT. Older data stays on
+		// disk and is served via the SQL fallback.
+		if s.maxMemoryMB > 0 {
+			const heapTriggerFactor = 1.15
+			highWatermark := int64(s.maxMemoryMB) * 1048576
+			heapMB := s.estimatedMemoryMB()
+			if tracked > highWatermark || heapMB > float64(s.maxMemoryMB)*heapTriggerFactor {
+				log.Printf("[store] background loader: memory budget reached (tracked ~%.0fMB, heap ~%.0fMB, budget %dMB) — stopping history fill at oldestLoaded=%s; older data served via SQL fallback",
+					trackedBytesToMB(tracked), heapMB, s.maxMemoryMB, oldest)
+				break
+			}
 		}
 		chunkEnd, err := time.Parse(time.RFC3339, oldest)
 		if err != nil {
@@ -1263,6 +1285,30 @@ func pathLen(pathJSON string) int {
 // indexByNode indexes a transmission under all pubkeys found in its decoded
 // JSON. Resolved path pubkeys are handled separately via the decode-window.
 // Returns true if any genuinely new node was discovered.
+// indexByChannel adds a type-5 CHAN transmission to byChannel (channel hash →
+// txs). Pointer index — no payload is copied, so the cost is one slice entry per
+// type-5 message (comparable to byNode). Parses only the minimal {type,channel}
+// fields and does not cache the full decoded map. Key mirrors GetChannelMessages
+// exactly: empty channel → "unknown"; only Type=="CHAN" is indexed. Caller holds
+// s.mu.Lock().
+func (s *PacketStore) indexByChannel(tx *StoreTx) {
+	if tx.PayloadType == nil || *tx.PayloadType != 5 || tx.DecodedJSON == "" {
+		return
+	}
+	var d struct {
+		Type    string `json:"type"`
+		Channel string `json:"channel"`
+	}
+	if json.Unmarshal([]byte(tx.DecodedJSON), &d) != nil || d.Type != "CHAN" {
+		return
+	}
+	ch := d.Channel
+	if ch == "" {
+		ch = "unknown"
+	}
+	s.byChannel[ch] = append(s.byChannel[ch], tx)
+}
+
 func (s *PacketStore) indexByNode(tx *StoreTx) bool {
 	// Track which pubkeys have been indexed for this packet to avoid duplicates.
 	indexed := make(map[string]bool)
@@ -1998,7 +2044,21 @@ func (s *PacketStore) GetObservationsForHash(hash string) []map[string]interface
 }
 
 // GetTimestamps returns transmission first_seen timestamps after since, in ASC order.
-func (s *PacketStore) GetTimestamps(since string) []string {
+// TimestampHistogram is a compact density representation of packet arrival
+// times: counts per fixed-width absolute-clock bin. The client re-bins it into
+// its sliding timeline window, avoiding shipping every raw timestamp.
+type TimestampHistogram struct {
+	Base   int64 `json:"base"`   // epoch ms of the first bin's start (absolute clock, not fetch time)
+	Step   int64 `json:"step"`   // bin width in ms
+	Counts []int `json:"counts"` // packet count per bin; bin i covers [base+i*step, base+(i+1)*step)
+}
+
+// timestampHistogramStepMs is the bin width. 1 minute is fine resolution for
+// the live timeline (smallest scope is 1h → 60 bins); finer detail for recent
+// packets comes from merging the live WS buffer client-side at full resolution.
+const timestampHistogramStepMs int64 = 60000
+
+func (s *PacketStore) GetTimestampHistogram(since string) TimestampHistogram {
 	// Snapshot the slice header under a brief RLock (O(1)). Elements are
 	// *StoreTx pointers that are never mutated after ingest, so reading them
 	// outside the lock is safe — same pattern as GetAnalyticsSubpathsBulk's
@@ -2008,20 +2068,34 @@ func (s *PacketStore) GetTimestamps(since string) []string {
 	snap := s.packets
 	s.mu.RUnlock()
 
-	// packets sorted oldest-first — scan from tail until we reach items older than since
-	var result []string
-	for i := len(snap) - 1; i >= 0; i-- {
-		tx := snap[i]
-		if tx.FirstSeen <= since {
-			break
+	// packets are sorted oldest-first by FirstSeen (ISO-8601 UTC, so lexical
+	// order == chronological order). Binary-search the first one newer than
+	// `since`, then scan forward; bins are then monotonically non-decreasing
+	// so we can fill the counts slice in one pass without a map.
+	lo := sort.Search(len(snap), func(i int) bool { return snap[i].FirstSeen > since })
+
+	var base int64
+	var counts []int
+	for i := lo; i < len(snap); i++ {
+		t, err := time.Parse(time.RFC3339, snap[i].FirstSeen)
+		if err != nil {
+			continue
 		}
-		result = append(result, tx.FirstSeen)
+		bin := t.UnixMilli() / timestampHistogramStepMs
+		if counts == nil {
+			base = bin
+			counts = []int{0}
+		}
+		idx := int(bin - base)
+		for idx >= len(counts) {
+			counts = append(counts, 0)
+		}
+		counts[idx]++
 	}
-	// result is currently newest-first; reverse to return ASC order
-	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
-		result[i], result[j] = result[j], result[i]
+	if counts == nil {
+		return TimestampHistogram{Step: timestampHistogramStepMs, Counts: []int{}}
 	}
-	return result
+	return TimestampHistogram{Base: base * timestampHistogramStepMs, Step: timestampHistogramStepMs, Counts: counts}
 }
 
 // QueryMultiNodePackets filters packets matching any of the given pubkeys.
@@ -2276,6 +2350,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 				// so GetChannelMessages reverse iteration stays correct
 				s.byPayloadType[pt] = append(s.byPayloadType[pt], tx)
 			}
+			s.indexByChannel(tx)
 			s.trackAdvertPubkey(tx)
 			s.trackedBytes += estimateStoreTxBytes(tx)
 			atomic.AddInt64(&s.insertCount, 1)
@@ -2377,13 +2452,13 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 
 	// Incrementally update precomputed subpath index with new transmissions
 	for _, tx := range broadcastTxs {
-		if addTxToSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
+		if addTxToSubpathIndex(s.spIndex, tx) {
 			s.spTotalPaths++
 		}
 		addTxToPathHopIndex(s.byPathHop, tx)
 	}
 	if len(broadcastTxs) > 0 {
-		s.refreshSpIndexSnap()
+		s.maybeRefreshSpIndexSnap()
 	}
 	if len(broadcastTxs) > 0 {
 		s.invalidateRelayStatsCache()
@@ -2772,7 +2847,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 				// Temporarily set parsedPath to old hops for removal.
 				saved, savedFlag := tx.parsedPath, tx.pathParsed
 				tx.parsedPath, tx.pathParsed = oldHops, true
-				if removeTxFromSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
+				if removeTxFromSubpathIndex(s.spIndex, tx) {
 					s.spTotalPaths--
 				}
 				tx.parsedPath, tx.pathParsed = saved, savedFlag
@@ -2787,7 +2862,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 			}
 			// pickBestObservation already set pathParsed=false so
 			// addTxToSubpathIndex will re-parse the new path.
-			if addTxToSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
+			if addTxToSubpathIndex(s.spIndex, tx) {
 				s.spTotalPaths++
 			}
 			addTxToPathHopIndex(s.byPathHop, tx)
@@ -2796,7 +2871,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		}
 	}
 	if pathHopMutated {
-		s.refreshSpIndexSnap()
+		s.maybeRefreshSpIndexSnap()
 		s.invalidateRelayStatsCache()
 	}
 
@@ -3699,7 +3774,7 @@ func removeTxFromSlice(idx map[string][]*StoreTx, key string, tx *StoreTx) {
 // usage and independent of GC state.
 //
 // Issue #743: Previous estimates missed major per-packet allocations:
-// - spTxIndex: O(path²) entries per tx (50-150MB at scale)
+// - spIndex: O(path²) subpath entries per tx (50-150MB at scale)
 // - Per-tx maps: obsKeys, observerSet (~11MB at scale)
 // - byPathHop index entries (20-40MB at scale)
 // Note: ResolvedPath per-obs overhead eliminated by #800 refactor.
@@ -3716,12 +3791,12 @@ const (
 	// Per path hop: byPathHop index entry (pointer + map bucket)
 	perPathHopBytes = 50
 
-	// Per subpath entry in spTxIndex: string key + slice append + pointer
+	// Per subpath entry in spIndex: string key + int count + map bucket overhead
 	perSubpathEntryBytes = 40
 )
 
 // estimateStoreTxBytes returns the estimated memory cost of a StoreTx (excluding observations).
-// Includes per-tx maps (obsKeys, observerSet), byPathHop entries, and spTxIndex subpath entries.
+// Includes per-tx maps (obsKeys, observerSet), byPathHop entries, and spIndex subpath entries.
 func estimateStoreTxBytes(tx *StoreTx) int64 {
 	base := int64(storeTxBaseBytes)
 	base += int64(len(tx.RawHex) + len(tx.Hash) + len(tx.DecodedJSON) + len(tx.PathJSON))
@@ -3734,7 +3809,7 @@ func estimateStoreTxBytes(tx *StoreTx) int64 {
 	hops := int64(len(txGetParsedPath(tx)))
 	base += hops * perPathHopBytes
 
-	// spTxIndex: O(path²) subpath combinations
+	// spIndex: O(path²) subpath combinations
 	if hops > 1 {
 		subpaths := hops * (hops - 1) / 2
 		base += subpaths * perSubpathEntryBytes
@@ -4035,6 +4110,7 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string, maxChunk int)
 	affectedObservers := make(map[string]struct{})
 	affectedPayloadTypes := make(map[int]struct{})
 	affectedNodes := make(map[string]struct{})
+	affectedChannels := make(map[string]struct{})
 
 	// First pass: remove from primary indexes (byHash, byTxID, byObsID),
 	// collect IDs for batch secondary index cleanup, and handle non-index work
@@ -4065,6 +4141,17 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string, maxChunk int)
 		if tx.DecodedJSON != "" {
 			var decoded map[string]interface{}
 			if json.Unmarshal([]byte(tx.DecodedJSON), &decoded) == nil {
+				// Collect affected channel keys (mirror indexByChannel) from the
+				// same decode pass, so byChannel can be batch-pruned below.
+				if tx.PayloadType != nil && *tx.PayloadType == 5 {
+					if t, _ := decoded["type"].(string); t == "CHAN" {
+						ch, _ := decoded["channel"].(string)
+						if ch == "" {
+							ch = "unknown"
+						}
+						affectedChannels[ch] = struct{}{}
+					}
+				}
 				for _, field := range []string{"pubKey", "destPubKey", "srcPubKey"} {
 					if v, ok := decoded[field].(string); ok && v != "" {
 						if hashes, ok := s.nodeHashes[v]; ok {
@@ -4103,11 +4190,11 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string, maxChunk int)
 		s.removeFromResolvedPubkeyIndex(tx.ID)
 
 		// Remove from subpath index
-		removeTxFromSubpathIndexFull(s.spIndex, s.spTxIndex, tx)
+		removeTxFromSubpathIndex(s.spIndex, tx)
 		// Remove from path-hop index
 		removeTxFromPathHopIndex(s.byPathHop, tx)
 	}
-	s.refreshSpIndexSnap()
+	s.maybeRefreshSpIndexSnap()
 	s.invalidateRelayStatsCache()
 
 	// Batch-remove from byObserver: single pass per affected observer slice
@@ -4155,6 +4242,22 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string, maxChunk int)
 			delete(s.byNode, nodeKey)
 		} else {
 			s.byNode[nodeKey] = filtered
+		}
+	}
+
+	// Batch-remove from byChannel: single pass per affected channel slice
+	for ch := range affectedChannels {
+		chList := s.byChannel[ch]
+		filtered := chList[:0]
+		for _, t := range chList {
+			if _, evicted := evictedTxIDs[t.ID]; !evicted {
+				filtered = append(filtered, t)
+			}
+		}
+		if len(filtered) == 0 {
+			delete(s.byChannel, ch)
+		} else {
+			s.byChannel[ch] = filtered
 		}
 	}
 

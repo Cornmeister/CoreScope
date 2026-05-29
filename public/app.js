@@ -825,7 +825,7 @@ window.connectWS = connectWS;
    defines an equivalent canonical escaper; both escape the same characters. */
 function escapeHtml(s) {
   if (s == null) return '';
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
 /* Global debounce */
@@ -860,14 +860,71 @@ const pages = {};
 function registerPage(name, mod) { pages[name] = mod; }
 
 // --- Lazy-loaded page bundles ---
-// Pages that aren't on the critical path of typical sessions (Audio Lab,
-// for now) get their scripts dynamically appended on first navigation
-// instead of loaded eagerly from index.html. Saves ~80 KB compressed off
-// every page load that doesn't visit them.
+// Every route module except the default `home` page is loaded on first
+// navigation instead of eagerly from index.html. index.html ships only the
+// core bootstrap (router, nav, home, shared helpers) plus base Leaflet (home
+// renders mini-maps). The ~1.7 MB of route-specific JS (Chart, packets,
+// nodes, channels, analytics, live, …) is fetched per route on demand.
 //
-// Scripts MUST be listed in execution order: dependencies (the engine)
-// first, then plug-ins (voices), then the page that consumes them.
+// Each list MUST be in execution order: dependencies first, the page module
+// (which calls registerPage) last. Shared deps (Leaflet plugins, Chart, the
+// crypto pair, filters) are listed in every bundle that needs them and are
+// deduped by src in _loadScriptOnce — already-loaded scripts (incl. the eager
+// core) are skipped, so a shared dep is fetched at most once per session.
 const lazyPageScripts = {
+  'live': [
+    'vendor/leaflet-1.9.4.js', 'vendor/leaflet.markercluster.js', 'vendor/leaflet-heat.js',
+    'packet-helpers.js', 'region-filter.js', 'area-filter.js', 'hop-resolver.js',
+    'channel-colors.js', 'channel-color-picker.js', 'map-overlays.js',
+    'geo-filter-overlay.js', 'drag-manager.js', 'live.js',
+  ],
+  'map': [
+    'vendor/leaflet-1.9.4.js', 'vendor/leaflet.markercluster.js', 'vendor/leaflet-heat.js',
+    'area-filter.js', 'map-overlays.js', 'geo-filter-overlay.js', 'map.js',
+  ],
+  'packets': [
+    'packet-helpers.js', 'region-filter.js', 'area-filter.js', 'hop-resolver.js',
+    'hop-display.js', 'table-sort.js', 'packet-filter.js', 'filter-ux.js',
+    'channel-colors.js', 'channel-color-picker.js', 'packets.js',
+  ],
+  'nodes': [
+    'vendor/leaflet-1.9.4.js', 'vendor/leaflet.markercluster.js', 'vendor/leaflet-heat.js',
+    'vendor/qrcode.js', 'region-filter.js', 'area-filter.js', 'hop-display.js',
+    'table-sort.js', 'nodes.js',
+  ],
+  'node-analytics': ['vendor/chart-4.umd.min.js', 'node-analytics.js'],
+  'channels': [
+    'vendor/qrcode.js', 'vendor/aes-ecb.js', 'vendor/sha256-hmac.js', 'region-filter.js',
+    'channel-decrypt.js', 'channel-qr.js', 'channel-colors.js', 'channel-color-picker.js',
+    'channels.js',
+  ],
+  'analytics': [
+    'vendor/leaflet-1.9.4.js', 'vendor/leaflet.markercluster.js', 'vendor/leaflet-heat.js',
+    'vendor/chart-4.umd.min.js', 'vendor/aes-ecb.js', 'vendor/sha256-hmac.js',
+    'region-filter.js', 'area-filter.js', 'hop-resolver.js', 'channel-decrypt.js',
+    'analytics.js',
+  ],
+  'observers': ['region-filter.js', 'observers.js'],
+  'observer-detail': ['vendor/chart-4.umd.min.js', 'observer-detail.js'],
+  'compare': ['compare.js'],
+  'traces': ['traces.js'],
+  'path-inspector': ['path-inspector.js'],
+  'los': [
+    'vendor/leaflet-1.9.4.js', 'vendor/leaflet.markercluster.js', 'vendor/leaflet-heat.js',
+    'vendor/chart-4.umd.min.js', 'los.js',
+  ],
+  'rf-coverage': [
+    'vendor/leaflet-1.9.4.js', 'vendor/leaflet.markercluster.js', 'vendor/leaflet-heat.js',
+    'rf-coverage.js',
+  ],
+  'mc-keygen': ['mc-keygen.js'],
+  'perf': ['vendor/chart-4.umd.min.js', 'perf.js'],
+  // packet/<id> standalone detail view is registered inside packets.js.
+  'packet-detail': [
+    'packet-helpers.js', 'region-filter.js', 'area-filter.js', 'hop-resolver.js',
+    'hop-display.js', 'table-sort.js', 'packet-filter.js', 'filter-ux.js',
+    'channel-colors.js', 'channel-color-picker.js', 'packets.js',
+  ],
   'audio-lab': [
     'audio.js',
     'audio-v1-constellation.js',
@@ -880,26 +937,42 @@ const lazyPageScripts = {
     'audio-lab.js',
   ],
 };
+
+// Tracks every script src already in the page so shared deps are fetched once.
+// Seeded from the eager core scripts present in the DOM at parse time (defer
+// scripts run after the full document is parsed, so all <script> tags exist).
+const _loadedScriptSrcs = (function () {
+  const set = new Set();
+  document.querySelectorAll('script[src]').forEach(function (s) {
+    const src = (s.getAttribute('src') || '').split('?')[0];
+    if (src) set.add(src);
+  });
+  return set;
+})();
+
+function _loadScriptOnce(src) {
+  const key = src.split('?')[0];
+  if (_loadedScriptSrcs.has(key)) return Promise.resolve();
+  return new Promise(function (resolve) {
+    const s = document.createElement('script');
+    s.src = src;
+    s.async = false; // preserve insertion/execution order across the bundle
+    s.onload = function () { _loadedScriptSrcs.add(key); resolve(); };
+    s.onerror = function () { console.error('[lazy] failed to load', src); resolve(); };
+    document.head.appendChild(s);
+  });
+}
+
 const _lazyPageLoaded = new Set();
 function loadLazyPageScripts(name) {
   if (_lazyPageLoaded.has(name)) return Promise.resolve();
   const list = lazyPageScripts[name];
-  if (!list || !list.length) return Promise.resolve();
-  // Load sequentially so the engine is ready before its voice modules
-  // register, and the voice modules are present before audio-lab tries
-  // to enumerate them.
+  if (!list || !list.length) { _lazyPageLoaded.add(name); return Promise.resolve(); }
+  // Load sequentially so each dependency is ready (and has registered its
+  // global) before the next script — and the page module — executes.
   let chain = Promise.resolve();
   list.forEach(function (src) {
-    chain = chain.then(function () {
-      return new Promise(function (resolve) {
-        const s = document.createElement('script');
-        s.src = src;
-        s.async = false;
-        s.onload = function () { resolve(); };
-        s.onerror = function () { console.error('[lazy] failed to load', src); resolve(); };
-        document.head.appendChild(s);
-      });
-    });
+    chain = chain.then(function () { return _loadScriptOnce(src); });
   });
   return chain.then(function () { _lazyPageLoaded.add(name); });
 }

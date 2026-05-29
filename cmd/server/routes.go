@@ -149,8 +149,9 @@ type Server struct {
 	// Per-key bytes-payload caches. Same singleflight semantics as
 	// singleKeyByteCache but keyed by a string so the same endpoint can
 	// cache distinct query-parameter combinations independently.
-	nodesListCache perKeyByteCache
-	channelsCache  perKeyByteCache
+	nodesListCache  perKeyByteCache
+	channelsCache   perKeyByteCache
+	bulkHealthCache perKeyByteCache
 }
 
 // perKeyByteCache is the multi-key version of singleKeyByteCache — separate
@@ -674,6 +675,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/analytics/roles", s.handleAnalyticsRoles).Methods("GET")
 	r.HandleFunc("/api/analytics/rf", s.handleAnalyticsRF).Methods("GET")
 	r.HandleFunc("/api/analytics/topology", s.handleAnalyticsTopology).Methods("GET")
+	r.HandleFunc("/api/analytics/topology/reach", s.handleAnalyticsTopologyReach).Methods("GET")
 	r.HandleFunc("/api/analytics/channels", s.handleAnalyticsChannels).Methods("GET")
 	r.HandleFunc("/api/analytics/distance", s.handleAnalyticsDistance).Methods("GET")
 	r.HandleFunc("/api/analytics/hash-sizes", s.handleAnalyticsHashSizes).Methods("GET")
@@ -705,7 +707,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 
 func (s *Server) backfillStatusMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.store != nil && s.store.backfillComplete.Load() {
+		if s.store != nil && s.store.backgroundLoadDone.Load() {
 			w.Header().Set("X-CoreScope-Status", "ready")
 		} else {
 			w.Header().Set("X-CoreScope-Status", "backfilling")
@@ -1269,16 +1271,17 @@ func (s *Server) buildStatsResponse() (*StatsResponse, error) {
 	}
 	counts := s.db.GetRoleCounts()
 
-	// Compute backfill progress
-	backfilling := s.store != nil && !s.store.backfillComplete.Load()
+	// Compute background-load (hot startup) progress. backgroundLoadProgress
+	// is 0–100; expose it here as a 0–1 fraction.
+	backfilling := s.store != nil && !s.store.backgroundLoadDone.Load()
 	var backfillProgress float64
-	if backfilling && s.store != nil && s.store.backfillTotal.Load() > 0 {
-		backfillProgress = float64(s.store.backfillProcessed.Load()) / float64(s.store.backfillTotal.Load())
+	if !backfilling {
+		backfillProgress = 1
+	} else if s.store != nil {
+		backfillProgress = float64(s.store.backgroundLoadProgress.Load()) / 100
 		if backfillProgress > 1 {
 			backfillProgress = 1
 		}
-	} else if !backfilling {
-		backfillProgress = 1
 	}
 
 	// Memory accounting (#832). storeDataMB is the in-store packet byte
@@ -1454,17 +1457,19 @@ func (s *Server) handlePerf(w http.ResponseWriter, r *http.Request) {
 		GoRuntime: func() *GoRuntimeStats {
 			ms := s.getMemStats()
 			return &GoRuntimeStats{
-				Goroutines:   runtime.NumGoroutine(),
-				NumGC:        ms.NumGC,
-				PauseTotalMs: float64(ms.PauseTotalNs) / 1e6,
-				LastPauseMs:  float64(ms.PauseNs[(ms.NumGC+255)%256]) / 1e6,
-				HeapAllocMB:  float64(ms.HeapAlloc) / 1024 / 1024,
-				HeapSysMB:    float64(ms.HeapSys) / 1024 / 1024,
-				HeapInuseMB:  float64(ms.HeapInuse) / 1024 / 1024,
-				HeapIdleMB:   float64(ms.HeapIdle) / 1024 / 1024,
-				NumCPU:       runtime.NumCPU(),
-				CpuPercent:   s.getCPUPercent(),
-				TotalSysMB:   float64(ms.Sys) / 1024 / 1024,
+				Goroutines:         runtime.NumGoroutine(),
+				NumGC:              ms.NumGC,
+				PauseTotalMs:       float64(ms.PauseTotalNs) / 1e6,
+				LastPauseMs:        float64(ms.PauseNs[(ms.NumGC+255)%256]) / 1e6,
+				HeapAllocMB:        float64(ms.HeapAlloc) / 1024 / 1024,
+				HeapSysMB:          float64(ms.HeapSys) / 1024 / 1024,
+				HeapInuseMB:        float64(ms.HeapInuse) / 1024 / 1024,
+				HeapIdleMB:         float64(ms.HeapIdle) / 1024 / 1024,
+				NumCPU:             runtime.NumCPU(),
+				CpuPercent:         s.getCPUPercent(),
+				TotalSysMB:         float64(ms.Sys) / 1024 / 1024,
+				HostMemTotalMB:     float64(hostMemTotal()) / 1024 / 1024,
+				HostMemAvailableMB: float64(hostMemAvailable()) / 1024 / 1024,
 			}
 		}(),
 	}
@@ -1791,10 +1796,10 @@ func (s *Server) handlePacketTimestamps(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if s.store != nil {
-		writeJSON(w, s.store.GetTimestamps(since))
+		writeJSON(w, s.store.GetTimestampHistogram(since))
 		return
 	}
-	writeJSON(w, []string{})
+	writeJSON(w, TimestampHistogram{Step: timestampHistogramStepMs, Counts: []int{}})
 }
 
 var hashPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
@@ -2079,6 +2084,11 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) buildNodesResponse(r *http.Request) ([]byte, error) {
 	q := r.URL.Query()
+	// fields=map → the Map / area-map views only plot markers and read ~9 of
+	// the ~24 node fields. Return the slim set and skip the expensive
+	// relay/usefulness/bridge enrichment, cutting the limit=10000 payload from
+	// ~323 KB to ~100 KB gzip and the per-node store work.
+	slim := q.Get("fields") == "map"
 	// /api/nodes accepts limits up to the node count (Map page asks for 10000
 	// to plot every node). The handlePackets clamp doesn't apply here — there
 	// is no per-node bloat concern equivalent to per-packet observations.
@@ -2109,7 +2119,7 @@ func (s *Server) buildNodesResponse(r *http.Request) ([]byte, error) {
 				break
 			}
 		}
-		if needsRelay {
+		if needsRelay && !slim {
 			relayMap = s.store.GetRepeaterRelayInfoMap(relayWindow)
 			usefulMap = s.store.GetRepeaterUsefulnessScoreMap()
 		}
@@ -2193,6 +2203,19 @@ func (s *Server) buildNodesResponse(r *http.Request) ([]byte, error) {
 			}
 			nodes = filtered
 			total = len(filtered)
+		}
+	}
+	if slim {
+		// Keep only the fields the map markers actually read.
+		for _, n := range nodes {
+			for k := range n {
+				switch k {
+				case "public_key", "name", "role", "lat", "lon", "last_seen", "last_heard",
+					"hash_size", "advert_count", "multi_byte_status", "multi_byte_evidence":
+				default:
+					delete(n, k)
+				}
+			}
 		}
 	}
 	return json.Marshal(NodeListResponse{Nodes: nodes, Total: total, Counts: counts})
@@ -2341,14 +2364,26 @@ func (s *Server) handleNodeHealth(w http.ResponseWriter, r *http.Request) {
 	writeError(w, 404, "Not found")
 }
 
+// bulkHealthCacheTTL caps how often /api/nodes/bulk-health runs its expensive
+// per-node packet scan (under the store read lock). Without it, every poll
+// re-scanned up to 200 nodes × their packets, starving ingest writers.
+const bulkHealthCacheTTL = 30 * time.Second
+const bulkHealthCacheHeader = "private, max-age=30, stale-while-revalidate=30"
+
 func (s *Server) handleBulkHealth(w http.ResponseWriter, r *http.Request) {
 	limit := clampLimit(r, 50)
 	if limit > 200 {
 		limit = 200
 	}
 
-	if s.store != nil {
-		region := r.URL.Query().Get("region")
+	if s.store == nil {
+		writeJSON(w, []BulkHealthEntry{})
+		return
+	}
+
+	region := r.URL.Query().Get("region")
+	cacheKey := fmt.Sprintf("l=%d&region=%s", limit, region)
+	s.bulkHealthCache.serve(w, r, cacheKey, bulkHealthCacheTTL, "handleBulkHealth GetBulkHealth", serveOpts{CacheControl: bulkHealthCacheHeader}, func() ([]byte, error) {
 		results := s.store.GetBulkHealth(limit, region)
 		// Filter blacklisted nodes
 		if len(s.cfg.NodeBlacklist) > 0 {
@@ -2358,14 +2393,10 @@ func (s *Server) handleBulkHealth(w http.ResponseWriter, r *http.Request) {
 					filtered = append(filtered, entry)
 				}
 			}
-			writeJSON(w, filtered)
-			return
+			results = filtered
 		}
-		writeJSON(w, results)
-		return
-	}
-
-	writeJSON(w, []BulkHealthEntry{})
+		return json.Marshal(results)
+	})
 }
 
 func (s *Server) handleNetworkStatus(w http.ResponseWriter, r *http.Request) {
@@ -2784,6 +2815,12 @@ func (s *Server) handleAnalyticsTopology(w http.ResponseWriter, r *http.Request)
 		if s.cfg != nil && len(s.cfg.NodeBlacklist) > 0 {
 			data = s.filterBlacklistedFromTopology(data)
 		}
+		// reach=0: omit the large perObserverReach map (~4.5MB / 1.3MB gzip).
+		// The client lazy-loads it per observer via /api/analytics/topology/reach,
+		// shrinking the base topology payload by ~95%.
+		if r.URL.Query().Get("reach") == "0" {
+			data["perObserverReach"] = map[string]interface{}{}
+		}
 		writeJSON(w, data)
 		return
 	}
@@ -2797,6 +2834,36 @@ func (s *Server) handleAnalyticsTopology(w http.ResponseWriter, r *http.Request)
 		MultiObsNodes:    []MultiObsNode{},
 		BestPathList:     []BestPathEntry{},
 	})
+}
+
+// handleAnalyticsTopologyReach serves one observer's reachability rings (or the
+// full map when observer=__all) split out of the main topology payload so that
+// payload stays small. Reuses the (store-cached) topology computation.
+func (s *Server) handleAnalyticsTopologyReach(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeJSON(w, map[string]interface{}{})
+		return
+	}
+	region := r.URL.Query().Get("region")
+	window := ParseTimeWindow(r)
+	data := s.store.GetAnalyticsTopologyWithWindow(region, window)
+	if s.cfg != nil && len(s.cfg.NodeBlacklist) > 0 {
+		data = s.filterBlacklistedFromTopology(data)
+	}
+	reach, _ := data["perObserverReach"].(map[string]interface{})
+	if reach == nil {
+		reach = map[string]interface{}{}
+	}
+	obs := r.URL.Query().Get("observer")
+	if obs == "" || obs == "__all" {
+		writeJSON(w, reach) // full map for the "All Observers" tab
+		return
+	}
+	out := map[string]interface{}{}
+	if v, ok := reach[obs]; ok {
+		out[obs] = v
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) handleAnalyticsChannels(w http.ResponseWriter, r *http.Request) {
@@ -3300,13 +3367,9 @@ func (s *Server) handleObserverDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Compute packetsLastHour from observations
+	// Compute packetsLastHour from observations for THIS observer only.
 	// observations.timestamp is INTEGER (Unix epoch) — use integer cutoff.
-	pktCounts := s.db.GetObserverPacketCounts(time.Now().Add(-1 * time.Hour).Unix())
-	plh := 0
-	if c, ok := pktCounts[id]; ok {
-		plh = c
-	}
+	plh := s.db.GetObserverPacketCount(id, time.Now().Add(-1*time.Hour).Unix())
 
 	ingestSources, _ := s.db.GetObserverSources(id)
 

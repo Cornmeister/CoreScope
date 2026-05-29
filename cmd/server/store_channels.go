@@ -295,7 +295,10 @@ func (s *PacketStore) GetChannelMessages(channelHash string, limit, offset int, 
 		PathLen         int         `json:"path_len"`
 	}
 
-	grpTxts := s.byPayloadType[5]
+	// byChannel is pre-filtered to this channel's type-5 CHAN packets
+	// (oldest-first, same order as byPayloadType[5]), so we avoid scanning and
+	// JSON-decoding every type-5 packet just to discard other channels.
+	grpTxts := s.byChannel[channelHash]
 	for _, tx := range grpTxts {
 		if regionObs != nil {
 			match := false

@@ -169,7 +169,7 @@
     speed: 1,            // replay speed: 1, 2, 4, 8
     replayTimer: null,
     timelineScope: 3600000, // 1h default ms
-    timelineTimestamps: [], // historical timestamps from DB for sparkline
+    timelineHistogram: null, // {base, step, counts} density histogram from DB for sparkline
     timelineFetchedScope: 0, // last fetched scope to avoid redundant fetches
     replayGen: 0,            // generation counter — incremented on each replay/rewind to discard stale async results
   };
@@ -937,8 +937,9 @@
     try {
       const resp = await fetch(`/api/packets/timestamps?since=${encodeURIComponent(since)}`);
       if (resp.ok) {
-        const timestamps = await resp.json(); // array of ISO strings
-        VCR.timelineTimestamps = timestamps.map(t => new Date(t).getTime());
+        // Compact density histogram {base, step, counts} on absolute clock bins;
+        // re-binned client-side into the sliding window in updateTimelineNow.
+        VCR.timelineHistogram = await resp.json();
         VCR.timelineFetchedScope = scopeMs;
       }
     } catch(e) { /* ignore */ }
@@ -971,28 +972,30 @@
     const scopeMs = VCR.timelineScope;
     const startTs = now - scopeMs;
 
-    // Merge historical DB timestamps with live buffer timestamps
-    const allTimestamps = [];
-    VCR.timelineTimestamps.forEach(ts => {
-      if (ts >= startTs) allTimestamps.push(ts);
-    });
-    VCR.buffer.forEach(entry => {
-      if (entry.ts >= startTs) allTimestamps.push(entry.ts);
-    });
-
-    if (allTimestamps.length === 0) return;
-
-    // Draw density sparkline
+    // Re-bin the DB histogram + live buffer into the sliding 100-bucket window.
+    // The histogram uses absolute-clock bins (independent of fetch time), so as
+    // `now` advances each render the same data re-bins correctly into the moving
+    // window. Recent packets come from the live buffer at full resolution.
     const buckets = 100;
     const counts = new Array(buckets).fill(0);
     let maxCount = 0;
-    allTimestamps.forEach(ts => {
+    const add = (ts, n) => {
+      if (ts < startTs) return;
       const bucket = Math.floor((ts - startTs) / scopeMs * buckets);
       if (bucket >= 0 && bucket < buckets) {
-        counts[bucket]++;
+        counts[bucket] += n;
         if (counts[bucket] > maxCount) maxCount = counts[bucket];
       }
-    });
+    };
+
+    const hist = VCR.timelineHistogram;
+    if (hist && hist.counts) {
+      for (let i = 0; i < hist.counts.length; i++) {
+        const c = hist.counts[i];
+        if (c) add(hist.base + i * hist.step, c);
+      }
+    }
+    VCR.buffer.forEach(entry => add(entry.ts, 1));
 
     if (maxCount === 0) return;
 
@@ -1241,7 +1244,7 @@
     let mapCenter = [37.45, -122.0];
     let mapZoom = 9;
     try {
-      const mapCfg = await (await fetch('/api/config/map')).json();
+      const mapCfg = await api('/config/map', { ttl: 3600000 });
       if (Array.isArray(mapCfg.center) && mapCfg.center.length === 2) mapCenter = mapCfg.center;
       if (typeof mapCfg.zoom === 'number') mapZoom = mapCfg.zoom;
     } catch {}
@@ -1415,7 +1418,7 @@
       // (cmd/server/types.go ObserverListResponse) — NOT a top-level array.
       // Bug #1136: previously parsed as array → map empty → region filter
       // dropped every packet.
-      fetch('/api/observers').then(function(r) { return r.json(); }).then(function(data) {
+      api('/observers', { ttl: 120000 }).then(function(data) {
         setObserverIataMap(buildObserverIataMap(data));
       }).catch(function() { /* leave map empty; filter will hide all when active */ });
       RegionFilter.init(rfEl, { dropdown: true });
@@ -2105,8 +2108,15 @@
 
     // Fetch historical timestamps for timeline, then start refresh
     fetchTimelineTimestamps().then(() => updateTimeline());
+    // Redraw every 30s so the window slides while idle. The live WS buffer
+    // already supplies new packets (merged in updateTimelineNow), so we do NOT
+    // re-pull the full historical timestamp set every tick — the old code reset
+    // timelineFetchedScope each 30s, defeating fetchTimelineTimestamps' own
+    // dedup guard and hammering the most expensive endpoint. Reconcile the
+    // historical set only every ~5 min (every 10th tick).
+    let _tlRefreshTick = 0;
     _timelineRefreshInterval = setInterval(() => {
-      VCR.timelineFetchedScope = 0; // force refetch
+      if (++_tlRefreshTick % 10 === 0) VCR.timelineFetchedScope = 0;
       fetchTimelineTimestamps().then(() => updateTimeline());
     }, 30000);
 

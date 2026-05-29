@@ -186,7 +186,7 @@
     let defaultCenter = [37.6, -122.1];
     let defaultZoom = 9;
     try {
-      const mapCfg = await (await fetch('/api/config/map')).json();
+      const mapCfg = await api('/config/map', { ttl: 3600000 });
       if (Array.isArray(mapCfg.center) && mapCfg.center.length === 2) defaultCenter = mapCfg.center;
       if (typeof mapCfg.zoom === 'number') defaultZoom = mapCfg.zoom;
     } catch {}
@@ -572,7 +572,7 @@
       try { REGION_NAMES = await api('/config/regions', { ttl: 3600 }); } catch {}
 
       const aqs = AreaFilter.areaQueryString();
-      const data = await api(`/nodes?limit=10000&lastHeard=${filters.lastHeard}${aqs}`, { ttl: CLIENT_TTL.nodeList });
+      const data = await api(`/nodes?limit=10000&fields=map&lastHeard=${filters.lastHeard}${aqs}`, { ttl: CLIENT_TTL.nodeList });
       nodes = data.nodes || [];
 
       // Load observers for jump buttons + map markers
