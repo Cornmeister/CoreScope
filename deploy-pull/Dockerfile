@@ -2,4 +2,4 @@
 # (built off-host by .github/workflows/docker-publish.yml) instead of
 # compiling Go + frontend on the prod host. Point the Coolify app's
 # base_directory at /deploy-pull so its "build" is just this image pull.
-FROM ghcr.io/cornmeister/corescope:sha-7198cba
+FROM ghcr.io/cornmeister/corescope:sha-8e9d2f1
