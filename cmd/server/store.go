@@ -4126,6 +4126,14 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string, maxChunk int)
 		}
 	}
 
+	// Count-based cap: bound in-memory packet COUNT independently of the byte
+	// budget. The per-packet index heap (subpath/neighbor/distance/byChannel)
+	// scales with count, so thin live packets can balloon heap while staying
+	// under the byte watermark. This is the production eviction path (RunEviction
+	// → evictStaleInternal); evictionCandidateTxIDs applies the same cap when it
+	// pre-decides candidates.
+	cutoffIdx = s.countCapCutoff(cutoffIdx)
+
 	if cutoffIdx == 0 {
 		return 0
 	}
