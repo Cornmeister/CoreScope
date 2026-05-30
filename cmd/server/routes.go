@@ -3255,14 +3255,15 @@ func (s *Server) handleChannelMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 // observersListCacheTTL caps how often /api/observers re-scans the DB.
-// Observer metadata is operator-managed and the only fast-moving field is
-// PacketsLastHour (a 1-hour rolling count) — 5 minutes of staleness on a
-// 60-minute window is invisible. The Observers page bursts this endpoint
-// on every inbound WS packet (observers.js debounce + force-refresh); with
-// ETag/304 below those bursts mostly return 304 anyway, so the TTL can be
-// generous.
-const observersListCacheTTL = 5 * time.Minute
-const observersListCacheHeader = "private, max-age=120, stale-while-revalidate=180"
+// The Observers page is meant to be LIVE — its Last Status / Last Packet columns
+// must reflect new packets — and the frontend polls every 30s (plus WS-driven
+// force-refreshes). A 5-min TTL here made the list appear frozen for minutes
+// regardless of the poll. 30s matches the poll cadence; it's a single-key byte
+// cache, so at most one DB recompute per 30s no matter how many viewers, keeping
+// host load bounded. (The expensive 24h/7d counts live behind the separate,
+// still-long observersStatsCacheTTL.)
+const observersListCacheTTL = 30 * time.Second
+const observersListCacheHeader = "private, max-age=15, stale-while-revalidate=30"
 
 func (s *Server) handleObservers(w http.ResponseWriter, r *http.Request) {
 	s.observersListCache.serve(w, r, observersListCacheTTL, "handleObservers GetObservers", serveOpts{CacheControl: observersListCacheHeader}, func() ([]byte, error) {

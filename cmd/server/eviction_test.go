@@ -212,6 +212,39 @@ func TestEvictStale_MemoryBasedEviction_UnderestimatedHeap(t *testing.T) {
 	}
 }
 
+// TestEvictStale_CountCapDrivesRealPath guards the bug where the count cap was
+// wired only into evictionCandidateTxIDs (the candidate pre-check) but NOT into
+// evictStaleInternal (the function that actually evicts, used by EvictStale /
+// RunEviction). With only maxPackets set (no retention, byte budget satisfied),
+// the real eviction path must still trim packets down toward the cap.
+func TestEvictStale_CountCapDrivesRealPath(t *testing.T) {
+	now := time.Now().UTC()
+	store := makeTestStore(100, now.Add(-1*time.Hour), 0) // all recent → no time eviction
+	store.retentionHours = 0                              // disable time-based
+	store.maxMemoryMB = 0                                 // disable byte-budget
+	store.maxPackets = 50                                 // ONLY the count cap
+
+	before := len(store.packets)
+	evicted := store.EvictStale()
+	if evicted == 0 {
+		t.Fatalf("count cap not honored in evictStaleInternal: 100 packets, cap 50, evicted 0")
+	}
+	// 25%-per-pass safety cap → evict 25 this pass.
+	if evicted != 25 {
+		t.Errorf("expected 25 evicted (25%% of 100), got %d", evicted)
+	}
+	if len(store.packets) != before-evicted {
+		t.Errorf("packets slice not trimmed: before=%d evicted=%d after=%d", before, evicted, len(store.packets))
+	}
+	// Repeated passes converge toward the cap.
+	for i := 0; i < 5 && len(store.packets) > store.maxPackets; i++ {
+		store.EvictStale()
+	}
+	if len(store.packets) > store.maxPackets {
+		t.Errorf("did not converge to cap: have %d, cap %d", len(store.packets), store.maxPackets)
+	}
+}
+
 func TestEvictStale_CleansNodeIndexes(t *testing.T) {
 	now := time.Now().UTC()
 	store := makeTestStore(10, now.Add(-48*time.Hour), 0)
@@ -253,26 +286,26 @@ func TestEvictStale_CleansResolvedPathNodeIndexes(t *testing.T) {
 	defer db.Close()
 
 	store := &PacketStore{
-		packets:       make([]*StoreTx, 0),
-		byHash:        make(map[string]*StoreTx),
-		byTxID:        make(map[int]*StoreTx),
-		byObsID:       make(map[int]*StoreObs),
-		byObserver:    make(map[string][]*StoreObs),
-		byNode:        make(map[string][]*StoreTx),
-		nodeHashes:    make(map[string]map[string]bool),
-		byPayloadType: make(map[int][]*StoreTx),
-		spIndex:       make(map[string]int),
-		distHops:      make([]distHopRecord, 0),
-		distPaths:     make([]distPathRecord, 0),
-		rfCache:       make(map[string]*cachedResult),
-		topoCache:     make(map[string]*cachedResult),
-		hashCache:     make(map[string]*cachedResult),
-		chanCache:     make(map[string]*cachedResult),
-		distCache:     make(map[string]*cachedResult),
-		subpathCache:  make(map[string]*cachedResult),
-		rfCacheTTL:    15 * time.Second,
-		retentionHours: 24,
-		db:             db,
+		packets:              make([]*StoreTx, 0),
+		byHash:               make(map[string]*StoreTx),
+		byTxID:               make(map[int]*StoreTx),
+		byObsID:              make(map[int]*StoreObs),
+		byObserver:           make(map[string][]*StoreObs),
+		byNode:               make(map[string][]*StoreTx),
+		nodeHashes:           make(map[string]map[string]bool),
+		byPayloadType:        make(map[int][]*StoreTx),
+		spIndex:              make(map[string]int),
+		distHops:             make([]distHopRecord, 0),
+		distPaths:            make([]distPathRecord, 0),
+		rfCache:              make(map[string]*cachedResult),
+		topoCache:            make(map[string]*cachedResult),
+		hashCache:            make(map[string]*cachedResult),
+		chanCache:            make(map[string]*cachedResult),
+		distCache:            make(map[string]*cachedResult),
+		subpathCache:         make(map[string]*cachedResult),
+		rfCacheTTL:           15 * time.Second,
+		retentionHours:       24,
+		db:                   db,
 		useResolvedPathIndex: true,
 	}
 	store.initResolvedPathIndex()
