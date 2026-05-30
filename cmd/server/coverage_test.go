@@ -2219,6 +2219,31 @@ func TestStoreGetTimestamps(t *testing.T) {
 	}
 }
 
+// TestGetTimestampHistogram_OutOfOrder guards against the index-out-of-range
+// [-1] panic: when packets are not chronologically monotonic (malformed/
+// out-of-order FirstSeen), a later row can fall in an earlier bin than the
+// first one. The map-based form must handle this without panicking.
+func TestGetTimestampHistogram_OutOfOrder(t *testing.T) {
+	mk := func(ts string) *StoreTx { return &StoreTx{FirstSeen: ts} }
+	s := &PacketStore{packets: []*StoreTx{
+		mk("2026-05-30T11:00:30Z"),
+		mk("2026-05-30T11:02:30Z"),
+		mk("2026-05-30T11:01:30Z"), // out of order: earlier bin after a later one
+		mk("2026-05-30T11:03:30Z"),
+	}}
+	hist := s.GetTimestampHistogram("2026-05-30T10:00:00Z") // must not panic
+	total := 0
+	for _, c := range hist.Counts {
+		total += c
+	}
+	if total != 4 {
+		t.Errorf("expected 4 packets counted, got %d (counts=%v)", total, hist.Counts)
+	}
+	if len(hist.Counts) != 4 { // bins 11:00..11:03
+		t.Errorf("expected 4 bins, got %d", len(hist.Counts))
+	}
+}
+
 // TestGetChannelsNoRegionQueryEquivalence guards the window-function rewrite of
 // the no-region GetChannels query: it must return exactly what the old
 // correlated-subquery + GROUP BY form returned (per-channel msg_count, latest
@@ -2238,7 +2263,7 @@ func TestGetChannelsNoRegionQueryEquivalence(t *testing.T) {
 		{"h3", "2026-05-01T09:00:00Z", "#beta", `{"text":"c: only","sender":"c"}`, 5},
 		{"h4", "2026-05-01T11:00:00Z", "#alpha", `{"text":"d: newest","sender":"d"}`, 5},
 		{"h5", "2026-05-01T12:00:00Z", "#beta", `{"text":"e: newest","sender":"e"}`, 5},
-		{"h6", "2026-05-01T13:00:00Z", "enc_secret", `{"text":"x"}`, 5},          // excluded: enc_
+		{"h6", "2026-05-01T13:00:00Z", "enc_secret", `{"text":"x"}`, 5},         // excluded: enc_
 		{"h7", "2026-05-01T14:00:00Z", "#alpha", `{"text":"not a channel"}`, 4}, // excluded: not type 5
 	}
 	for _, r := range rows {
