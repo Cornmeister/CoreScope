@@ -2246,6 +2246,43 @@ func TestGetTimestampHistogram_OutOfOrder(t *testing.T) {
 	}
 }
 
+// TestCountCapCutoff verifies the packet-count cap raises the eviction cutoff so
+// that at most maxPackets remain, bounded by the 25%-per-pass safety cap.
+func TestCountCapCutoff(t *testing.T) {
+	mkN := func(n int) []*StoreTx {
+		p := make([]*StoreTx, n)
+		for i := range p {
+			p[i] = &StoreTx{ID: i}
+		}
+		return p
+	}
+	// 100 packets, cap 50 → want to evict 50, but 25% safety cap → 25.
+	s := &PacketStore{packets: mkN(100), maxPackets: 50}
+	if got := s.countCapCutoff(0); got != 25 {
+		t.Errorf("over-cap with safety limit: got cutoff %d, want 25", got)
+	}
+	// 30 packets, cap 50 → within cap → no eviction.
+	s2 := &PacketStore{packets: mkN(30), maxPackets: 50}
+	if got := s2.countCapCutoff(0); got != 0 {
+		t.Errorf("within cap: got cutoff %d, want 0", got)
+	}
+	// maxPackets 0 → disabled → no-op even with many packets.
+	s3 := &PacketStore{packets: mkN(100), maxPackets: 0}
+	if got := s3.countCapCutoff(0); got != 0 {
+		t.Errorf("disabled: got cutoff %d, want 0", got)
+	}
+	// 60 packets, cap 50 → evict 10 (< 25% cap of 15) → cutoff 10.
+	s4 := &PacketStore{packets: mkN(60), maxPackets: 50}
+	if got := s4.countCapCutoff(0); got != 10 {
+		t.Errorf("small overage: got cutoff %d, want 10", got)
+	}
+	// Existing (time/mem) cutoff already higher than count cap → keep it.
+	s5 := &PacketStore{packets: mkN(60), maxPackets: 50}
+	if got := s5.countCapCutoff(20); got != 20 {
+		t.Errorf("existing higher cutoff preserved: got %d, want 20", got)
+	}
+}
+
 // TestGetChannelsNoRegionQueryEquivalence guards the window-function rewrite of
 // the no-region GetChannels query: it must return exactly what the old
 // correlated-subquery + GROUP BY form returned (per-channel msg_count, latest

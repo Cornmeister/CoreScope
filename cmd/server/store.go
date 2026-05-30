@@ -357,6 +357,7 @@ type PacketStore struct {
 	// Eviction config and stats
 	retentionHours  float64        // 0 = unlimited
 	maxMemoryMB     int            // 0 = unlimited (packet store memory budget)
+	maxPackets      int            // 0 = unlimited (hard cap on in-memory packet COUNT; bounds per-packet index heap)
 	evicted         int64          // total packets evicted
 	trackedBytes    int64          // running total of estimated packet store memory
 	memoryEstimator func() float64 // injectable for tests; nil = use runtime.ReadMemStats (stats only)
@@ -460,6 +461,7 @@ func NewPacketStore(db *DB, cfg *PacketStoreConfig, cacheTTLs ...map[string]inte
 	if cfg != nil {
 		ps.retentionHours = cfg.RetentionHours
 		ps.maxMemoryMB = cfg.MaxMemoryMB
+		ps.maxPackets = cfg.MaxPackets
 		ps.maxResolvedPubkeyIndexEntries = cfg.MaxResolvedPubkeyIndexEntries
 		if cfg.HotStartupHours > 0 {
 			h := cfg.HotStartupHours
@@ -3908,8 +3910,32 @@ func trackedBytesToMB(trackedBytes int64) float64 {
 // packets evicted.
 // evictionCandidateTxIDs determines which tx IDs would be evicted and returns them.
 // Must be called under s.mu.Lock (or RLock). Does NOT modify any state.
+// countCapCutoff raises cutoffIdx so that at most s.maxPackets remain in memory,
+// directly bounding the per-packet index heap (subpath/neighbor/distance/
+// byChannel) — which scales with packet COUNT, not bytes, so thin live packets
+// can balloon it past the byte budget. Evicts the oldest excess, respecting the
+// same 25%-per-pass safety cap as the memory path. Returns the (possibly raised)
+// cutoffIdx. No-op when maxPackets <= 0 or already within the cap.
+func (s *PacketStore) countCapCutoff(cutoffIdx int) int {
+	if s.maxPackets <= 0 || len(s.packets)-cutoffIdx <= s.maxPackets {
+		return cutoffIdx
+	}
+	countCutoff := len(s.packets) - s.maxPackets
+	maxEvict := len(s.packets) / 4
+	if maxEvict < 1 {
+		maxEvict = 1
+	}
+	if countCutoff > maxEvict {
+		countCutoff = maxEvict
+	}
+	if countCutoff > cutoffIdx {
+		return countCutoff
+	}
+	return cutoffIdx
+}
+
 func (s *PacketStore) evictionCandidateTxIDs() []int {
-	if s.retentionHours <= 0 && s.maxMemoryMB <= 0 {
+	if s.retentionHours <= 0 && s.maxMemoryMB <= 0 && s.maxPackets <= 0 {
 		return nil
 	}
 	cutoffIdx := 0
@@ -3991,6 +4017,7 @@ func (s *PacketStore) evictionCandidateTxIDs() []int {
 			}
 		}
 	}
+	cutoffIdx = s.countCapCutoff(cutoffIdx)
 	if cutoffIdx == 0 || cutoffIdx > len(s.packets) {
 		return nil
 	}
@@ -4020,7 +4047,7 @@ func (s *PacketStore) EvictStale() int {
 // governed only by the 25% safety cap). Callers that need chunked passes with
 // lock yields between chunks (i.e. RunEviction) pass a positive maxChunk.
 func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string, maxChunk int) int {
-	if s.retentionHours <= 0 && s.maxMemoryMB <= 0 {
+	if s.retentionHours <= 0 && s.maxMemoryMB <= 0 && s.maxPackets <= 0 {
 		return 0
 	}
 
