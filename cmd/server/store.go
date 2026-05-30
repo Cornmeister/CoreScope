@@ -2068,29 +2068,41 @@ func (s *PacketStore) GetTimestampHistogram(since string) TimestampHistogram {
 	snap := s.packets
 	s.mu.RUnlock()
 
-	// packets are sorted oldest-first by FirstSeen (ISO-8601 UTC, so lexical
-	// order == chronological order). Binary-search the first one newer than
-	// `since`, then scan forward; bins are then monotonically non-decreasing
-	// so we can fill the counts slice in one pass without a map.
+	// FirstSeen is NOT reliably chronological — upstream emits malformed /
+	// out-of-order timestamps (e.g. "...24.543.000000"), so a later row can fall
+	// in an earlier bin than the first parsed one. Accumulate per absolute-minute
+	// bin in a map (order-independent), then materialize the counts slice from the
+	// minimum bin. The previous single-pass form computed idx = bin - base, which
+	// went negative for an out-of-order row → counts[-1] panic (index out of
+	// range [-1]).
 	lo := sort.Search(len(snap), func(i int) bool { return snap[i].FirstSeen > since })
 
-	var base int64
-	var counts []int
+	binCounts := map[int64]int{}
+	var minBin, maxBin int64
+	have := false
 	for i := lo; i < len(snap); i++ {
 		t, err := time.Parse(time.RFC3339, snap[i].FirstSeen)
 		if err != nil {
 			continue
 		}
 		bin := t.UnixMilli() / timestampHistogramStepMs
-		if counts == nil {
-			base = bin
-			counts = []int{0}
+		binCounts[bin]++
+		if !have || bin < minBin {
+			minBin = bin
 		}
-		idx := int(bin - base)
-		for idx >= len(counts) {
-			counts = append(counts, 0)
+		if !have || bin > maxBin {
+			maxBin = bin
 		}
-		counts[idx]++
+		have = true
+	}
+	var base int64
+	var counts []int
+	if have {
+		base = minBin
+		counts = make([]int, int(maxBin-minBin+1))
+		for bin, c := range binCounts {
+			counts[int(bin-minBin)] = c
+		}
 	}
 	if counts == nil {
 		return TimestampHistogram{Step: timestampHistogramStepMs, Counts: []int{}}

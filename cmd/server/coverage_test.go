@@ -2225,22 +2225,24 @@ func TestStoreGetTimestamps(t *testing.T) {
 // first one. The map-based form must handle this without panicking.
 func TestGetTimestampHistogram_OutOfOrder(t *testing.T) {
 	mk := func(ts string) *StoreTx { return &StoreTx{FirstSeen: ts} }
+	// The FIRST parsed packet must NOT be the minimum bin: the old code seeded
+	// base from the first row, so a later row in an EARLIER bin produced
+	// idx = bin - base < 0 → counts[-1] panic. 11:05 first, then 11:02 (earlier).
 	s := &PacketStore{packets: []*StoreTx{
-		mk("2026-05-30T11:00:30Z"),
-		mk("2026-05-30T11:02:30Z"),
-		mk("2026-05-30T11:01:30Z"), // out of order: earlier bin after a later one
-		mk("2026-05-30T11:03:30Z"),
+		mk("2026-05-30T11:05:30Z"),
+		mk("2026-05-30T11:02:30Z"), // earlier bin AFTER a later one → old code panicked here
+		mk("2026-05-30T11:08:30Z"),
 	}}
 	hist := s.GetTimestampHistogram("2026-05-30T10:00:00Z") // must not panic
 	total := 0
 	for _, c := range hist.Counts {
 		total += c
 	}
-	if total != 4 {
-		t.Errorf("expected 4 packets counted, got %d (counts=%v)", total, hist.Counts)
+	if total != 3 {
+		t.Errorf("expected 3 packets counted, got %d (counts=%v)", total, hist.Counts)
 	}
-	if len(hist.Counts) != 4 { // bins 11:00..11:03
-		t.Errorf("expected 4 bins, got %d", len(hist.Counts))
+	if len(hist.Counts) != 7 { // bins 11:02..11:08 inclusive
+		t.Errorf("expected 7 bins, got %d", len(hist.Counts))
 	}
 }
 
