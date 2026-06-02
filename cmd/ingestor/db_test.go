@@ -554,18 +554,26 @@ func TestInsertTransmissionUpdatesObserverLastSeen(t *testing.T) {
 		PathJSON:    "[]",
 		DecodedJSON: `{"type":"TXT_MSG"}`,
 	}
+	before := time.Now().Unix()
 	if _, err := s.InsertTransmission(data); err != nil {
 		t.Fatal(err)
 	}
+	after := time.Now().Unix()
 
-	// Verify last_seen was updated
+	// Verify last_seen was updated to INGEST time, not envelope time (#1465).
 	var lastSeenAfter string
 	s.db.QueryRow("SELECT last_seen FROM observers WHERE id = ?", "obs1").Scan(&lastSeenAfter)
 	if lastSeenAfter == oldTime {
 		t.Error("observer last_seen was NOT updated after packet insertion — low-traffic observers will appear offline")
 	}
-	if lastSeenAfter != "2026-03-25T01:00:00Z" {
-		t.Errorf("expected last_seen=2026-03-25T01:00:00Z, got %s", lastSeenAfter)
+	ls, err := time.Parse(time.RFC3339, lastSeenAfter)
+	if err != nil {
+		t.Fatalf("last_seen %q not RFC3339: %v", lastSeenAfter, err)
+	}
+	if ls.Unix() < before-5 || ls.Unix() > after+5 {
+		t.Errorf("expected last_seen ≈ server now (in [%d, %d]), got %s (epoch %d). "+
+			"observer.last_seen must use ingest time, not envelope time (#1465).",
+			before, after, lastSeenAfter, ls.Unix())
 	}
 }
 
@@ -587,10 +595,10 @@ func TestLastPacketAtUpdatedOnPacketOnly(t *testing.T) {
 		t.Fatalf("expected last_packet_at to be NULL after UpsertObserver, got %s", lastPacketAt.String)
 	}
 
-	// Insert a packet from this observer — last_packet_at should be set
+	// Insert a packet from this observer — last_packet_at should be set to ingest time (#1465)
 	data := &PacketData{
 		RawHex:      "0A00D69F",
-		Timestamp:   "2026-04-24T12:00:00Z",
+		Timestamp:   "2026-04-24T12:00:00Z", // envelope timestamp (should NOT be used for last_packet_at)
 		ObserverID:  "obs1",
 		Hash:        "lastpackettest123456",
 		RouteType:   2,
@@ -598,18 +606,24 @@ func TestLastPacketAtUpdatedOnPacketOnly(t *testing.T) {
 		PathJSON:    "[]",
 		DecodedJSON: `{"type":"TXT_MSG"}`,
 	}
+	beforeInsert := time.Now().Unix()
 	if _, err := s.InsertTransmission(data); err != nil {
 		t.Fatal(err)
 	}
+	afterInsert := time.Now().Unix()
 
 	s.db.QueryRow("SELECT last_packet_at FROM observers WHERE id = ?", "obs1").Scan(&lastPacketAt)
 	if !lastPacketAt.Valid {
 		t.Fatal("expected last_packet_at to be non-NULL after InsertTransmission")
 	}
-	// InsertTransmission uses `now = data.Timestamp || time.Now()`, so last_packet_at
-	// should match the packet's Timestamp when provided (same source-of-truth as last_seen).
-	if lastPacketAt.String != "2026-04-24T12:00:00Z" {
-		t.Errorf("expected last_packet_at=2026-04-24T12:00:00Z, got %s", lastPacketAt.String)
+	// Issue #1465: last_packet_at uses ingest time, not envelope time.
+	lpa, err := time.Parse(time.RFC3339, lastPacketAt.String)
+	if err != nil {
+		t.Fatalf("last_packet_at %q not RFC3339: %v", lastPacketAt.String, err)
+	}
+	if lpa.Unix() < beforeInsert-5 || lpa.Unix() > afterInsert+5 {
+		t.Errorf("last_packet_at should be ≈ server now (in [%d, %d]), got %s (epoch %d)",
+			beforeInsert, afterInsert, lastPacketAt.String, lpa.Unix())
 	}
 
 	// UpsertObserver again (status path) — last_packet_at should NOT change
@@ -866,8 +880,12 @@ func TestBuildPacketData(t *testing.T) {
 	if pkt.PayloadType != decoded.Header.PayloadType {
 		t.Errorf("payloadType mismatch")
 	}
-	if pkt.Timestamp != "2026-05-16T10:00:00Z" {
-		t.Errorf("timestamp=%s, want 2026-05-16T10:00:00Z", pkt.Timestamp)
+	// Issue #1370: server ingest time, not envelope rxTime.
+	if pkt.Timestamp == "" {
+		t.Error("timestamp must be set")
+	}
+	if pkt.Timestamp == "2026-05-16T10:00:00Z" {
+		t.Errorf("timestamp=%s; must NOT be the envelope value (#1370)", pkt.Timestamp)
 	}
 	if pkt.DecodedJSON == "" || pkt.DecodedJSON == "{}" {
 		t.Error("decodedJSON should be populated")

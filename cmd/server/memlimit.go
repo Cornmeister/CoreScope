@@ -1,11 +1,18 @@
 package main
 
 import (
+	"log"
 	"os"
 	"runtime/debug"
 	"strconv"
 	"strings"
 )
+
+// cgroupUnlimitedThreshold is the sentinel above which a cgroup memory value
+// means "no limit". cgroup v1 encodes unlimited as math.MaxInt64 (page-aligned
+// near 1<<63); 1<<62 is a safe upper bound that excludes all real limits while
+// staying well below the unlimited sentinel.
+const cgroupUnlimitedThreshold = int64(1 << 62)
 
 // applyMemoryLimit configures Go's soft memory limit (GOMEMLIMIT) so the
 // process self-throttles GC under memory pressure instead of being SIGKILLed
@@ -127,4 +134,46 @@ func meminfoField(key string) int64 {
 		}
 	}
 	return 0
+}
+
+// memlimitUnderprovisioned reports whether effectiveMB is less than half of
+// cgroupMB. Extracted for unit testing the comparison boundary.
+func memlimitUnderprovisioned(effectiveMB, cgroupMB int64) bool {
+	return effectiveMB > 0 && cgroupMB > 0 && effectiveMB*2 < cgroupMB
+}
+
+// warnIfMemlimitUnderprovisioned logs a warning when GOMEMLIMIT is below 50%
+// of the container cgroup memory limit, which causes the Go GC to thrash.
+// In one reported incident (#1264) 82% of CPU was GC with a 1536 MiB limit
+// on a 7.7 GB container — all endpoints 3-100x slower until maxMemoryMB was
+// bumped and the process restarted.
+//
+// limitBytes is the value returned by applyMemoryLimit:
+//   - source="derived"/"cgroup"/"host": the limit we set ourselves (> 0)
+//   - source="env":  0 — we did not touch the runtime; read it back below
+//   - source="none": 0 — no limit set at all; runtime default is math.MaxInt64,
+//     which the >= cgroupUnlimitedThreshold guard below catches and skips
+func warnIfMemlimitUnderprovisioned(limitBytes int64) {
+	cgroupBytes := cgroupMemoryLimitFn()
+	if cgroupBytes <= 0 {
+		return
+	}
+	cgroupMB := cgroupBytes / (1024 * 1024)
+	effective := limitBytes
+	if effective <= 0 {
+		// Either GOMEMLIMIT was set via env (source="env") or no limit was
+		// configured (source="none"). Read the runtime's current value:
+		// debug.SetMemoryLimit(-1) leaves the limit unchanged and returns it.
+		effective = debug.SetMemoryLimit(-1)
+	}
+	if effective <= 0 || effective >= cgroupUnlimitedThreshold {
+		return
+	}
+	effectiveMB := effective / (1024 * 1024)
+	if memlimitUnderprovisioned(effectiveMB, cgroupMB) {
+		log.Printf("[memlimit] WARN: GOMEMLIMIT=%d MiB is <50%% of container limit %d MiB — "+
+			"GC may thrash under load; consider bumping packetStore.maxMemoryMB "+
+			"(suggested: ~%d MiB, roughly 2/3 of container limit)",
+			effectiveMB, cgroupMB, cgroupMB*2/3)
+	}
 }

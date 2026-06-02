@@ -1109,3 +1109,19 @@ func epochToISO(epoch uint32) string {
 	t := unixTime(int64(epoch))
 	return t.UTC().Format("2006-01-02T15:04:05.000Z")
 }
+
+// knownChannelCasing maps known channel keys to their canonical display names.
+// Only well-known channels are normalized — custom/user channels are left as-is.
+var knownChannelCasing = map[string]string{
+	"public": "Public",
+}
+
+// normalizeChannelName fixes casing for well-known channel names.
+// Only normalizes names that appear in knownChannelCasing (e.g. "public" → "Public").
+// Custom channel names are left untouched since we can't know the intended casing.
+func normalizeChannelName(name string) string {
+	if corrected, ok := knownChannelCasing[strings.ToLower(name)]; ok {
+		return corrected
+	}
+	return name
+}

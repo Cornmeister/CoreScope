@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"github.com/meshcore-analyzer/mbcapqueue"
 )
 
 // payloadTypeNames maps payload_type int → human-readable name (firmware-standard).
@@ -77,6 +79,39 @@ type StoreObs struct {
 	PathJSON       string
 	RawHex         string
 	Timestamp      string
+
+	// #1481 P0-2: cached parsed timestamp. The legacy handlers parse
+	// Timestamp as RFC3339Nano/RFC3339/"2006-01-02 15:04:05" with a
+	// fallback chain on every read; for /api/observers/{id}/analytics
+	// that fires 60k+ times per request under RLock. ParsedTime returns
+	// the parsed value once, caching for the lifetime of the StoreObs.
+	tsParseOnce sync.Once
+	tsParsed    time.Time
+	tsParsedOK  bool
+}
+
+// ParsedTime returns the parsed Timestamp value, caching the result.
+// Thread-safe via sync.Once — the first call parses, subsequent calls return cached.
+// Issue #1481 P0-2.
+func (o *StoreObs) ParsedTime() (time.Time, bool) {
+	o.tsParseOnce.Do(func() {
+		if o.Timestamp == "" {
+			return
+		}
+		if t, err := time.Parse(time.RFC3339Nano, o.Timestamp); err == nil {
+			o.tsParsed, o.tsParsedOK = t, true
+			return
+		}
+		if t, err := time.Parse(time.RFC3339, o.Timestamp); err == nil {
+			o.tsParsed, o.tsParsedOK = t, true
+			return
+		}
+		if t, err := time.Parse("2006-01-02 15:04:05", o.Timestamp); err == nil {
+			o.tsParsed, o.tsParsedOK = t, true
+			return
+		}
+	})
+	return o.tsParsed, o.tsParsedOK
 }
 
 // ParsedDecoded returns the parsed DecodedJSON map, caching the result.
@@ -102,7 +137,7 @@ func (tx *StoreTx) ParsedDecoded() map[string]interface{} {
 //     indexes (byHash, byTxID, byObsID, byObserver, byNode,
 //     byPathHop, byPayloadType), counters, and loaded flag.
 //
-//  2. cacheMu       (sync.Mutex)  — guards analytics response caches:
+//  2. cacheMu       (sync.RWMutex)  — guards analytics response caches:
 //     rfCache, topoCache, hashCache, collisionCache, chanCache,
 //     distCache, subpathCache, and their TTLs/hit counters.
 //     Also guards rate-limited invalidation state
@@ -151,7 +186,7 @@ type PacketStore struct {
 	insertCount   int64
 	queryCount    int64
 	// Response caches (separate mutex to avoid contention with store RWMutex)
-	cacheMu           sync.Mutex
+	cacheMu           sync.RWMutex
 	rfCache           map[string]*cachedResult // region → cached RF result
 	topoCache         map[string]*cachedResult // region → cached topology result
 	hashCache         map[string]*cachedResult // region → cached hash-sizes result
@@ -256,6 +291,11 @@ type PacketStore struct {
 	multiByteCapCache map[string]*MultiByteCapEntry
 	multiByteCapAt    time.Time
 	multiByteCapInFlt chan struct{} // nil when no recompute in flight
+
+	// Multi-byte capability snapshot and index (Kpa #1324): populated on cold
+	// start from DB and updated each analytics cycle. Guards by cacheMu.
+	mbCapSnapshot []MultiByteCapEntry
+	mbCapIndex    map[string]MultiByteCapEntry
 
 	// Cached per-pubkey relay info + usefulness score maps (#1257). These
 	// fold the previously per-node GetRepeaterRelayInfo /
@@ -365,6 +405,14 @@ type PacketStore struct {
 	// Lock-free fallback for cheap stats endpoints. Refreshed after mutations
 	// and opportunistically by readers that can acquire s.mu immediately.
 	statsSnapshot atomic.Value // stores *storeStatsSnapshot
+
+	// Short-lived cache for the observations aggregate in GetStoreStats (30s TTL).
+	// Avoids a per-/api/stats full-table scan; values accurate to ~30s which is
+	// sufficient for dashboard display.
+	statsCacheMu   sync.Mutex
+	statsCacheTime time.Time
+	statsLastHour  int
+	statsLast24h   int
 }
 
 type cachedResult struct {
@@ -753,6 +801,7 @@ func (s *PacketStore) Load() error {
 		log.Printf("[store] Loaded %d transmissions (%d observations) in %v (tracked ~%.0fMB, heap ~%.0fMB)",
 			len(s.packets), s.totalObs, elapsed, trackedBytesToMB(s.trackedBytes), s.estimatedMemoryMB())
 	}
+	s.loadMultibyteCapFromDB()
 	return nil
 }
 
@@ -1741,11 +1790,24 @@ func (s *PacketStore) GetStoreStats() (*Stats, error) {
 	oneHourAgo := time.Now().Add(-1 * time.Hour).Unix()
 	oneDayAgo := time.Now().Add(-24 * time.Hour).Unix()
 
-	// Run node/observer counts and observation counts concurrently (2 queries instead of 5).
+	// Serve observation counts from cache if fresh (avoids per-request full-table scan).
+	var obsFromCache bool
+	s.statsCacheMu.Lock()
+	if !s.statsCacheTime.IsZero() && time.Since(s.statsCacheTime) < 30*time.Second {
+		st.PacketsLastHour = s.statsLastHour
+		st.PacketsLast24h = s.statsLast24h
+		obsFromCache = true
+	}
+	s.statsCacheMu.Unlock()
+
+	// Run node/observer counts and (if cache miss) observation counts concurrently.
 	var wg sync.WaitGroup
 	var nodeErr, obsErr error
 
-	wg.Add(2)
+	wg.Add(1)
+	if !obsFromCache {
+		wg.Add(1)
+	}
 	go func() {
 		defer wg.Done()
 		nodeErr = s.db.conn.QueryRow(
@@ -1757,16 +1819,25 @@ func (s *PacketStore) GetStoreStats() (*Stats, error) {
 			sevenDaysAgo, onlineCutoff,
 		).Scan(&st.TotalNodes, &st.TotalNodesAllTime, &st.TotalObservers, &st.OnlineObservers)
 	}()
-	go func() {
-		defer wg.Done()
-		obsErr = s.db.conn.QueryRow(
-			`SELECT
-				COALESCE(SUM(CASE WHEN timestamp > ? THEN 1 ELSE 0 END), 0),
-				COALESCE(SUM(CASE WHEN timestamp > ? THEN 1 ELSE 0 END), 0)
-			FROM observations WHERE timestamp > ?`,
-			oneHourAgo, oneDayAgo, oneDayAgo,
-		).Scan(&st.PacketsLastHour, &st.PacketsLast24h)
-	}()
+	if !obsFromCache {
+		go func() {
+			defer wg.Done()
+			obsErr = s.db.conn.QueryRow(
+				`SELECT
+					COALESCE(SUM(CASE WHEN timestamp > ? THEN 1 ELSE 0 END), 0),
+					COALESCE(SUM(CASE WHEN timestamp > ? THEN 1 ELSE 0 END), 0)
+				FROM observations WHERE timestamp > ?`,
+				oneHourAgo, oneDayAgo, oneDayAgo,
+			).Scan(&st.PacketsLastHour, &st.PacketsLast24h)
+			if obsErr == nil {
+				s.statsCacheMu.Lock()
+				s.statsLastHour = st.PacketsLastHour
+				s.statsLast24h = st.PacketsLast24h
+				s.statsCacheTime = time.Now()
+				s.statsCacheMu.Unlock()
+			}
+		}()
+	}
 	wg.Wait()
 
 	if nodeErr != nil {
@@ -4917,3 +4988,94 @@ func parsePathJSON(pathJSON string) []string {
 // --- Subpaths Analytics ---
 
 // --- Subpath Detail ---
+
+// --- Multi-Byte Capability Persistence (Kpa #1324) ---
+
+func (s *PacketStore) GetMultibyteCapFor(pk string) (*MultiByteCapEntry, bool) {
+	s.cacheMu.RLock()
+	e, ok := s.mbCapIndex[pk]
+	s.cacheMu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	return &e, true
+}
+
+// loadMultibyteCapFromDB pre-populates mbCapSnapshot and mbCapIndex from the nodes
+// table so cold starts serve the last-known capability without waiting for the first
+// analytics cycle (~15s).
+func (s *PacketStore) loadMultibyteCapFromDB() {
+	if !s.db.hasMultibyteSupCols {
+		return
+	}
+	rows, err := s.db.conn.Query(
+		`SELECT public_key, COALESCE(name,''), COALESCE(role,''), COALESCE(last_seen,''), multibyte_sup, COALESCE(multibyte_evidence,'')
+		 FROM nodes WHERE multibyte_sup > 0`)
+	if err != nil {
+		log.Printf("[multibyte] loadFromDB: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	var entries []MultiByteCapEntry
+	for rows.Next() {
+		var pk, name, role, lastSeen, evidence string
+		var sup int
+		if err := rows.Scan(&pk, &name, &role, &lastSeen, &sup, &evidence); err != nil {
+			continue
+		}
+		status := "unknown"
+		switch sup {
+		case 2:
+			status = "confirmed"
+		case 1:
+			status = "suspected"
+		}
+		entries = append(entries, MultiByteCapEntry{
+			PublicKey: pk,
+			Name:      name,
+			Role:      role,
+			Status:    status,
+			Evidence:  evidence,
+			LastSeen:  lastSeen,
+		})
+	}
+	if len(entries) == 0 {
+		return
+	}
+	idx := make(map[string]MultiByteCapEntry, len(entries))
+	for _, e := range entries {
+		idx[e.PublicKey] = e
+	}
+	s.cacheMu.Lock()
+	s.mbCapSnapshot = entries
+	s.mbCapIndex = idx
+	s.cacheMu.Unlock()
+	log.Printf("[multibyte] loaded %d capability entries from DB", len(entries))
+}
+
+// publishMultibyteCapSnapshot writes the analytics-cycle output to the
+// on-disk handoff (internal/mbcapqueue). The ingestor's
+// RunMultibyteCapPersist consumes the file and writes confirmed /
+// suspected entries to the DB.
+//
+// INVARIANT (#1289/#1324): the server is the read path and opens
+// SQLite mode=ro. It MUST NOT execute any UPDATE on
+// nodes.multibyte_* — see readonly_invariant_test.go. This helper is
+// the only side-effect path for capability data leaving the server.
+func (s *PacketStore) publishMultibyteCapSnapshot(entries []MultiByteCapEntry) {
+	if s.db == nil || s.db.path == "" {
+		return
+	}
+	out := make([]mbcapqueue.Entry, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, mbcapqueue.Entry{
+			PublicKey: e.PublicKey,
+			Status:    e.Status,
+			Evidence:  e.Evidence,
+		})
+	}
+	if err := mbcapqueue.WriteSnapshot(s.db.path, mbcapqueue.Snapshot{Entries: out}); err != nil {
+		log.Printf("[multibyte] publish snapshot: %v", err)
+	}
+}

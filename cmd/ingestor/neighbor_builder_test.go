@@ -66,7 +66,7 @@ func TestNeighborEdgesBuilderUpsertsFromObservations(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	n, err := store.buildAndPersistNeighborEdges(0) // 0 = no time filter (full scan)
+	n, err := store.buildAndPersistNeighborEdges() // full scan (no existing edges watermark)
 	if err != nil {
 		t.Fatalf("buildAndPersistNeighborEdges: %v", err)
 	}

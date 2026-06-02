@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -14,6 +15,20 @@ import (
 // same 60s cadence (see cmd/server/neighbor_recomputer.go); a 60s
 // pulse here is sufficient to keep the snapshot fresh.
 const NeighborEdgesBuilderInterval = 60 * time.Second
+
+// neighborBuilderMaxBatch caps how many observation rows a single
+// delta tick may process (#1339). With max_open_conns=1, an unbounded
+// scan on a multi-million-row table holds the SQLite write lock for
+// minutes and starves MQTT ingest. The cap keeps each tick bounded;
+// if a backlog accumulates, successive ticks drain it 50k rows at a
+// time without ever blocking ingest for long.
+const neighborBuilderMaxBatch = 50000
+
+// neighborBuilderSlowTickThreshold is the per-tick wallclock budget
+// for the builder. Exceeding it is logged loudly so operators can
+// catch a regression of #1339 quickly. The full instrumentation
+// framework is tracked in #1340.
+const neighborBuilderSlowTickThreshold = 5 * time.Second
 
 // payloadADVERT mirrors the constant in cmd/server/decoder.go.
 // Duplicated rather than imported so the ingestor binary stays
@@ -31,15 +46,9 @@ type edgeRow struct {
 // derived neighbor_edges rows. Builder is the only writer to
 // neighbor_edges (#1287).
 //
-// The function returns a stop closure immediately. Initial build runs in the
-// builder goroutine so MQTT startup is not blocked by a multi-minute warmup.
-//
-// Perf: each tick only scans observations newer than the previous build
-// time (minus a 2-interval overlap for safety). The initial build uses a
-// full prune-window lookback so the table is properly warm after restart.
-// This avoids the previous behaviour of scanning all observations on every
-// 60 s tick — which with 938 k edge rows caused a multi-minute SQLite write
-// lock that blocked packet insertion (observed in production logs).
+// The function returns a stop closure. Initial build runs synchronously
+// before the ticker starts so the server's first snapshot load picks
+// up real data instead of an empty table.
 func (s *Store) StartNeighborEdgesBuilder(interval time.Duration) func() {
 	if interval <= 0 {
 		interval = NeighborEdgesBuilderInterval
@@ -50,32 +59,42 @@ func (s *Store) StartNeighborEdgesBuilder(interval time.Duration) func() {
 	var stopOnce sync.Once
 	go func() {
 		defer close(done)
-		// Warm-up: full 5-day lookback so existing edges are preserved across
-		// restarts without needing a full all-time scan. This must not block
-		// StartNeighborEdgesBuilder returning; MQTT startup depends on that.
-		initialSince := time.Now().Add(-5 * 24 * time.Hour).Unix()
-		if n, err := s.buildAndPersistNeighborEdges(initialSince); err != nil {
-			log.Printf("[neighbor-build] initial build error: %v", err)
-		} else {
-			log.Printf("[neighbor-build] initial build: %d edges upserted", n)
+		// Async warm-up: on a fresh DB this is a full scan; on a DB
+		// with persisted neighbor_edges (most restarts), the watermark
+		// short-circuits it into a delta scan. Runs in the goroutine so
+		// StartNeighborEdgesBuilder returns immediately without blocking
+		// MQTT startup (issue #1339 follow-up; avoids connection-pool
+		// starvation under test/load).
+		wuStart := time.Now()
+		var wuTotal int
+		for {
+			n, err := s.buildAndPersistNeighborEdges()
+			if err != nil {
+				log.Printf("[neighbor-build] initial build error: %v", err)
+				break
+			}
+			wuTotal += n
+			if n < neighborBuilderMaxBatch {
+				break
+			}
 		}
+		log.Printf("[neighbor-build] initial build: %d edges upserted in %s", wuTotal, time.Since(wuStart))
 
 		t := time.NewTicker(interval)
 		defer t.Stop()
-		// lastBuildAt seeds the incremental window. Subtract 2×interval so
-		// the very first tick overlaps the initial build and misses nothing.
-		lastBuildAt := time.Now().Add(-2 * interval)
 		for {
 			select {
 			case <-t.C:
-				// Only scan observations newer than the previous build (minus a
-				// 10 s overlap to cover any clock skew or in-flight writes).
-				sinceUnix := lastBuildAt.Add(-10 * time.Second).Unix()
-				lastBuildAt = time.Now()
-				if n, err := s.buildAndPersistNeighborEdges(sinceUnix); err != nil {
-					log.Printf("[neighbor-build] tick error: %v", err)
+				start := time.Now()
+				n, err := s.buildAndPersistNeighborEdges()
+				dur := time.Since(start)
+				if err != nil {
+					log.Printf("[neighbor-build] tick error after %s: %v", dur, err)
 				} else if n > 0 {
-					log.Printf("[neighbor-build] %d edges upserted", n)
+					log.Printf("[neighbor-build] tick: %d edges in %s (delta from watermark)", n, dur)
+				}
+				if dur > neighborBuilderSlowTickThreshold {
+					log.Printf("[neighbor-build] SLOW tick: %s — possible regression of #1339", dur)
 				}
 			case <-stop:
 				return
@@ -97,20 +116,131 @@ func (s *Store) StartNeighborEdgesBuilder(interval time.Duration) func() {
 // observer↔last-hop on all packet types) and upserts them into
 // neighbor_edges. Returns count of attempted upserts.
 //
-// sinceUnix limits the scan to observations whose timestamp (Unix epoch)
-// is strictly greater than the given value. Pass 0 to scan all time
-// (used only for the synchronous warm-up on startup).
+// Watermark / delta semantics (#1339): the builder derives a watermark
+// from MAX(neighbor_edges.last_seen). On an empty edges table (fresh
+// DB), watermark is 0 and the builder does a full warm-up scan. On
+// every subsequent call, the SELECT is restricted to observations
+// whose timestamp is strictly greater than the watermark, bounded by
+// neighborBuilderMaxBatch. neighbor_edges itself is the persistence —
+// no metadata table or in-memory state is required, and restarts
+// resume cleanly from whatever the table reflects.
+//
+// Trade-off (documented for #1340 follow-up): an anomalously-old
+// observation that arrives AFTER its timestamp has already been
+// crossed by the watermark will be skipped. Acceptable for an
+// approximate neighbor graph; a periodic full-rebuild can be added
+// later if needed.
 //
 // Resolution of hop-prefix → full pubkey is done via a one-shot
 // SELECT of (lowered) pubkey prefixes from nodes. Prefixes with
 // multiple candidates are skipped (matches the conservative
 // resolution rule in cmd/server/extractEdgesFromObs).
-func (s *Store) buildAndPersistNeighborEdges(sinceUnix int64) (int, error) {
-	res, err := s.buildAndPersistDerivedEdgesWindow(sinceUnix, 0, derivedEdgesBuildOptions{Neighbor: true})
+func (s *Store) buildAndPersistNeighborEdges() (int, error) {
+	prefixIdx, err := buildPrefixIndex(s.db)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("build prefix index: %w", err)
 	}
-	return res.NeighborEdges, nil
+
+	// Derive the watermark from the existing edges table. RFC3339
+	// → epoch seconds so it can be compared against observations.timestamp
+	// (stored as INTEGER unix epoch). On an empty edges table both the
+	// query and the parse return zero → full warm-up scan.
+	var watermarkRFC sql.NullString
+	if err := s.db.QueryRow(`SELECT MAX(last_seen) FROM neighbor_edges`).Scan(&watermarkRFC); err != nil {
+		return 0, fmt.Errorf("read watermark: %w", err)
+	}
+	var watermarkEpoch int64
+	if watermarkRFC.Valid && watermarkRFC.String != "" {
+		if t, parseErr := time.Parse(time.RFC3339, watermarkRFC.String); parseErr == nil {
+			watermarkEpoch = t.Unix()
+		}
+	}
+
+	rows, err := s.db.Query(`SELECT
+		t.payload_type,
+		t.decoded_json,
+		COALESCE(t.from_pubkey, ''),
+		COALESCE(o.path_json, ''),
+		COALESCE(obs.id, '') AS observer_id,
+		o.timestamp
+	FROM observations o
+	JOIN transmissions t ON t.id = o.transmission_id
+	LEFT JOIN observers obs ON obs.rowid = o.observer_idx
+	WHERE o.timestamp > ?
+	ORDER BY o.timestamp
+	LIMIT ?`, watermarkEpoch, neighborBuilderMaxBatch)
+	if err != nil {
+		return 0, fmt.Errorf("scan observations: %w", err)
+	}
+	defer rows.Close()
+
+	var edges []edgeRow
+	for rows.Next() {
+		var payloadType sql.NullInt64
+		var decodedJSON, fromPubkey, pathJSON, observerID string
+		var epochTs int64
+		if err := rows.Scan(&payloadType, &decodedJSON, &fromPubkey, &pathJSON, &observerID, &epochTs); err != nil {
+			continue
+		}
+		fromNode := strings.ToLower(fromPubkey)
+		if fromNode == "" {
+			fromNode = strings.ToLower(extractPubkeyFromAdvertJSON(decodedJSON))
+		}
+		isAdvert := payloadType.Valid && payloadType.Int64 == int64(payloadADVERT)
+		ts := time.Unix(epochTs, 0).UTC().Format(time.RFC3339)
+		observerPK := strings.ToLower(observerID)
+		path := parsePathArray(pathJSON)
+
+		if len(path) == 0 {
+			if isAdvert && fromNode != "" && fromNode != observerPK && observerPK != "" {
+				edges = append(edges, canonEdge(fromNode, observerPK, ts))
+			}
+			continue
+		}
+		if isAdvert && fromNode != "" {
+			if resolved, ok := resolvePrefix(prefixIdx, path[0]); ok && resolved != fromNode {
+				edges = append(edges, canonEdge(fromNode, resolved, ts))
+			}
+		}
+		if observerPK != "" {
+			last := path[len(path)-1]
+			if resolved, ok := resolvePrefix(prefixIdx, last); ok && resolved != observerPK {
+				edges = append(edges, canonEdge(observerPK, resolved, ts))
+			}
+		}
+	}
+
+	if len(edges) == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`INSERT INTO neighbor_edges (node_a, node_b, count, last_seen)
+		VALUES (?, ?, 1, ?)
+		ON CONFLICT(node_a, node_b) DO UPDATE SET
+		  count = count + 1,
+		  last_seen = MAX(last_seen, excluded.last_seen)`)
+	if err != nil {
+		return 0, fmt.Errorf("prepare: %w", err)
+	}
+	defer stmt.Close()
+	var firstErr error
+	for _, e := range edges {
+		if _, err := stmt.Exec(e.a, e.b, e.ts); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		return 0, fmt.Errorf("upsert: %w", firstErr)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+	return len(edges), nil
 }
 
 // canonEdge orders the pair so node_a <= node_b (matches the existing
