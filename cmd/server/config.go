@@ -293,6 +293,7 @@ type NeighborGraphConfig struct {
 type PacketStoreConfig struct {
 	RetentionHours                float64 `json:"retentionHours"`                // max age of packets in hours (0 = unlimited)
 	MaxMemoryMB                   int     `json:"maxMemoryMB"`                   // hard memory ceiling in MB (0 = unlimited)
+	MaxPackets                    int     `json:"maxPackets"`                    // hard cap on in-memory packet COUNT (0 = unlimited). Bounds the per-packet index heap (subpath/neighbor/distance/byChannel), which scales with count, not bytes.
 	MaxResolvedPubkeyIndexEntries int     `json:"maxResolvedPubkeyIndexEntries"` // warning threshold for index size (0 = 5M default)
 	HotStartupHours               float64 `json:"hotStartupHours"`               // load only this many hours synchronously; 0 = disabled
 }
@@ -536,6 +537,15 @@ func (c *Config) normalizePacketStoreConfig() {
 	if v := os.Getenv("PACKETSTORE_MAX_MEMORY_MB"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			c.PacketStore.MaxMemoryMB = n
+		}
+	}
+	// Hard cap on in-memory packet COUNT. The per-packet index heap
+	// (subpath/neighbor/distance/byChannel) scales with count, so under thin
+	// live packets the byte budget alone lets count — and thus heap — grow until
+	// GC stalls. This bounds it directly. 0 = unlimited.
+	if v := os.Getenv("PACKETSTORE_MAX_PACKETS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.PacketStore.MaxPackets = n
 		}
 	}
 }

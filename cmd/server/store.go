@@ -357,6 +357,7 @@ type PacketStore struct {
 	// Eviction config and stats
 	retentionHours  float64        // 0 = unlimited
 	maxMemoryMB     int            // 0 = unlimited (packet store memory budget)
+	maxPackets      int            // 0 = unlimited (hard cap on in-memory packet COUNT; bounds per-packet index heap)
 	evicted         int64          // total packets evicted
 	trackedBytes    int64          // running total of estimated packet store memory
 	memoryEstimator func() float64 // injectable for tests; nil = use runtime.ReadMemStats (stats only)
@@ -460,6 +461,7 @@ func NewPacketStore(db *DB, cfg *PacketStoreConfig, cacheTTLs ...map[string]inte
 	if cfg != nil {
 		ps.retentionHours = cfg.RetentionHours
 		ps.maxMemoryMB = cfg.MaxMemoryMB
+		ps.maxPackets = cfg.MaxPackets
 		ps.maxResolvedPubkeyIndexEntries = cfg.MaxResolvedPubkeyIndexEntries
 		if cfg.HotStartupHours > 0 {
 			h := cfg.HotStartupHours
@@ -2068,29 +2070,41 @@ func (s *PacketStore) GetTimestampHistogram(since string) TimestampHistogram {
 	snap := s.packets
 	s.mu.RUnlock()
 
-	// packets are sorted oldest-first by FirstSeen (ISO-8601 UTC, so lexical
-	// order == chronological order). Binary-search the first one newer than
-	// `since`, then scan forward; bins are then monotonically non-decreasing
-	// so we can fill the counts slice in one pass without a map.
+	// FirstSeen is NOT reliably chronological — upstream emits malformed /
+	// out-of-order timestamps (e.g. "...24.543.000000"), so a later row can fall
+	// in an earlier bin than the first parsed one. Accumulate per absolute-minute
+	// bin in a map (order-independent), then materialize the counts slice from the
+	// minimum bin. The previous single-pass form computed idx = bin - base, which
+	// went negative for an out-of-order row → counts[-1] panic (index out of
+	// range [-1]).
 	lo := sort.Search(len(snap), func(i int) bool { return snap[i].FirstSeen > since })
 
-	var base int64
-	var counts []int
+	binCounts := map[int64]int{}
+	var minBin, maxBin int64
+	have := false
 	for i := lo; i < len(snap); i++ {
 		t, err := time.Parse(time.RFC3339, snap[i].FirstSeen)
 		if err != nil {
 			continue
 		}
 		bin := t.UnixMilli() / timestampHistogramStepMs
-		if counts == nil {
-			base = bin
-			counts = []int{0}
+		binCounts[bin]++
+		if !have || bin < minBin {
+			minBin = bin
 		}
-		idx := int(bin - base)
-		for idx >= len(counts) {
-			counts = append(counts, 0)
+		if !have || bin > maxBin {
+			maxBin = bin
 		}
-		counts[idx]++
+		have = true
+	}
+	var base int64
+	var counts []int
+	if have {
+		base = minBin
+		counts = make([]int, int(maxBin-minBin+1))
+		for bin, c := range binCounts {
+			counts[int(bin-minBin)] = c
+		}
 	}
 	if counts == nil {
 		return TimestampHistogram{Step: timestampHistogramStepMs, Counts: []int{}}
@@ -3896,8 +3910,32 @@ func trackedBytesToMB(trackedBytes int64) float64 {
 // packets evicted.
 // evictionCandidateTxIDs determines which tx IDs would be evicted and returns them.
 // Must be called under s.mu.Lock (or RLock). Does NOT modify any state.
+// countCapCutoff raises cutoffIdx so that at most s.maxPackets remain in memory,
+// directly bounding the per-packet index heap (subpath/neighbor/distance/
+// byChannel) — which scales with packet COUNT, not bytes, so thin live packets
+// can balloon it past the byte budget. Evicts the oldest excess, respecting the
+// same 25%-per-pass safety cap as the memory path. Returns the (possibly raised)
+// cutoffIdx. No-op when maxPackets <= 0 or already within the cap.
+func (s *PacketStore) countCapCutoff(cutoffIdx int) int {
+	if s.maxPackets <= 0 || len(s.packets)-cutoffIdx <= s.maxPackets {
+		return cutoffIdx
+	}
+	countCutoff := len(s.packets) - s.maxPackets
+	maxEvict := len(s.packets) / 4
+	if maxEvict < 1 {
+		maxEvict = 1
+	}
+	if countCutoff > maxEvict {
+		countCutoff = maxEvict
+	}
+	if countCutoff > cutoffIdx {
+		return countCutoff
+	}
+	return cutoffIdx
+}
+
 func (s *PacketStore) evictionCandidateTxIDs() []int {
-	if s.retentionHours <= 0 && s.maxMemoryMB <= 0 {
+	if s.retentionHours <= 0 && s.maxMemoryMB <= 0 && s.maxPackets <= 0 {
 		return nil
 	}
 	cutoffIdx := 0
@@ -3979,6 +4017,7 @@ func (s *PacketStore) evictionCandidateTxIDs() []int {
 			}
 		}
 	}
+	cutoffIdx = s.countCapCutoff(cutoffIdx)
 	if cutoffIdx == 0 || cutoffIdx > len(s.packets) {
 		return nil
 	}
@@ -4008,7 +4047,7 @@ func (s *PacketStore) EvictStale() int {
 // governed only by the 25% safety cap). Callers that need chunked passes with
 // lock yields between chunks (i.e. RunEviction) pass a positive maxChunk.
 func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string, maxChunk int) int {
-	if s.retentionHours <= 0 && s.maxMemoryMB <= 0 {
+	if s.retentionHours <= 0 && s.maxMemoryMB <= 0 && s.maxPackets <= 0 {
 		return 0
 	}
 
@@ -4086,6 +4125,14 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string, maxChunk int)
 			}
 		}
 	}
+
+	// Count-based cap: bound in-memory packet COUNT independently of the byte
+	// budget. The per-packet index heap (subpath/neighbor/distance/byChannel)
+	// scales with count, so thin live packets can balloon heap while staying
+	// under the byte watermark. This is the production eviction path (RunEviction
+	// → evictStaleInternal); evictionCandidateTxIDs applies the same cap when it
+	// pre-decides candidates.
+	cutoffIdx = s.countCapCutoff(cutoffIdx)
 
 	if cutoffIdx == 0 {
 		return 0

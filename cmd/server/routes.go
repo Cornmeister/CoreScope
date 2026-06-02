@@ -328,6 +328,30 @@ type serveOpts struct {
 	//   "private, max-age=60, stale-while-revalidate=60"
 	//   "public, max-age=300, stale-while-revalidate=300"
 	CacheControl string
+	// FreshFloor, when >0, lets an explicit fresh request (see isFreshRequest)
+	// bypass the normal TTL: it triggers a rebuild once the cached payload is
+	// older than FreshFloor instead of waiting out the full TTL. This is what
+	// makes the Observers list feel live — a WebSocket/forced refresh shows data
+	// at most FreshFloor old. Rebuilds are still coalesced via singleflight, so a
+	// burst of fresh requests costs at most one rebuild per FreshFloor window no
+	// matter how many viewers. Fresh responses are returned with Cache-Control:
+	// no-store so the browser can't re-cache them. Only honored by
+	// singleKeyByteCache.serve.
+	FreshFloor time.Duration
+}
+
+// isFreshRequest reports whether the client explicitly asked to bypass the soft
+// cache for a forced or WebSocket-driven refresh. The frontend sets X-Fresh: 1
+// (and fetches with cache: "no-store") on such requests; we also honor a
+// standard no-cache request directive.
+func isFreshRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.Header.Get("X-Fresh") == "1" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(r.Header.Get("Cache-Control")), "no-cache")
 }
 
 // serve looks up cached bytes for c, otherwise builds a fresh payload via
@@ -346,14 +370,29 @@ type serveOpts struct {
 // If-None-Match header, the response is a 304 with no body — the big win
 // on slow-changing data.
 func (c *singleKeyByteCache) serve(w http.ResponseWriter, r *http.Request, ttl time.Duration, errContext string, opts serveOpts, build func() ([]byte, error)) {
+	// Fresh requests bypass the browser HTTP cache (no-store) and, when a
+	// FreshFloor is configured, accept the cached payload only while it is
+	// younger than FreshFloor — otherwise they fall through to a (coalesced)
+	// rebuild for near-live data.
+	fresh := opts.FreshFloor > 0 && isFreshRequest(r)
+	if fresh {
+		opts.CacheControl = "no-store"
+	}
 	for {
 		c.mu.Lock()
-		if c.payload != nil && time.Now().Before(c.expiresAt) {
-			payload := c.payload
-			etag := c.etag
-			c.mu.Unlock()
-			c.writeServed(w, r, payload, etag, opts)
-			return
+		if c.payload != nil {
+			valid := time.Now().Before(c.expiresAt)
+			if fresh {
+				builtAt := c.expiresAt.Add(-ttl)
+				valid = time.Now().Before(builtAt.Add(opts.FreshFloor))
+			}
+			if valid {
+				payload := c.payload
+				etag := c.etag
+				c.mu.Unlock()
+				c.writeServed(w, r, payload, etag, opts)
+				return
+			}
 		}
 		if c.inFlight != nil {
 			ch := c.inFlight
@@ -3255,17 +3294,27 @@ func (s *Server) handleChannelMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 // observersListCacheTTL caps how often /api/observers re-scans the DB.
-// Observer metadata is operator-managed and the only fast-moving field is
-// PacketsLastHour (a 1-hour rolling count) — 5 minutes of staleness on a
-// 60-minute window is invisible. The Observers page bursts this endpoint
-// on every inbound WS packet (observers.js debounce + force-refresh); with
-// ETag/304 below those bursts mostly return 304 anyway, so the TTL can be
-// generous.
-const observersListCacheTTL = 5 * time.Minute
-const observersListCacheHeader = "private, max-age=120, stale-while-revalidate=180"
+// The Observers page is meant to be LIVE — its Last Status / Last Packet columns
+// must reflect new packets — and the frontend polls every 30s (plus WS-driven
+// force-refreshes). A 5-min TTL here made the list appear frozen for minutes.
+//
+// Liveness now comes primarily from observersListFreshFloor: forced/WS refreshes
+// arrive as fresh requests (X-Fresh: 1, cache: no-store) and get a rebuild once
+// the cached payload is older than the floor, so a new packet shows up within a
+// few seconds. observersListCacheTTL is the ceiling for non-fresh consumers
+// (initial page load, anything not actively polling). The short max-age keeps
+// that first load snappy; forced refreshes set their own no-store header.
+//
+// Load stays bounded: it's a single-key byte cache and fresh rebuilds are
+// coalesced via singleflight, so even a packet burst with many viewers costs at
+// most one DB recompute per FreshFloor window. (The expensive 24h/7d counts live
+// behind the separate, still-long observersStatsCacheTTL.)
+const observersListCacheTTL = 15 * time.Second
+const observersListFreshFloor = 3 * time.Second
+const observersListCacheHeader = "private, max-age=5, stale-while-revalidate=15"
 
 func (s *Server) handleObservers(w http.ResponseWriter, r *http.Request) {
-	s.observersListCache.serve(w, r, observersListCacheTTL, "handleObservers GetObservers", serveOpts{CacheControl: observersListCacheHeader}, func() ([]byte, error) {
+	s.observersListCache.serve(w, r, observersListCacheTTL, "handleObservers GetObservers", serveOpts{CacheControl: observersListCacheHeader, FreshFloor: observersListFreshFloor}, func() ([]byte, error) {
 		observers, err := s.db.GetObservers()
 		if err != nil {
 			return nil, err

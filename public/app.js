@@ -113,7 +113,9 @@ async function api(path, { ttl = 0, bust = false } = {}) {
   // Deduplicate in-flight requests
   if (_inflight.has(path)) return _inflight.get(path);
   const promise = (async () => {
-    const res = await fetch('/api' + path);
+    // A bust is a forced/live refresh: skip the browser HTTP cache too (not just
+    // our JS cache) and signal the server it may serve near-live data.
+    const res = await fetch('/api' + path, bust ? { cache: 'no-store', headers: { 'X-Fresh': '1' } } : undefined);
     if (!res.ok) throw new Error(`API ${res.status}: ${path}`);
     const data = await res.json();
     const ms = performance.now() - t0;

@@ -368,15 +368,12 @@ reboot</code></pre>
     obsStatsData = {};
   }
 
-  function invalidateObserversCache() {
-    invalidateApiCache('/observers');
-  }
-
   async function loadObservers(force) {
-    if (force) invalidateObserversCache();
+    // force = a live refresh (30s timer or WS packet event): bust bypasses the
+    // JS cache, the browser HTTP cache, and the server soft cache (FreshFloor).
     try {
       const [data, skewData] = await Promise.all([
-        api('/observers', { ttl: CLIENT_TTL.observers }),
+        api('/observers', { ttl: CLIENT_TTL.observers, bust: !!force }),
         api('/observers/clock-skew', { ttl: 30000 }).catch(function() { return []; })
       ]);
       observers = data.observers || [];

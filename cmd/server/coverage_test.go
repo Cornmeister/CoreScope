@@ -2219,6 +2219,70 @@ func TestStoreGetTimestamps(t *testing.T) {
 	}
 }
 
+// TestGetTimestampHistogram_OutOfOrder guards against the index-out-of-range
+// [-1] panic: when packets are not chronologically monotonic (malformed/
+// out-of-order FirstSeen), a later row can fall in an earlier bin than the
+// first one. The map-based form must handle this without panicking.
+func TestGetTimestampHistogram_OutOfOrder(t *testing.T) {
+	mk := func(ts string) *StoreTx { return &StoreTx{FirstSeen: ts} }
+	// The FIRST parsed packet must NOT be the minimum bin: the old code seeded
+	// base from the first row, so a later row in an EARLIER bin produced
+	// idx = bin - base < 0 → counts[-1] panic. 11:05 first, then 11:02 (earlier).
+	s := &PacketStore{packets: []*StoreTx{
+		mk("2026-05-30T11:05:30Z"),
+		mk("2026-05-30T11:02:30Z"), // earlier bin AFTER a later one → old code panicked here
+		mk("2026-05-30T11:08:30Z"),
+	}}
+	hist := s.GetTimestampHistogram("2026-05-30T10:00:00Z") // must not panic
+	total := 0
+	for _, c := range hist.Counts {
+		total += c
+	}
+	if total != 3 {
+		t.Errorf("expected 3 packets counted, got %d (counts=%v)", total, hist.Counts)
+	}
+	if len(hist.Counts) != 7 { // bins 11:02..11:08 inclusive
+		t.Errorf("expected 7 bins, got %d", len(hist.Counts))
+	}
+}
+
+// TestCountCapCutoff verifies the packet-count cap raises the eviction cutoff so
+// that at most maxPackets remain, bounded by the 25%-per-pass safety cap.
+func TestCountCapCutoff(t *testing.T) {
+	mkN := func(n int) []*StoreTx {
+		p := make([]*StoreTx, n)
+		for i := range p {
+			p[i] = &StoreTx{ID: i}
+		}
+		return p
+	}
+	// 100 packets, cap 50 → want to evict 50, but 25% safety cap → 25.
+	s := &PacketStore{packets: mkN(100), maxPackets: 50}
+	if got := s.countCapCutoff(0); got != 25 {
+		t.Errorf("over-cap with safety limit: got cutoff %d, want 25", got)
+	}
+	// 30 packets, cap 50 → within cap → no eviction.
+	s2 := &PacketStore{packets: mkN(30), maxPackets: 50}
+	if got := s2.countCapCutoff(0); got != 0 {
+		t.Errorf("within cap: got cutoff %d, want 0", got)
+	}
+	// maxPackets 0 → disabled → no-op even with many packets.
+	s3 := &PacketStore{packets: mkN(100), maxPackets: 0}
+	if got := s3.countCapCutoff(0); got != 0 {
+		t.Errorf("disabled: got cutoff %d, want 0", got)
+	}
+	// 60 packets, cap 50 → evict 10 (< 25% cap of 15) → cutoff 10.
+	s4 := &PacketStore{packets: mkN(60), maxPackets: 50}
+	if got := s4.countCapCutoff(0); got != 10 {
+		t.Errorf("small overage: got cutoff %d, want 10", got)
+	}
+	// Existing (time/mem) cutoff already higher than count cap → keep it.
+	s5 := &PacketStore{packets: mkN(60), maxPackets: 50}
+	if got := s5.countCapCutoff(20); got != 20 {
+		t.Errorf("existing higher cutoff preserved: got %d, want 20", got)
+	}
+}
+
 // TestGetChannelsNoRegionQueryEquivalence guards the window-function rewrite of
 // the no-region GetChannels query: it must return exactly what the old
 // correlated-subquery + GROUP BY form returned (per-channel msg_count, latest
@@ -2238,7 +2302,7 @@ func TestGetChannelsNoRegionQueryEquivalence(t *testing.T) {
 		{"h3", "2026-05-01T09:00:00Z", "#beta", `{"text":"c: only","sender":"c"}`, 5},
 		{"h4", "2026-05-01T11:00:00Z", "#alpha", `{"text":"d: newest","sender":"d"}`, 5},
 		{"h5", "2026-05-01T12:00:00Z", "#beta", `{"text":"e: newest","sender":"e"}`, 5},
-		{"h6", "2026-05-01T13:00:00Z", "enc_secret", `{"text":"x"}`, 5},          // excluded: enc_
+		{"h6", "2026-05-01T13:00:00Z", "enc_secret", `{"text":"x"}`, 5},         // excluded: enc_
 		{"h7", "2026-05-01T14:00:00Z", "#alpha", `{"text":"not a channel"}`, 4}, // excluded: not type 5
 	}
 	for _, r := range rows {
