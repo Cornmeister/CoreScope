@@ -10,6 +10,21 @@
   function statusGreen() { return cssVar('--status-green') || '#22c55e'; }
 
   let map, ws, nodesLayer, pathsLayer, animLayer, heatLayer, geoFilterLayer, clickablePathsLayer;
+  // New animation canvas (#1490)
+  let animCanvas, animCtx;
+  let _dprMedia = null;
+  let _dprChangeHandler = null;
+  let activeAnimations = [];
+  let activePulses = [];
+  let activeGhosts = [];
+  let isAnimating = false;
+  let activeFades = [];
+  let isFading = false;
+  let canvasTopLeft;
+  // #1514 S2 — scratch points reused per-frame in renderAnimations() to avoid
+  // 2 object allocations per anim per frame (50 anims × 60fps = ~6000/sec).
+  const _scratchFrom = { x: 0, y: 0 };
+  const _scratchTo = { x: 0, y: 0 };
   let clickablePaths = [];
   const CLICKABLE_PATH_TTL_MS = 30000;
   const CLICKABLE_PATH_MAX = 50;
@@ -723,6 +738,16 @@
     }
   }
 
+  function wakeCanvasEngine() {
+    if (!isAnimating && activeAnimations.length > 0) {
+      const isPaused = VCR.mode === 'PAUSED' || VCR.speed === 0;
+      if (!isPaused) {
+        isAnimating = true;
+        requestAnimationFrame(renderAnimations);
+      }
+    }
+  }
+
   function vcrFormatTime(tsMs) {
     const d = new Date(tsMs);
     const utc = typeof getTimestampTimezone === 'function' && getTimestampTimezone() === 'utc';
@@ -782,6 +807,9 @@
     }
     if (speedBtn) { speedBtn.textContent = speedLabel(VCR.speed); speedBtn.setAttribute('aria-label', 'Speed ' + speedLabel(VCR.speed)); }
     updateVCRLcd();
+
+    // WAKE THE ENGINE: If we unpaused or changed speed above 0, kickstart the canvas
+    wakeCanvasEngine();
   }
 
   function dbPacketToLive(pkt) {
@@ -1255,7 +1283,8 @@
 
     map = L.map('liveMap', {
       zoomControl: false, attributionControl: false,
-      zoomAnimation: true, markerZoomAnimation: true
+      zoomAnimation: true, markerZoomAnimation: true,
+      preferCanvas: true
     }).setView(mapCenter, mapZoom);
 
     let tileLayer = L.tileLayer(TILE_LIGHT, { maxZoom: 19 }).addTo(map);
@@ -1344,12 +1373,100 @@
     applySatmap(_savedSatmap);
     _satmapSel.addEventListener('change', (e) => applySatmap(e.target.value));
 
-    // #1490 ->animations + trails need their own pane above markerPane.
+    // 1. Create a custom pane for high-performance canvas animations
+    map.createPane('animationsPane');
+
+    // ARCHITECTURE NOTE - dual animation panes (#1514 S7):
+    // Leaflet's default pane z-indexes:
+    //   overlayPane: 400 (vector paths)
+    //   markerPane:  600 (static node dots)
+    //   tooltipPane: 650 (hover labels)
+    //   popupPane:   700 (click details)
+    //
+    // We sandwich TWO panes between markerPane and tooltipPane on purpose:
+    //   - 'animationsPane' (z=625): the canvas engine for in-flight packet
+    //     animations and the post-flight fading polylines (#1514 M2). Sits
+    //     ABOVE static node markers (so packets visibly fly over nodes) but
+    //     UNDER tooltips/popups so hover/click affordances always win.
+    //   - 'liveAnimPane' (z=650, created below): legacy SVG layer used by
+    //     drawMatrixLine/animatePath/pulseNode/ghostMarkers. Kept just above
+    //     animationsPane so SVG-based effects stack on top of canvas trails.
+    map.getPane('animationsPane').style.zIndex = 625;
+    map.getPane('animationsPane').style.pointerEvents = 'none';
+
+    // 2. Create the canvas and inject into the pane
+    animCanvas = document.createElement('canvas');
+    animCanvas.style.cssText = 'position:absolute; pointer-events:none;';
+    map.getPane('animationsPane').appendChild(animCanvas);
+    animCtx = animCanvas.getContext('2d');
+
+    // 3. The Leaflet-native positioning function
+    function updateAnimCanvas() {
+      if (!animCanvas || !map) return;
+      const size = map.getSize();
+      const padX = Math.round(size.x * 0.2);
+      const padY = Math.round(size.y * 0.2);
+      const w = size.x + padX * 2;
+      const h = size.y + padY * 2;
+      const dpr = window.devicePixelRatio || 1;
+      animCanvas.width = w * dpr;
+      animCanvas.height = h * dpr;
+      animCanvas.style.width = w + 'px';
+      animCanvas.style.height = h + 'px';
+      animCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const pixelBounds = map.getPixelBounds();
+      const min = pixelBounds.min.subtract([padX, padY]);
+      canvasTopLeft = min.subtract(map.getPixelOrigin());
+      L.DomUtil.setPosition(animCanvas, canvasTopLeft);
+    }
+
+    let _cullRAF = null;
+    function cullMarkers() {
+      if (!map || !nodesLayer) return;
+      if (_cullRAF) return;
+      _cullRAF = requestAnimationFrame(() => {
+        _cullRAF = null;
+        if (!map || !nodesLayer) return;
+        let bounds;
+        try { bounds = map.getBounds().pad(0.5); } catch (e) { return; }
+        for (const key in nodeMarkers) {
+          const marker = nodeMarkers[key];
+          const isVisible = bounds.contains(marker.getLatLng());
+          const hasLayer = nodesLayer.hasLayer(marker);
+          if (isVisible && !hasLayer) nodesLayer.addLayer(marker);
+          else if (!isVisible && hasLayer) nodesLayer.removeLayer(marker);
+        }
+      });
+    }
+
+    // 4. Hook into Leaflet's transition-end events
+    map.on('moveend zoomend resize', () => {
+      updateAnimCanvas();
+      cullMarkers();
+    });
+    updateAnimCanvas();
+    cullMarkers();
+
+    // #1514 M1+S10 — DPR change handling with {once: true} pattern
+    function _rebindDPRListener() {
+      if (_dprMedia && _dprChangeHandler) {
+        try { _dprMedia.removeEventListener('change', _dprChangeHandler); } catch (_) {}
+      }
+      _dprMedia = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+      _dprChangeHandler = () => {
+        updateAnimCanvas();
+        _rebindDPRListener();
+      };
+      _dprMedia.addEventListener('change', _dprChangeHandler, { once: true });
+    }
+    _rebindDPRListener();
+
+    // #1490 — animations + trails need their own pane above markerPane.
     // PR #1334 moved node markers from L.circleMarker (overlayPane @ 400)
     // to L.marker+divIcon (markerPane @ 600); animations stayed in the
     // default overlayPane and were occluded by every node marker. Custom
     // pane @ 650 puts them strictly above all nodes. (tooltipPane shares
-    // 650 ->tooltips are user-triggered, harmless to share.)
+    // 650 — tooltips are user-triggered, harmless to share.)
     map.createPane('liveAnimPane');
     map.getPane('liveAnimPane').style.zIndex = 650;
     // Pointer-events default to none so the pane doesn't steal clicks
@@ -2918,6 +3035,16 @@
   };
   window._liveRebuildFeedList = function() { return rebuildFeedList(); };
 
+  // PR #1490 test seams: Expose internal state for Playwright assertions
+  window._liveDrawAnimatedLine = drawAnimatedLine;
+  window._liveTestSeams = {
+    getAnimCount: () => activeAnimations.length,
+    isAnimating: () => isAnimating,
+    getPathCount: () => (typeof recentPaths !== 'undefined' ? recentPaths.length : 0),
+    wake: wakeCanvasEngine,
+    getPulses: () => activePulses,
+    triggerPulse: pulseNode
+  };
 
   function connectWS() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -3229,25 +3356,14 @@
       if (isGhost) {
         if (!nodeMarkers[hp.key]) {
           const ghost = L.circleMarker(hp.pos, {
-            radius: 3, fillColor: '#94a3b8', fillOpacity: 0.35, color: '#94a3b8', weight: 1, opacity: 0.5
+            radius: 3, fillColor: '#94a3b8', fillOpacity: 0.35, color: '#94a3b8', weight: 1, opacity: 0.5,
           }).addTo(animLayer);
-          let pulseUp = true;
-          let lastPulseTime = performance.now();
-          const pulseExpiry = lastPulseTime + 3000;
-          function ghostPulse(now) {
-            if (!animLayer || !animLayer.hasLayer(ghost)) return;
-            if (now >= pulseExpiry) {
-              if (animLayer && animLayer.hasLayer(ghost)) animLayer.removeLayer(ghost);
-              return;
-            }
-            if (now - lastPulseTime >= 600) {
-              lastPulseTime = now;
-              ghost.setStyle({ fillOpacity: pulseUp ? 0.6 : 0.25, opacity: pulseUp ? 0.7 : 0.4 });
-              pulseUp = !pulseUp;
-            }
-            requestAnimationFrame(ghostPulse);
+
+          activeGhosts.push({ marker: ghost, timeLeft: 3000, lastTick: null });
+          if (!isAnimating) {
+            isAnimating = true;
+            requestAnimationFrame(renderAnimations);
           }
-          requestAnimationFrame(ghostPulse);
         }
       } else {
         pulseNode(hp.key, hp.pos, typeName);
@@ -3286,48 +3402,24 @@
     if (!marker) return;
     const color = TYPE_COLORS[typeName] || '#6b7280';
 
-    const ring = L.circleMarker(pos, {
-      radius: 2, fillColor: 'transparent', fillOpacity: 0, color: color, weight: 3, opacity: 0.9
-    }).addTo(animLayer);
-
-    let r = 2, op = 0.9;
-    let lastPulse = performance.now();
-    const pulseStart = lastPulse;
-    function animatePulse(now) {
-      if (!animLayer) return;
-      if (now - pulseStart > 2000) {
-        try { animLayer.removeLayer(ring); } catch {}
-        return;
-      }
-      const elapsed = now - lastPulse;
-      if (elapsed >= 26) {
-        const ticks = Math.min(Math.floor(elapsed / 26), 4);
-        r += 1.5 * ticks; op -= 0.03 * ticks;
-        lastPulse = now;
-        if (op <= 0) {
-          try { animLayer.removeLayer(ring); } catch {}
-          return;
-        }
-        try {
-          ring.setRadius(r);
-          ring.setStyle({ opacity: op, weight: Math.max(0.3, 3 - r * 0.04) });
-        } catch { return; }
-      }
-      requestAnimationFrame(animatePulse);
-    }
-    requestAnimationFrame(animatePulse);
-
     const baseColor = marker._baseColor || '#6b7280';
-    const baseSize = marker._baseSize || 6;
-    marker.setStyle({ fillColor: '#fff', fillOpacity: 1, radius: baseSize + 2, color: color, weight: 2 });
+    const baseSize = marker._baseSize || 14;
 
-    if (marker._glowMarker) {
-      marker._glowMarker.setStyle({ fillColor: color, fillOpacity: 0.2, radius: baseSize + 6 });
-      setTimeout(() => marker._glowMarker.setStyle({ fillColor: baseColor, fillOpacity: 0.08, radius: baseSize + 3 }), 500);
+    activePulses.push({
+      pos: pos,
+      color: color,
+      r: 2,
+      op: 0.9,
+      hl_r: baseSize / 2 + 4,
+      hl_op: 0.95,
+      hl_weight: 3,
+      startTime: performance.now(),
+      lastPulse: null
+    });
+    if (!isAnimating) {
+      isAnimating = true;
+      requestAnimationFrame(renderAnimations);
     }
-
-    setTimeout(() => marker.setStyle({ fillColor: color, fillOpacity: 0.95, radius: baseSize + 1, weight: 1.5 }), 150);
-    setTimeout(() => marker.setStyle({ fillColor: baseColor, fillOpacity: 0.85, radius: baseSize, color: '#fff', weight: marker._baseSize > 6 ? 1.5 : 0.5 }), 700);
 
     nodeActivity[key] = (nodeActivity[key] || 0) + 1;
   }
@@ -3613,21 +3705,277 @@
     requestAnimationFrame(tick);
   }
 
+  function tickDt(obj, fieldName, now) {
+    if (obj[fieldName] === null) obj[fieldName] = now;
+    const rawDt = now - obj[fieldName];
+    const dt = Math.min(rawDt, 32);
+    obj[fieldName] = now;
+    const speed = VCR.mode === 'REPLAY' ? (VCR.speed || 1) : 1;
+    return dt * speed;
+  }
+
+  function stepPulse(pulse, now, isPaused) {
+    const scaledDt = tickDt(pulse, 'lastPulse', now);
+
+    if (!isPaused) {
+      const dtSec = scaledDt / 1000;
+      // Inner pulse (58px/sec, fade out 1.15/sec)
+      pulse.r += 58 * dtSec;
+      pulse.op -= 1.15 * dtSec;
+      // Outer highlight ring (grow 20px/sec, fade out 1.35/sec)
+      pulse.hl_r += 20 * dtSec;
+      pulse.hl_op -= 1.35 * dtSec;
+      pulse.hl_weight = pulse.hl_op > 0.4 ? 3 : 2;
+    }
+  }
+
+  function renderAnimations(now) {
+    if (!animCtx) return;
+
+    if (activeAnimations.length === 0 && activePulses.length === 0 && activeGhosts.length === 0) {
+      isAnimating = false;
+      animCtx.clearRect(0, 0, animCanvas.clientWidth, animCanvas.clientHeight);
+      return;
+    }
+
+    const isPaused = VCR.mode === 'PAUSED' || VCR.speed === 0;
+
+    // Clear the canvas for this frame
+    animCtx.clearRect(0, 0, animCanvas.clientWidth, animCanvas.clientHeight);
+
+    // Render Ghosts (VCR-aware timeout)
+    for (let i = activeGhosts.length - 1; i >= 0; i--) {
+      const g = activeGhosts[i];
+      if (g.lastTick === null) g.lastTick = now;
+      const dt = now - g.lastTick;
+      g.lastTick = now;
+
+      if (!isPaused) {
+        g.timeLeft -= dt * (VCR.speed || 1);
+      }
+
+      if (g.timeLeft <= 0) {
+        if (animLayer && animLayer.hasLayer(g.marker)) {
+          try { animLayer.removeLayer(g.marker); } catch { }
+        }
+        activeGhosts.splice(i, 1);
+      }
+    }
+
+    // Render Pulses
+    for (let i = activePulses.length - 1; i >= 0; i--) {
+      const pulse = activePulses[i];
+      stepPulse(pulse, now, isPaused);
+
+      // Natural completion based purely on scaled simulation time
+      // with a 30-second wall-clock safety backstop for engine stalls.
+      if (pulse.op <= 0 || now - pulse.startTime > 30000) {
+        activePulses.splice(i, 1);
+        continue;
+      }
+
+      const pulseLayerPt = map.latLngToLayerPoint(pulse.pos);
+      const pulsePt = {
+        x: pulseLayerPt.x - canvasTopLeft.x,
+        y: pulseLayerPt.y - canvasTopLeft.y
+      };
+
+      const W = animCanvas.clientWidth;
+      const H = animCanvas.clientHeight;
+      if (pulsePt.x >= -pulse.r && pulsePt.x <= W + pulse.r && pulsePt.y >= -pulse.r && pulsePt.y <= H + pulse.r) {
+        // Inner expanding pulse
+        animCtx.beginPath();
+        animCtx.arc(pulsePt.x, pulsePt.y, pulse.r, 0, Math.PI * 2);
+        animCtx.lineWidth = Math.max(0.3, 3 - pulse.r * 0.04);
+        animCtx.strokeStyle = pulse.color;
+        animCtx.globalAlpha = Math.max(0, pulse.op);
+        animCtx.stroke();
+
+        // Outer highlight ring (previously marker._highlightRing)
+        if (pulse.hl_op > 0) {
+          animCtx.beginPath();
+          animCtx.arc(pulsePt.x, pulsePt.y, pulse.hl_r, 0, Math.PI * 2);
+          animCtx.lineWidth = pulse.hl_weight;
+          animCtx.strokeStyle = pulse.color;
+          animCtx.globalAlpha = Math.max(0, pulse.hl_op);
+          animCtx.stroke();
+        }
+      }
+    }
+    animCtx.globalAlpha = 1.0;
+
+    for (let i = activeAnimations.length - 1; i >= 0; i--) {
+      const anim = activeAnimations[i];
+      const scaledDt = tickDt(anim, 'lastTick', now);
+
+      // Advance progress only if we are not paused
+      if (!isPaused) {
+        anim.progress += scaledDt / 660;
+      }
+
+      const t = Math.min(1, anim.progress);
+
+      // Use LayerPoint math so coordinates lock to the moving pane
+      const fromLayerPt = map.latLngToLayerPoint(anim.from);
+      const toLayerPt = map.latLngToLayerPoint(anim.to);
+
+      // Offset by the canvas's position within the pane to get drawable pixels.
+      // #1514 S2 — reuse module-scoped scratch objects instead of allocating per frame.
+      const fromPt = _scratchFrom;
+      fromPt.x = fromLayerPt.x - canvasTopLeft.x;
+      fromPt.y = fromLayerPt.y - canvasTopLeft.y;
+      const toPt = _scratchTo;
+      toPt.x = toLayerPt.x - canvasTopLeft.x;
+      toPt.y = toLayerPt.y - canvasTopLeft.y;
+
+      const W = animCanvas.clientWidth;
+      const H = animCanvas.clientHeight;
+      const cull = (fromPt.x < 0 && toPt.x < 0) || (fromPt.x > W && toPt.x > W) ||
+        (fromPt.y < 0 && toPt.y < 0) || (fromPt.y > H && toPt.y > H);
+
+      if (!cull) {
+        const currentX = fromPt.x + (toPt.x - fromPt.x) * t;
+        const currentY = fromPt.y + (toPt.y - fromPt.y) * t;
+
+        // Draw Contrail (glow)
+        animCtx.beginPath();
+        animCtx.moveTo(fromPt.x, fromPt.y);
+        animCtx.lineTo(currentX, currentY);
+        animCtx.strokeStyle = anim.contrailColor;
+        animCtx.lineWidth = 6;
+        animCtx.globalAlpha = anim.opacity * 0.2;
+        animCtx.lineCap = 'round';
+        animCtx.stroke();
+
+        // Draw Core Line
+        animCtx.beginPath();
+        animCtx.moveTo(fromPt.x, fromPt.y);
+        animCtx.lineTo(currentX, currentY);
+        if (anim.isDashed) {
+          animCtx.setLineDash([4, 6]);
+          animCtx.lineWidth = 1.5;
+        } else {
+          animCtx.lineWidth = 2;
+        }
+        animCtx.strokeStyle = anim.lineColor;
+        animCtx.globalAlpha = anim.opacity;
+        animCtx.stroke();
+        animCtx.setLineDash([]); // Reset for next draw
+
+        // Draw Leading Dot
+        animCtx.beginPath();
+        animCtx.arc(currentX, currentY, 3.5, 0, Math.PI * 2);
+        animCtx.fillStyle = anim.hashFill;
+        animCtx.fill();
+        animCtx.lineWidth = 1.5;
+        animCtx.strokeStyle = anim.hashOutline;
+        animCtx.stroke();
+        animCtx.globalAlpha = 1.0; // Reset
+      }
+
+      // Handle completion
+      if (t >= 1) {
+        createFadingLeafletLine(anim);
+        if (anim.onComplete) anim.onComplete();
+        activeAnimations.splice(i, 1);
+      }
+    }
+
+    // SLEEP LOGIC: If paused, halt the loop and prepare all animations for a clean wake
+    if (isPaused) {
+      isAnimating = false;
+      for (let i = 0; i < activeAnimations.length; i++) {
+        activeAnimations[i].lastTick = null;
+      }
+      for (let i = 0; i < activeGhosts.length; i++) {
+        activeGhosts[i].lastTick = null;
+      }
+      return; // Stop requesting frames. GPU goes to sleep.
+    }
+
+    requestAnimationFrame(renderAnimations);
+  }
+
+  function renderFades(now) {
+    if (activeFades.length === 0) {
+      isFading = false;
+      return;
+    }
+    for (let i = activeFades.length - 1; i >= 0; i--) {
+      const f = activeFades[i];
+      if (!pathsLayer) continue;
+      const fadeElapsed = now - f.lastFade;
+      if (fadeElapsed >= 52) {
+        const fadeTicks = Math.min(Math.floor(fadeElapsed / 52), 4);
+        f.lastFade = now;
+        f.opacity -= 0.1 * fadeTicks;
+        if (f.opacity <= 0) {
+          if (pathsLayer) { pathsLayer.removeLayer(f.line); pathsLayer.removeLayer(f.contrail); }
+          recentPaths = recentPaths.filter(p => p.line !== f.line);
+          activeFades.splice(i, 1);
+        } else {
+          f.line.setStyle({ opacity: f.opacity });
+          f.contrail.setStyle({ opacity: f.opacity * 0.15 });
+        }
+      }
+    }
+    if (activeFades.length > 0) {
+      requestAnimationFrame(renderFades);
+    } else {
+      isFading = false;
+    }
+  }
+
+  function createFadingLeafletLine(anim) {
+    if (!pathsLayer) return;
+
+    const contrail = L.polyline([anim.from, anim.to], {
+      pane: 'animationsPane', // #1514 M2 — fades stack with the moving phase (z=625).
+      color: anim.contrailColor, weight: 6, opacity: anim.opacity * 0.2, lineCap: 'round'
+    }).addTo(pathsLayer);
+
+    const line = L.polyline([anim.from, anim.to], {
+      pane: 'animationsPane', // #1514 M2 — fades stack with the moving phase (z=625).
+      color: anim.lineColor, weight: anim.isDashed ? 1.5 : 2, opacity: anim.opacity,
+      lineCap: 'round', dashArray: anim.isDashed ? '4 6' : null
+    }).addTo(pathsLayer);
+
+    recentPaths.push({ line, glowLine: contrail, time: Date.now() });
+    while (recentPaths.length > 5) {
+      const old = recentPaths.shift();
+      if (pathsLayer) { pathsLayer.removeLayer(old.line); pathsLayer.removeLayer(old.glowLine); }
+      activeFades = activeFades.filter(f => f.line !== old.line);
+    }
+
+    activeFades.push({
+      line: line,
+      contrail: contrail,
+      opacity: anim.opacity,
+      lastFade: performance.now()
+    });
+
+    if (!isFading) {
+      isFading = true;
+      requestAnimationFrame(renderFades);
+    }
+  }
+
   function drawAnimatedLine(from, to, color, onComplete, overrideOpacity, rawHex, hash) {
-    if (!animLayer || !pathsLayer) { if (onComplete) onComplete(); return; }
+    // GUARD: Prevent stale callbacks from pushing to a destroyed map
+    if (!map || !animCtx) {
+      if (onComplete) onComplete();
+      return;
+    }
+
     if (matrixMode) return drawMatrixLine(from, to, color, onComplete, rawHex);
-    const steps = 20;
-    const latStep = (to[0] - from[0]) / steps;
-    const lonStep = (to[1] - from[1]) / steps;
-    let step = 0;
-    let currentCoords = [from];
+
     const mainOpacity = overrideOpacity ?? 0.8;
     const isDashed = overrideOpacity != null;
 
-    // Hash-derived color for fill + contrail + outline (when toggle ON and not ghost/dashed line)
     var hashFill = '#fff';
     var hashOutline = color;
     var contrailColor = color;
+
     if (colorByHash && hash && !isDashed && window.HashColor) {
       var hsl = HashColor.hashToHsl(hash, _liveTheme());
       hashFill = hsl;
@@ -3635,86 +3983,26 @@
       contrailColor = hsl;
     }
 
-    const contrail = L.polyline([from], {
-      color: contrailColor, weight: 6, opacity: mainOpacity * 0.2, lineCap: 'round'
-    }).addTo(pathsLayer);
+    // Push to the hardware-accelerated canvas engine
+    activeAnimations.push({
+      from: from,
+      to: to,
+      progress: 0,
+      lastTick: null,
+      opacity: mainOpacity,
+      isDashed: isDashed,
+      lineColor: (colorByHash && hash && !isDashed && window.HashColor) ? hashFill : color,
+      contrailColor: contrailColor,
+      hashFill: hashFill,
+      hashOutline: hashOutline,
+      onComplete: onComplete
+    });
 
-    const line = L.polyline([from], {
-      color: (colorByHash && hash && !isDashed && window.HashColor) ? hashFill : color,
-      weight: isDashed ? 1.5 : 2, opacity: mainOpacity, lineCap: 'round',
-      dashArray: isDashed ? '4 6' : null,
-      className: 'live-packet-trace'
-    }).addTo(pathsLayer);
-
-    const dot = L.circleMarker(from, {
-      radius: 3.5, fillColor: hashFill, fillOpacity: 1, color: hashOutline, weight: 1.5
-    }).addTo(animLayer);
-
-    let lastStep = performance.now();
-    function animateLine(now) {
-      if (!animLayer || !pathsLayer) {
-        if (onComplete) onComplete();
-        return;
-      }
-      const elapsed = now - lastStep;
-      // Tab-wake fix: if the tab was hidden for a long time, elapsed can be
-      // enormous, causing the animation to fast-forward. Reset the clock so
-      // the animation resumes smoothly from the current step.
-      if (elapsed > 500) { lastStep = now; requestAnimationFrame(animateLine); return; }
-      const stepMs = 33 / VCR.speed;
-      if (elapsed >= stepMs) {
-        const ticks = Math.min(Math.floor(elapsed / stepMs), 4);
-        lastStep = now;
-        for (let t = 0; t < ticks && step < steps; t++) {
-          step++;
-          const lat = from[0] + latStep * step;
-          const lon = from[1] + lonStep * step;
-          currentCoords.push([lat, lon]);
-        }
-        const lastPt = currentCoords[currentCoords.length - 1];
-        line.setLatLngs(currentCoords);
-        contrail.setLatLngs(currentCoords);
-        dot.setLatLng(lastPt);
-
-        if (step >= steps) {
-          if (animLayer) animLayer.removeLayer(dot);
-
-          recentPaths.push({ line, glowLine: contrail, time: Date.now() });
-          while (recentPaths.length > 5) {
-            const old = recentPaths.shift();
-            if (pathsLayer) { pathsLayer.removeLayer(old.line); pathsLayer.removeLayer(old.glowLine); }
-          }
-
-          setTimeout(() => {
-            let fadeOp = mainOpacity;
-            let lastFade = performance.now();
-            function animateFade(now) {
-              if (!pathsLayer) return;
-              const fadeElapsed = now - lastFade;
-              if (fadeElapsed >= 52) {
-                const fadeTicks = Math.min(Math.floor(fadeElapsed / 52), 4);
-                lastFade = now;
-                fadeOp -= 0.1 * fadeTicks;
-                if (fadeOp <= 0) {
-                  if (pathsLayer) { pathsLayer.removeLayer(line); pathsLayer.removeLayer(contrail); }
-                  recentPaths = recentPaths.filter(p => p.line !== line);
-                  return;
-                }
-                line.setStyle({ opacity: fadeOp });
-                contrail.setStyle({ opacity: fadeOp * 0.15 });
-              }
-              requestAnimationFrame(animateFade);
-            }
-            requestAnimationFrame(animateFade);
-          }, 800);
-
-          if (onComplete) onComplete();
-          return;
-        }
-      }
-      requestAnimationFrame(animateLine);
+    // WAKE LOGIC: Kickstart the loop if it is currently sleeping
+    if (!isAnimating) {
+      isAnimating = true;
+      requestAnimationFrame(renderAnimations);
     }
-    requestAnimationFrame(animateLine);
   }
 
   function showHeatMap() {
@@ -4032,6 +4320,37 @@
   }
 
   function destroy() {
+    // #1514 S3 — drain onComplete callbacks BEFORE clearing the array. Audio
+    // `onHop` hooks rely on these firing exactly once per queued animation;
+    // previously destroy() dropped them silently when navigating away with
+    // packets in flight.
+    for (let i = 0; i < activeAnimations.length; i++) {
+      const a = activeAnimations[i];
+      if (a && typeof a.onComplete === 'function') {
+        try { a.onComplete(); } catch (_) {}
+      }
+    }
+    activeAnimations.length = 0;
+    activePulses.length = 0;
+    activeFades.length = 0;
+    activeGhosts.length = 0;
+    isAnimating = false;
+    isFading = false;
+    // #1514 S8 — tear down animation canvas + DPR listener BEFORE map.remove()
+    // (Leaflet pane is still attached). Doing this after map.remove() would
+    // call clearRect on a context whose backing pane is gone, and a late DPR
+    // change could still fire updateAnimCanvas() against a null map.
+    if (animCtx && animCanvas) {
+      try { animCtx.clearRect(0, 0, animCanvas.clientWidth, animCanvas.clientHeight); } catch (_) {}
+      animCanvas.remove();
+      animCanvas = null;
+      animCtx = null;
+    }
+    if (_dprMedia && _dprChangeHandler) {
+      try { _dprMedia.removeEventListener('change', _dprChangeHandler); } catch (_) {}
+      _dprMedia = null;
+      _dprChangeHandler = null;
+    }
     stopReplay();
     if (_timelineRefreshInterval) { clearInterval(_timelineRefreshInterval); _timelineRefreshInterval = null; }
     if (_lcdClockInterval) { clearInterval(_lcdClockInterval); _lcdClockInterval = null; }
@@ -4103,6 +4422,11 @@
 
   let _themeRefreshHandler = null;
 
+  // #1514 S4 — single source of truth for window._liveTestSeams is at the
+  // earlier exposure block (search for `window._liveTestSeams = {`). The
+  // duplicate definition that lived here previously added a `_liveTestSeams.wake`
+  // that bypassed pause/empty-queue guards; tests must use the production
+  // `wakeCanvasEngine` exposed there.
 
   registerPage('live', {
     init: function(app, routeParam) {
