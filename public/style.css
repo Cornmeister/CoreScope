@@ -249,7 +249,7 @@
   --surface-3: var(--dark-surface-3);
   --surface: var(--surface-1);
   --content-bg: var(--surface-0);
-  --card-bg: var(--surface-1);
+  --card-bg: var(--surface-2);
   --text: var(--dark-text);
   --text-muted: var(--dark-text-muted);
   --border: var(--dark-border);
@@ -285,7 +285,7 @@
     --surface-3: var(--dark-surface-3);
     --surface: var(--surface-1);
     --content-bg: var(--surface-0);
-    --card-bg: var(--surface-1);
+    --card-bg: var(--surface-2);
     --text: var(--dark-text);
     --text-muted: var(--dark-text-muted);
     --border: var(--dark-border);
@@ -1029,7 +1029,7 @@ body.scroll-locked { overflow: hidden; }
 }
 .field-table .section-row td {
   background: var(--section-bg, #eef2ff); font-weight: 700; font-size: 11px;
-  text-transform: uppercase; letter-spacing: .5px; color: var(--accent);
+  text-transform: uppercase; letter-spacing: .5px; color: var(--text);
 }
 .field-table .section-header td  { background: rgba(243,139,168,0.18); }
 .field-table .section-transport td { background: rgba(137,180,250,0.18); }
@@ -2370,9 +2370,9 @@ button.ch-item.ch-item-encrypted .ch-badge { filter: grayscale(0.6); }
 
 .copy-link-btn {
   padding: 5px 12px;
-  background: rgba(59, 130, 246, 0.12);
-  border: 1px solid rgba(59, 130, 246, 0.25);
-  color: var(--accent, #3b82f6);
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  color: var(--text);
   border-radius: 6px;
   font-size: 0.78rem;
   font-weight: 600;
