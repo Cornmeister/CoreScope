@@ -840,6 +840,8 @@ registerPage('tools-landing', {
           '<a href="#/tools/los" class="tools-card"><h3>🔭 LOS Analyzer</h3><p>Check line-of-sight between two points with terrain elevation and relay suggestions.</p></a>' +
           '<a href="#/tools/rf-coverage" class="tools-card"><h3>📡 RF Coverage</h3><p>Compute terrain-aware LoRa coverage polygon from a transmitter position.</p></a>' +
           '<a href="#/tools/mc-keygen" class="tools-card"><h3>🔑 MC-Keygen</h3><p>Generate and manage MeshCore keypairs for node identity.</p></a>' +
+          '<a href="#/analytics" class="tools-card"><h3>📊 Analytics</h3><p>Network topology, RF signal, channel stats, and performance dashboards.</p></a>' +
+          '<a href="#/audio-lab" class="tools-card"><h3>🎵 Audio Lab</h3><p>Sonify live packets — turn raw mesh traffic into generative music.</p></a>' +
         '</div>' +
       '</div>';
   },
@@ -938,7 +940,7 @@ function navigate() {
 
   // Update nav active state
   document.querySelectorAll('.nav-link[data-route]').forEach(el => {
-    el.classList.toggle('active', el.dataset.route === basePage || (el.dataset.route === 'tools' && (basePage === 'mc-keygen' || basePage === 'traces' || basePage === 'path-inspector' || basePage === 'tools-landing' || basePage === 'los' || basePage === 'rf-coverage')));
+    el.classList.toggle('active', el.dataset.route === basePage || (el.dataset.route === 'tools' && (basePage === 'mc-keygen' || basePage === 'traces' || basePage === 'path-inspector' || basePage === 'tools-landing' || basePage === 'los' || basePage === 'rf-coverage' || basePage === 'analytics' || basePage === 'audio-lab')));
   });
   // Update "More" button to show active state if a low-priority page is selected
   var moreBtn = document.getElementById('navMoreBtn');
@@ -1573,7 +1575,7 @@ window.addEventListener('DOMContentLoaded', () => {
       const stats = await api('/stats', { ttl: CLIENT_TTL.stats });
       const el = document.getElementById('navStats');
       if (el) {
-        el.innerHTML = `<span class="stat-val">${stats.totalPackets}</span> pkts · <span class="stat-val">${stats.totalNodes}</span> nodes · <span class="stat-val">${stats.totalObservers}</span> obs`;
+        el.innerHTML = `<span class="stat-val">${stats.totalPackets}</span> pkts · <span class="stat-val">${stats.totalNodes}</span> nodes · <span class="stat-val">${stats.onlineObservers ?? stats.totalObservers}</span> obs`;
         el.querySelectorAll('.stat-val').forEach(s => s.classList.add('updated'));
         setTimeout(() => { el.querySelectorAll('.stat-val').forEach(s => s.classList.remove('updated')); }, 600);
         if (navPriorityFn) requestAnimationFrame(navPriorityFn);

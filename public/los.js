@@ -372,12 +372,12 @@
     var style = document.createElement('style');
     style.id = 'los-styles';
     style.textContent = [
-      '.los-page { padding: 20px; max-width: 1200px; margin: 0 auto; }',
-      '.los-page h2 { margin-bottom: 16px; font-size: 1.4rem; }',
-      '.los-body { display: flex; gap: 20px; }',
-      '.los-controls { flex: 0 0 340px; display: flex; flex-direction: column; gap: 16px; }',
-      '.los-map-wrap { flex: 1; position: relative; min-height: 480px; }',
-      '.los-map { width: 100%; height: 100%; min-height: 480px; border-radius: 8px; border: 1px solid var(--border); }',
+      '.los-page { padding: 20px; display: flex; flex-direction: column; height: calc(100vh - 120px); min-height: 400px; box-sizing: border-box; }',
+      '.los-page h2 { margin: 0 0 12px; font-size: 1.4rem; flex-shrink: 0; }',
+      '.los-body { display: flex; gap: 20px; flex: 1; min-height: 0; }',
+      '.los-controls { flex: 0 0 340px; display: flex; flex-direction: column; gap: 16px; overflow-y: auto; }',
+      '.los-map-wrap { flex: 1; position: relative; border-radius: 8px; overflow: hidden; min-height: 300px; }',
+      '.los-map { width: 100%; height: 100%; border-radius: 8px; border: 1px solid var(--border); }',
       '.los-point-group { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }',
       '.los-point-group h3 { margin: 0 0 10px; font-size: 0.95rem; }',
       '.los-input { background: var(--input-bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 6px 8px; font-size: 13px; width: 100%; box-sizing: border-box; }',
@@ -413,10 +413,10 @@
       '.tpick-btn.active { background: var(--accent); color: #fff; }',
       '.tpick-btn:hover:not(.active) { background: var(--row-hover); color: var(--text); }',
       '@media (max-width: 768px) {',
+      '  .los-page { height: auto; min-height: unset; }',
       '  .los-body { flex-direction: column; }',
-      '  .los-controls { flex: none; }',
+      '  .los-controls { flex: none; overflow-y: visible; }',
       '  .los-map-wrap { min-height: 300px; }',
-      '  .los-map { min-height: 300px; }',
       '}',
     ].join('\n');
     document.head.appendChild(style);
