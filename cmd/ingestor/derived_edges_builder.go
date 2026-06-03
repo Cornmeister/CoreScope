@@ -17,14 +17,21 @@ type RouteHistoryBackfillSettings struct {
 	Lookback time.Duration
 	Window   time.Duration
 	Pause    time.Duration
+	// EdgeRetentionDays bounds the raw route_history_edges table (short).
+	// HourlyRetentionDays bounds the rendered route_history_edge_hourly
+	// aggregate (long — this is the displayable window).
+	EdgeRetentionDays   int
+	HourlyRetentionDays int
 }
 
 func DefaultRouteHistoryBackfillSettings() RouteHistoryBackfillSettings {
 	return RouteHistoryBackfillSettings{
-		Enabled:  true,
-		Lookback: routeHistoryBackfillLookback,
-		Window:   routeHistoryBackfillWindow,
-		Pause:    routeHistoryBackfillPause,
+		Enabled:             true,
+		Lookback:            routeHistoryBackfillLookback,
+		Window:              routeHistoryBackfillWindow,
+		Pause:               routeHistoryBackfillPause,
+		EdgeRetentionDays:   defaultRouteHistoryEdgeRetentionDays,
+		HourlyRetentionDays: defaultRouteHistoryHourlyRetentionDays,
 	}
 }
 
@@ -61,7 +68,7 @@ func (s *Store) StartDerivedEdgesBuilder(interval time.Duration, routeCfg RouteH
 			log.Printf("[derived-edge-build] initial build: %d neighbor edges, %d route-history edge events",
 				res.NeighborEdges, res.RouteHistoryEdges)
 		}
-		if n, err := s.pruneRouteHistoryEdges(8); err != nil {
+		if n, err := s.pruneRouteHistoryEdges(routeCfg.EdgeRetentionDays, routeCfg.HourlyRetentionDays); err != nil {
 			log.Printf("[route-history-build] initial prune error: %v", err)
 		} else if n > 0 {
 			log.Printf("[route-history-build] initial prune removed %d old edge events", n)
@@ -84,7 +91,7 @@ func (s *Store) StartDerivedEdgesBuilder(interval time.Duration, routeCfg RouteH
 				}
 				if time.Since(lastPruneAt) >= 24*time.Hour {
 					lastPruneAt = time.Now()
-					if n, err := s.pruneRouteHistoryEdges(8); err != nil {
+					if n, err := s.pruneRouteHistoryEdges(routeCfg.EdgeRetentionDays, routeCfg.HourlyRetentionDays); err != nil {
 						log.Printf("[route-history-build] prune error: %v", err)
 					} else if n > 0 {
 						log.Printf("[route-history-build] pruned %d old edge events", n)

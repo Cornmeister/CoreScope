@@ -13,9 +13,23 @@ import (
 const RouteHistoryBuilderInterval = 60 * time.Second
 
 const (
-	routeHistoryBackfillLookback = 7 * 24 * time.Hour
+	// routeHistoryBackfillLookback is how far back the startup backfill fills
+	// route-history. It MUST stay strictly below defaultRouteHistoryEdgeRetentionDays:
+	// the backfill replays observations into route_history_edges (INSERT OR IGNORE),
+	// and the hourly aggregate's count only increments when a raw edge is NEW. If
+	// the backfill replayed observations whose raw edges were already pruned, the
+	// hourly counts would double. config.RouteHistoryBackfillSettings clamps this.
+	routeHistoryBackfillLookback = 24 * time.Hour
 	routeHistoryBackfillWindow   = time.Hour
 	routeHistoryBackfillPause    = 2 * time.Second
+
+	// Retention windows are decoupled (issue: 46 GB prod DB). The raw
+	// route_history_edges table is only a build intermediate + per-observation
+	// idempotency guard, so it is kept short. The route_history_edge_hourly
+	// aggregate is what the server renders (buildRouteHistoryPayload prefers it),
+	// so it carries the full displayable window.
+	defaultRouteHistoryEdgeRetentionDays   = 2
+	defaultRouteHistoryHourlyRetentionDays = 8
 )
 
 type routeHistoryEdgeRow struct {
@@ -48,7 +62,7 @@ func (s *Store) StartRouteHistoryBuilder(interval time.Duration) func() {
 		} else {
 			log.Printf("[route-history-build] initial build: %d edge events inserted", n)
 		}
-		if n, err := s.pruneRouteHistoryEdges(8); err != nil {
+		if n, err := s.pruneRouteHistoryEdges(defaultRouteHistoryEdgeRetentionDays, defaultRouteHistoryHourlyRetentionDays); err != nil {
 			log.Printf("[route-history-build] initial prune error: %v", err)
 		} else if n > 0 {
 			log.Printf("[route-history-build] initial prune removed %d old edge events", n)
@@ -70,7 +84,7 @@ func (s *Store) StartRouteHistoryBuilder(interval time.Duration) func() {
 				}
 				if time.Since(lastPruneAt) >= 24*time.Hour {
 					lastPruneAt = time.Now()
-					if n, err := s.pruneRouteHistoryEdges(8); err != nil {
+					if n, err := s.pruneRouteHistoryEdges(defaultRouteHistoryEdgeRetentionDays, defaultRouteHistoryHourlyRetentionDays); err != nil {
 						log.Printf("[route-history-build] prune error: %v", err)
 					} else if n > 0 {
 						log.Printf("[route-history-build] pruned %d old edge events", n)
@@ -146,18 +160,27 @@ func (s *Store) backfillRouteHistoryEdges(stop <-chan struct{}, now time.Time, l
 	log.Printf("[route-history-build] backfill complete: %d edge events inserted", total)
 }
 
-func (s *Store) pruneRouteHistoryEdges(maxAgeDays int) (int64, error) {
-	if maxAgeDays <= 0 {
-		maxAgeDays = 8
+// pruneRouteHistoryEdges deletes from the two route-history tables on
+// INDEPENDENT windows: the raw per-observation edges (edgeDays, short) and the
+// hourly aggregate that the UI renders (hourlyDays, long). Decoupling them lets
+// the displayed route-history keep its full time range while the heavy raw
+// table — which is only a build intermediate + idempotency guard — stays small.
+// Returns the number of raw edge rows deleted.
+func (s *Store) pruneRouteHistoryEdges(edgeDays, hourlyDays int) (int64, error) {
+	if edgeDays <= 0 {
+		edgeDays = defaultRouteHistoryEdgeRetentionDays
 	}
-	cutoff := time.Now().UTC().Add(-time.Duration(maxAgeDays) * 24 * time.Hour).Format(time.RFC3339)
-	res, err := s.db.Exec(`DELETE FROM route_history_edges WHERE last_seen < ?`, cutoff)
+	if hourlyDays <= 0 {
+		hourlyDays = defaultRouteHistoryHourlyRetentionDays
+	}
+	edgeCutoff := time.Now().UTC().Add(-time.Duration(edgeDays) * 24 * time.Hour).Format(time.RFC3339)
+	res, err := s.db.Exec(`DELETE FROM route_history_edges WHERE last_seen < ?`, edgeCutoff)
 	if err != nil {
 		return 0, err
 	}
 	n, _ := res.RowsAffected()
-	cutoffBucket := time.Now().UTC().Add(-time.Duration(maxAgeDays) * 24 * time.Hour).Truncate(time.Hour).Unix()
-	if _, err := s.db.Exec(`DELETE FROM route_history_edge_hourly WHERE bucket_start < ?`, cutoffBucket); err != nil {
+	hourlyCutoff := time.Now().UTC().Add(-time.Duration(hourlyDays) * 24 * time.Hour).Truncate(time.Hour).Unix()
+	if _, err := s.db.Exec(`DELETE FROM route_history_edge_hourly WHERE bucket_start < ?`, hourlyCutoff); err != nil {
 		return n, err
 	}
 	return n, nil

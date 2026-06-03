@@ -325,14 +325,19 @@ func TestRouteHistoryBackfillSettingsDefaults(t *testing.T) {
 	if !got.Enabled {
 		t.Fatal("route-history backfill should default enabled")
 	}
-	if got.Lookback != 7*24*time.Hour {
-		t.Fatalf("lookback = %s, want 168h", got.Lookback)
+	// Default backfill lookback is clamped strictly below the default edge
+	// retention (2 days) to keep the hourly counts from double-incrementing → 1d.
+	if got.Lookback != 24*time.Hour {
+		t.Fatalf("lookback = %s, want 24h (clamped below 2d edge retention)", got.Lookback)
 	}
 	if got.Window != time.Hour {
 		t.Fatalf("window = %s, want 1h", got.Window)
 	}
 	if got.Pause != 2*time.Second {
 		t.Fatalf("pause = %s, want 2s", got.Pause)
+	}
+	if got.EdgeRetentionDays != 2 || got.HourlyRetentionDays != 8 {
+		t.Fatalf("retentions edge=%d hourly=%d, want 2/8", got.EdgeRetentionDays, got.HourlyRetentionDays)
 	}
 }
 
@@ -343,6 +348,7 @@ func TestRouteHistoryBackfillSettingsFromJSON(t *testing.T) {
 		"routeHistory": {
 			"backfillEnabled": false,
 			"backfillDays": 3,
+			"edgeRetentionDays": 4,
 			"backfillChunkMinutes": 15,
 			"backfillPauseMs": 250
 		}
@@ -357,8 +363,12 @@ func TestRouteHistoryBackfillSettingsFromJSON(t *testing.T) {
 	if got.Enabled {
 		t.Fatal("backfillEnabled=false should disable route-history backfill")
 	}
+	// 3-day backfill stays intact because edgeRetentionDays=4 (3 < 4, not clamped).
 	if got.Lookback != 3*24*time.Hour {
 		t.Fatalf("lookback = %s, want 72h", got.Lookback)
+	}
+	if got.EdgeRetentionDays != 4 {
+		t.Fatalf("edgeRetentionDays = %d, want 4", got.EdgeRetentionDays)
 	}
 	if got.Window != 15*time.Minute {
 		t.Fatalf("window = %s, want 15m", got.Window)
@@ -372,6 +382,7 @@ func TestRouteHistoryBackfillSettingsClampUnsafeValues(t *testing.T) {
 	pause := 120000
 	cfg := &Config{RouteHistory: &RouteHistoryConfig{
 		BackfillDays:         90,
+		EdgeRetentionDays:    31, // high enough that the 30-day backfill cap is what binds
 		BackfillChunkMinutes: 1,
 		BackfillPauseMs:      &pause,
 	}}
