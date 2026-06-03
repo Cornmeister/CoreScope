@@ -29,7 +29,7 @@ function renderVersionCard(health) {
   var ver = health.version && health.version !== 'unknown' ? health.version : null;
   var sha = health.commit && health.commit !== 'unknown' ? health.commit : null;
   if (!ver && !sha) return '';
-  var vTag = ver ? (ver.charAt(0) === 'corn' ? ver : 'corn' + ver) : null;
+  var vTag = ver ? (ver.startsWith('corn') ? ver : 'corn' + ver) : null;
   var parts = [];
   if (vTag) parts.push('<a href="' + GH + '" target="_blank" rel="noopener">' + vTag + '</a>');
   if (sha) parts.push('<a href="' + GH + '/commit/' + sha + '" target="_blank" rel="noopener">' + sha.slice(0, 7) + '</a>');

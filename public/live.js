@@ -27,12 +27,12 @@
   let nodeFilterText = localStorage.getItem('live-node-filter') || '';
   // Cached lower-cased pubkeys of nodes that match the active filter. Without
   // this cache, packetInvolvesFilteredNode() loops over every entry in
-  // nodeData for every hop of every packet — O(packets · hops · nodes) on
+  // nodeData for every hop of every packet ->O(packets · hops · nodes) on
   // busy mesh feeds. We invalidate on (a) the filter text changing or
   // (b) nodeData gaining/losing a key (new node arriving via WS, eviction).
   // A reference-equality check would miss in-place mutations of nodeData (e.g.
   // when an inbound advert adds a new pubkey), causing matching new packets
-  // to be silently filtered out — Object.keys(nodeData).length catches those.
+  // to be silently filtered out ->Object.keys(nodeData).length catches those.
   // Renaming an existing node's display name without changing the keys won't
   // invalidate; that's extremely rare in MeshCore and a one-typed filter
   // refresh from the user picks up any drift.
@@ -109,7 +109,7 @@
   // #1189 R2 mesh-operator fix: live feed must show the observer's IATA pill
   // alongside the existing 👁 N badge so operators on /live can tell SAME-
   // region from CROSS-region reception at a glance (same affordance as the
-  // /packets table). Mirrors `obsIataBadge` in public/packets.js — kept as a
+  // /packets table). Mirrors `obsIataBadge` in public/packets.js ->kept as a
   // local helper for now (live.js and packets.js are separate IIFEs with no
   // shared module). TODO: extract `obsIataBadge` into shared packet-helpers.js
   // and have both surfaces import it.
@@ -163,7 +163,7 @@
   // === VCR State Machine ===
   const VCR = {
     mode: 'LIVE',        // LIVE | PAUSED | REPLAY
-    buffer: [],          // { ts: Date.now(), pkt } — all packets seen
+    buffer: [],          // { ts: Date.now(), pkt } ->all packets seen
     playhead: -1,        // index in buffer (-1 = live tail)
     missedCount: 0,      // packets arrived while paused
     speed: 1,            // replay speed: 1, 2, 4, 8
@@ -171,7 +171,7 @@
     timelineScope: 3600000, // 1h default ms
     timelineHistogram: null, // {base, step, counts} density histogram from DB for sparkline
     timelineFetchedScope: 0, // last fetched scope to avoid redundant fetches
-    replayGen: 0,            // generation counter — incremented on each replay/rewind to discard stale async results
+    replayGen: 0,            // generation counter ->incremented on each replay/rewind to discard stale async results
   };
 
   // ROLE_COLORS loaded from shared roles.js (includes 'unknown')
@@ -292,7 +292,7 @@
     _onResize = function() {
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
-        // Set live-page height from JS — most reliable across all mobile browsers.
+        // Set live-page height from JS ->most reliable across all mobile browsers.
         // Subtract the top-nav and the bottom-nav (when visible) so neither
         // overlaps the map or pushes the VCR bar off-screen.
         const page = document.querySelector('.live-page');
@@ -300,7 +300,7 @@
         // #1267: the CSS rule for .live-page subtracts --bottom-nav-reserve
         // (0px desktop, 56px+safe-area at ≤768px) so the fixed .bottom-nav
         // (z-index 1200) does not occlude the VCR bar (position:absolute;
-        // bottom:0; z-index 1000). Mirror that subtraction here — otherwise
+        // bottom:0; z-index 1000). Mirror that subtraction here ->otherwise
         // this JS override clobbers the CSS height with raw window.innerHeight
         // and the VCR bar slides under the bottom-nav (issue #1267).
         // Prefer the bottom-nav's measured rendered height so we also cover
@@ -334,7 +334,7 @@
     _onResize();
     window.addEventListener('resize', _onResize);
     window.addEventListener('orientationchange', () => {
-      // Orientation change is async — viewport dimensions settle late
+      // Orientation change is async ->viewport dimensions settle late
       [50, 200, 500, 1000, 2000].forEach(ms => setTimeout(_onResize, ms));
     });
     if (window.visualViewport) {
@@ -350,7 +350,7 @@
   // Cleanup state is captured in module-scoped _vcrHeightCleanup so destroy()
   // can disconnect the ResizeObserver + remove the resize/visualViewport
   // listeners on SPA page navigation (otherwise re-mounts of /live would
-  // accumulate observers forever — same leak class as #1180).
+  // accumulate observers forever ->same leak class as #1180).
   var _vcrHeightCleanup = null;
   function initVCRHeightTracker() {
     // #1206 r1 (adversarial should-fix): guard against double-init —
@@ -442,7 +442,7 @@
         return expandToBufferEntriesAsync(pkts);
       })
       .then(function(replayEntries) {
-        if (gen !== VCR.replayGen) return; // stale async result — user changed mode
+        if (gen !== VCR.replayGen) return; // stale async result ->user changed mode
         if (replayEntries.length === 0) {
           vcrSetMode('PAUSED');
           return;
@@ -589,7 +589,7 @@
   }
 
   function buildClickablePathPopupHtml(typeName, color, hopNames, tsMs, hash) {
-    // tsMs is packet receive time — "ago" is relative to when the packet arrived, not when the animation ended
+    // tsMs is packet receive time ->"ago" is relative to when the packet arrived, not when the animation ended
     const secsAgo = Math.round((Date.now() - tsMs) / 1000);
     const timeStr = secsAgo < 60 ? secsAgo + 's ago' : Math.round(secsAgo / 60) + 'm ago';
     const chain = hopNames.join(' → ');
@@ -696,7 +696,7 @@
     let x = (cw - totalW) / 2;
     const y = 2;
     
-    // Draw ghost segments (dim background) — hardcoded to match LCD green
+    // Draw ghost segments (dim background) ->hardcoded to match LCD green
     const ghostColor = 'rgba(74,222,128,0.07)';
     for (let i = 0; i < text.length; i++) {
       const ch2 = text[i];
@@ -869,7 +869,7 @@
     if (document.hidden) {
       _tabHidden = true;
     } else {
-      // Tab restored — skip animating anything that queued while away
+      // Tab restored ->skip animating anything that queued while away
       _tabHidden = false;
       // Clear any pending propagation buffers so they don't all fire at once
       for (const [hash, entry] of propagationBuffer) {
@@ -890,7 +890,7 @@
     pkt._ts = packetTimestamp(pkt);
     const entry = { ts: pkt._ts, pkt };
     VCR.buffer.push(entry);
-    // Keep buffer capped at ~2000 — adjust playhead to avoid stale indices (#63)
+    // Keep buffer capped at ~2000 ->adjust playhead to avoid stale indices (#63)
     if (VCR.buffer.length > 2000) {
       const trimCount = 500;
       VCR.buffer.splice(0, trimCount);
@@ -900,7 +900,7 @@
     }
 
     if (VCR.mode === 'LIVE') {
-      // Skip animations when tab is backgrounded — just buffer for VCR timeline
+      // Skip animations when tab is backgrounded ->just buffer for VCR timeline
       if (_tabHidden) {
         return;
       }
@@ -1026,7 +1026,7 @@
     if (VCR.mode === 'LIVE') {
       x = cw;
     } else if (VCR.scrubTs != null) {
-      // Scrubbed to a specific time — hold there
+      // Scrubbed to a specific time ->hold there
       x = ((VCR.scrubTs - startTs) / scopeMs) * cw;
     } else if (VCR.playhead >= 0 && VCR.playhead < VCR.buffer.length) {
       const playTs = VCR.buffer[VCR.playhead].ts;
@@ -1124,11 +1124,11 @@
             <span id="audioDesc" class="sr-only">Sonify packets — turn raw bytes into generative music</span>
             <label title="Show only favorited and claimed nodes"><input type="checkbox" id="liveFavoritesToggle" aria-describedby="favDesc"> ⭐ Favorites</label>
             <span id="favDesc" class="sr-only">Show only favorited and claimed nodes</span>
-            <label title="Show a 24-hour packet route history overlay on the map"><input type="checkbox" id="liveOverlayRouteHistory" aria-describedby="routeHistDesc"> 📈 Route History</label>
+            <label title="Show a 24-hour packet route history overlay on the map"><input type="checkbox" id="liveOverlayRouteHistory" aria-describedby="routeHistDesc"> Route History</label>
             <span id="routeHistDesc" class="sr-only">Show a 24-hour packet route history overlay on the map</span>
-            <label id="liveOverlayRadarLabel" title="Overlay live weather radar from RainViewer"><input type="checkbox" id="liveOverlayRadar" aria-describedby="radarDesc"> 🌧️ Radar</label>
+            <label id="liveOverlayRadarLabel" title="Overlay live weather radar from RainViewer"><input type="checkbox" id="liveOverlayRadar" aria-describedby="radarDesc"> Radar</label>
             <span id="radarDesc" class="sr-only">Overlay live weather radar from RainViewer</span>
-            <label title="Show animated wind speed and direction overlay from Open-Meteo"><input type="checkbox" id="liveOverlayWind" aria-describedby="windDesc"> 💨 Wind</label>
+            <label title="Show animated wind speed and direction overlay from Open-Meteo"><input type="checkbox" id="liveOverlayWind" aria-describedby="windDesc"> Wind</label>
             <span id="windDesc" class="sr-only">Show animated wind speed and direction overlay from Open-Meteo</span>
             <label id="liveOverlayMeshMapperLabel" style="display:none"><input type="checkbox" id="liveOverlayMeshMapper"> 📶 MeshMapper</label>
             <div class="live-node-filter-wrap" style="position:relative">
@@ -1180,27 +1180,27 @@
           <div class="panel-content">
           <h3 class="legend-title">PACKET TYPES</h3>
           <ul class="legend-list">
-            <li><span class="live-dot" style="background:${TYPE_COLORS.ADVERT}" aria-hidden="true"></span> Advert — Node advertisement</li>
-            <li><span class="live-dot" style="background:${TYPE_COLORS.GRP_TXT}" aria-hidden="true"></span> Message — Group text</li>
-            <li><span class="live-dot" style="background:${TYPE_COLORS.TXT_MSG}" aria-hidden="true"></span> Direct — Direct message</li>
-            <li><span class="live-dot" style="background:${TYPE_COLORS.REQUEST}" aria-hidden="true"></span> Request — Data request</li>
-            <li><span class="live-dot" style="background:${TYPE_COLORS.RESPONSE}" aria-hidden="true"></span> Response — Data response</li>
-            <li><span class="live-dot" style="background:${TYPE_COLORS.TRACE}" aria-hidden="true"></span> Trace — Route trace</li>
-            <li><span class="live-dot" style="background:${TYPE_COLORS.PATH}" aria-hidden="true"></span> Path — Path discovery</li>
-            <li><span class="live-dot" style="background:${TYPE_COLORS.ANON_REQ}" aria-hidden="true"></span> Anon Req — Anonymous request</li>
-            <li><span class="live-dot" style="background:${TYPE_COLORS.GRP_DATA}" aria-hidden="true"></span> Grp Data — Group datagram</li>
-            <li><span class="live-dot" style="background:${TYPE_COLORS.MULTIPART}" aria-hidden="true"></span> Multipart — Multi-fragment payload</li>
-            <li><span class="live-dot" style="background:${TYPE_COLORS.CONTROL}" aria-hidden="true"></span> Control — Control plane</li>
-            <li><span class="live-dot" style="background:${TYPE_COLORS.RAW_CUSTOM}" aria-hidden="true"></span> Raw Custom — Application-defined payload</li>
-            <li><span class="live-dot" style="background:${TYPE_COLORS.ACK}" aria-hidden="true"></span> Ack / Other — Acknowledgment or unknown type</li>
+            <li><span class="live-dot" style="background:${TYPE_COLORS.ADVERT}" aria-hidden="true"></span> Advert -> Node advertisement</li>
+            <li><span class="live-dot" style="background:${TYPE_COLORS.GRP_TXT}" aria-hidden="true"></span> Message -> Group text</li>
+            <li><span class="live-dot" style="background:${TYPE_COLORS.TXT_MSG}" aria-hidden="true"></span> Direct -> Direct message</li>
+            <li><span class="live-dot" style="background:${TYPE_COLORS.REQUEST}" aria-hidden="true"></span> Request -> Data request</li>
+            <li><span class="live-dot" style="background:${TYPE_COLORS.RESPONSE}" aria-hidden="true"></span> Response -> Data response</li>
+            <li><span class="live-dot" style="background:${TYPE_COLORS.TRACE}" aria-hidden="true"></span> Trace -> Route trace</li>
+            <li><span class="live-dot" style="background:${TYPE_COLORS.PATH}" aria-hidden="true"></span> Path -> Path discovery</li>
+            <li><span class="live-dot" style="background:${TYPE_COLORS.ANON_REQ}" aria-hidden="true"></span> Anon Req -> Anonymous request</li>
+            <li><span class="live-dot" style="background:${TYPE_COLORS.GRP_DATA}" aria-hidden="true"></span> Grp Data -> Group datagram</li>
+            <li><span class="live-dot" style="background:${TYPE_COLORS.MULTIPART}" aria-hidden="true"></span> Multipart -> Multi-fragment payload</li>
+            <li><span class="live-dot" style="background:${TYPE_COLORS.CONTROL}" aria-hidden="true"></span> Control -> Control plane</li>
+            <li><span class="live-dot" style="background:${TYPE_COLORS.RAW_CUSTOM}" aria-hidden="true"></span> Raw Custom -> Application-defined payload</li>
+            <li><span class="live-dot" style="background:${TYPE_COLORS.ACK}" aria-hidden="true"></span> Ack / Other -> Acknowledgment or unknown type</li>
           </ul>
           <h3 class="legend-title" style="margin-top:8px">NODE ROLES</h3>
           <ul class="legend-list" id="roleLegendList"></ul>
           <h3 class="legend-title" style="margin-top:8px">MARKER STYLES</h3>
           <ul class="legend-list">
-            <li><span class="live-ring live-ring--repeater" aria-hidden="true"></span> Bright white ring — repeater</li>
-            <li><span class="live-ring live-ring--other" aria-hidden="true"></span> Faded ring — companion / sensor / room</li>
-            <li><span class="live-dash-swatch" aria-hidden="true"></span> Grey dashed trail — inferred or unreached hop</li>
+            <li><span class="live-ring live-ring--repeater" aria-hidden="true"></span> Bright white ring -> repeater</li>
+            <li><span class="live-ring live-ring--other" aria-hidden="true"></span> Faded ring -> companion / sensor / room</li>
+            <li><span class="live-dash-swatch" aria-hidden="true"></span> Grey dashed trail -> inferred or unreached hop</li>
           </ul>
           </div>
         </div>
@@ -1269,7 +1269,7 @@
     });
     _themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
-    // visibilitychange handler — registered here (not at module load) so it
+    // visibilitychange handler ->registered here (not at module load) so it
     // can be removed in destroy(). Dedupe-guarded against re-mount.
     if (_visibilityHandler) document.removeEventListener('visibilitychange', _visibilityHandler);
     _visibilityHandler = _onVisibilityChange;
@@ -1344,12 +1344,12 @@
     applySatmap(_savedSatmap);
     _satmapSel.addEventListener('change', (e) => applySatmap(e.target.value));
 
-    // #1490 — animations + trails need their own pane above markerPane.
+    // #1490 ->animations + trails need their own pane above markerPane.
     // PR #1334 moved node markers from L.circleMarker (overlayPane @ 400)
     // to L.marker+divIcon (markerPane @ 600); animations stayed in the
     // default overlayPane and were occluded by every node marker. Custom
     // pane @ 650 puts them strictly above all nodes. (tooltipPane shares
-    // 650 — tooltips are user-triggered, harmless to share.)
+    // 650 ->tooltips are user-triggered, harmless to share.)
     map.createPane('liveAnimPane');
     map.getPane('liveAnimPane').style.zIndex = 650;
     // Pointer-events default to none so the pane doesn't steal clicks
@@ -1386,7 +1386,7 @@
 
     map.on('zoomend', rescaleMarkers);
 
-    // Heat map toggle — persist in localStorage
+    // Heat map toggle ->persist in localStorage
     const liveHeatEl = document.getElementById('liveHeatToggle');
     if (localStorage.getItem('meshcore-live-heatmap') === 'false') { liveHeatEl.checked = false; hideHeatMap(); }
     else if (localStorage.getItem('meshcore-live-heatmap') === 'true') { liveHeatEl.checked = true; }
@@ -1431,7 +1431,7 @@
       if (!rfEl || !window.RegionFilter) return;
       // Fetch observer roster to build observer_id → IATA map.
       // /api/observers returns `{observers:[...], server_time:"..."}`
-      // (cmd/server/types.go ObserverListResponse) — NOT a top-level array.
+      // (cmd/server/types.go ObserverListResponse) ->NOT a top-level array.
       // Bug #1136: previously parsed as array → map empty → region filter
       // dropped every packet.
       api('/observers', { ttl: 120000 }).then(function(data) {
@@ -1441,7 +1441,7 @@
       regionFilterChangeHandler = RegionFilter.onChange(function() { /* selection persisted by RegionFilter; future packets reflect it */ });
     })();
 
-    // Node filter input — autocomplete-as-you-type (#1110)
+    // Node filter input ->autocomplete-as-you-type (#1110)
     const nodeFilterInput = document.getElementById('liveNodeFilterInput');
     const nodeFilterClear = document.getElementById('liveNodeFilterClear');
     const nodeFilterDropdown = document.getElementById('liveNodeFilterDropdown');
@@ -1482,7 +1482,7 @@
         const key = opt.getAttribute('data-key') || '';
         const name = opt.getAttribute('data-name') || key;
         nodeFilterInput.value = name;
-        // Filter by pubkey prefix when available — most precise.
+        // Filter by pubkey prefix when available ->most precise.
         setNodeFilter(key ? [key] : (name ? [name] : []));
         const params = getHashParams ? getHashParams() : new URLSearchParams();
         if (key) params.set('node', key);
@@ -2008,7 +2008,7 @@
         item.setAttribute('data-scope', src.dataset.scope);
         item.textContent = src.textContent;
         item.addEventListener('click', function () {
-          src.click(); // delegate to original handler — keeps single source of truth
+          src.click(); // delegate to original handler ->keeps single source of truth
           menu.setAttribute('hidden', '');
           moreBtn.setAttribute('aria-expanded', 'false');
           // Reflect the chosen scope on the More button label so the user sees feedback.
@@ -2035,7 +2035,7 @@
     // Timeline click to scrub
     // Timeline click handled by drag (mousedown+mouseup)
 
-    // Timeline hover — show time tooltip
+    // Timeline hover ->show time tooltip
     const timelineEl = document.getElementById('vcrTimeline');
     const timeTooltip = document.getElementById('vcrTimeTooltip');
     timelineEl.addEventListener('mousemove', (e) => {
@@ -2126,7 +2126,7 @@
     fetchTimelineTimestamps().then(() => updateTimeline());
     // Redraw every 30s so the window slides while idle. The live WS buffer
     // already supplies new packets (merged in updateTimelineNow), so we do NOT
-    // re-pull the full historical timestamp set every tick — the old code reset
+    // re-pull the full historical timestamp set every tick ->the old code reset
     // timelineFetchedScope each 30s, defeating fetchTimelineTimestamps' own
     // dedup guard and hammering the most expensive endpoint. Reconcile the
     // historical set only every ~5 min (every 10th tick).
@@ -2136,7 +2136,7 @@
       fetchTimelineTimestamps().then(() => updateTimeline());
     }, 30000);
 
-    // Live clock tick — update LCD every second when in LIVE mode
+    // Live clock tick ->update LCD every second when in LIVE mode
     _lcdClockInterval = setInterval(() => {
       if (VCR.mode === 'LIVE') updateVCRClock(Date.now());
     }, 1000);
@@ -2218,7 +2218,7 @@
       });
     }
 
-    // MESH LIVE header auto-compact on idle (desktop only — mobile uses ⚙ expand button)
+    // MESH LIVE header auto-compact on idle (desktop only ->mobile uses ⚙ expand button)
     const narrowMqCompact = window.matchMedia('(max-width: 640px)');
     function showHeader() {
       if (!liveHeaderEl || liveHeaderEl.classList.contains('hidden')) return;
@@ -2422,7 +2422,7 @@
       console.error('Failed to load nodes:', e);
       // Surface the failure visibly: the feed panel's empty-state placeholder is
       // the only clean container on the live page (nodes render as map markers,
-      // not a list). loadNodes is a safe retry — it re-fetches and re-renders
+      // not a list). loadNodes is a safe retry ->it re-fetches and re-renders
       // markers without re-running page init or re-binding the WebSocket feed.
       var _feedPh = document.querySelector('#liveFeed .live-feed-empty');
       if (_feedPh) PageState.error(_feedPh, e, () => loadNodes());
@@ -2482,7 +2482,7 @@
       }
     }
 
-    // Hops are truncated hex prefixes — match by prefix in either direction
+    // Hops are truncated hex prefixes ->match by prefix in either direction
     for (const hop of hops) {
       const h = (hop.id || hop.public_key || hop).toString().toLowerCase();
       if (favs.some(f => f.toLowerCase().startsWith(h) || h.startsWith(f.toLowerCase()))) return true;
@@ -2622,7 +2622,7 @@
   }
 
   function applyFavoritesFilter() {
-    // Node markers always stay visible — only rebuild the feed list
+    // Node markers always stay visible ->only rebuild the feed list
     rebuildFeedList();
   }
 
@@ -2639,7 +2639,7 @@
     if (!nodeFilterText) return true;
     const f = nodeFilterText.toLowerCase();
 
-    // resolved_path: server-resolved full pubkeys — O(1) nodeData lookup per hop.
+    // resolved_path: server-resolved full pubkeys ->O(1) nodeData lookup per hop.
     // Most reliable for MeshCore repeater paths; skip slower fallbacks when present.
     const resolved = window.getResolvedPath ? window.getResolvedPath(pkt) : null;
     if (resolved && resolved.length) {
@@ -2790,7 +2790,7 @@
   }
 
   // Prune nodes not seen within their role's health threshold.
-  // API-loaded nodes (_fromAPI) are dimmed instead of removed — matches static map behavior.
+  // API-loaded nodes (_fromAPI) are dimmed instead of removed ->matches static map behavior.
   // WS-only nodes (dynamically added from ADVERTs) are removed to prevent memory leaks.
   function pruneStaleNodes() {
     var now = Date.now();
@@ -2824,7 +2824,7 @@
           pruned = true;
         }
       } else if (marker && marker._staleDimmed) {
-        // Node became active again — restore full opacity
+        // Node became active again ->restore full opacity
         marker._staleDimmed = false;
         var isRepeater = n.role === 'repeater';
         marker.setStyle({ fillOpacity: 0.85, opacity: isRepeater ? 0.6 : 0.3 });
@@ -2971,7 +2971,7 @@
       // Store all observation packets in dedup entry for replay tree
       if (consolidated.hash && feedDedup.has(consolidated.hash)) {
         const entry = feedDedup.get(consolidated.hash);
-        // Append observations — don't overwrite (each renderPacketTree call may have 1 or many)
+        // Append observations ->don't overwrite (each renderPacketTree call may have 1 or many)
         for (const p of packets) {
           if (!entry.packets.some(ep => ep.path_json === p.path_json && ep.observer === p.observer)) {
             entry.packets.push(p);
@@ -3093,7 +3093,7 @@
   }
 
   function resolveHopPositions(hops, payload, resolvedPath) {
-    // Hoist sender GPS guard once — reject (0,0) as "no GPS"
+    // Hoist sender GPS guard once ->reject (0,0) as "no GPS"
     const hasValidGps = payload.lat != null && payload.lon != null
       && !(payload.lat === 0 && payload.lon === 0);
     const senderLat = hasValidGps ? payload.lat : null;
@@ -3335,7 +3335,7 @@
         const VISIBLE_CHARS = drop.bytes.length; // show all bytes
         const trailPx = VISIBLE_CHARS * CHAR_H;
 
-        // Scroll offset — cycles through all bytes over the drop lifetime
+        // Scroll offset ->cycles through all bytes over the drop lifetime
         const scrollOffset = Math.floor(progress * drop.bytes.length);
 
         for (let c = 0; c < VISIBLE_CHARS; c++) {
@@ -3819,7 +3819,7 @@
         entry.pkt.observation_count = entry.count;
         return;
       }
-      // Window expired — fall through to create new entry
+      // Window expired ->fall through to create new entry
       feedDedup.delete(hash);
     }
 
@@ -3859,7 +3859,7 @@
     requestAnimationFrame(() => requestAnimationFrame(() => item.classList.remove('live-feed-enter')));
     // #1207: trim to 25 items, but never evict the empty-state placeholder.
     // Single querySelectorAll + batched remove (was: O(n²) inside a while
-    // loop, run on every incoming packet — caused layout thrash on busy
+    // loop, run on every incoming packet ->caused layout thrash on busy
     // channels).
     const _liveItems = feed.querySelectorAll('.live-feed-item');
     for (let _i = 25; _i < _liveItems.length; _i++) {
