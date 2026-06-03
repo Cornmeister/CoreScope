@@ -1803,7 +1803,7 @@ function makeColumnsResizable(tableSelector, storageKey) {
         if (rightTotal - delta < rightThs.length * 50) return; // can't squeeze below 50px each
         th.style.width = newW + 'px';
         const scale = (rightTotal - delta) / rightTotal;
-        rightThs.forEach(t => { t.style.width = Math.max(50, t.offsetWidth * scale) + 'px'; });
+        rightThs.forEach((t, j) => { t.style.width = Math.max(50, rightWidths[j] * scale) + 'px'; });
       }
       function onUp() {
         handle.classList.remove('active');
