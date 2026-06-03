@@ -32,6 +32,12 @@ type RouteHistoryConfig struct {
 	BackfillDays         int   `json:"backfillDays,omitempty"`
 	BackfillChunkMinutes int   `json:"backfillChunkMinutes,omitempty"`
 	BackfillPauseMs      *int  `json:"backfillPauseMs,omitempty"`
+	// EdgeRetentionDays bounds the raw route_history_edges table (build
+	// intermediate; keep small). HourlyRetentionDays bounds the rendered
+	// route_history_edge_hourly aggregate — this is the displayable route-history
+	// window, so it can be large without cost. Defaults: 2 and 8.
+	EdgeRetentionDays   int `json:"edgeRetentionDays,omitempty"`
+	HourlyRetentionDays int `json:"hourlyRetentionDays,omitempty"`
 }
 
 // ConnectTimeoutOrDefault returns the per-source connect timeout in seconds,
@@ -135,6 +141,24 @@ func (c *Config) RouteHistoryBackfillSettings() RouteHistoryBackfillSettings {
 			ms = 60000
 		}
 		out.Pause = time.Duration(ms) * time.Millisecond
+	}
+	if rh.EdgeRetentionDays > 0 {
+		out.EdgeRetentionDays = rh.EdgeRetentionDays
+	}
+	if rh.HourlyRetentionDays > 0 {
+		out.HourlyRetentionDays = rh.HourlyRetentionDays
+	}
+	// INVARIANT: the startup backfill replays observations into route_history_edges
+	// (INSERT OR IGNORE), and the hourly aggregate count only increments on a NEW
+	// raw edge. If the backfill reached observations whose raw edges were already
+	// pruned, the rendered counts would double. So the backfill lookback must stay
+	// strictly below the edge-retention window. Clamp it here regardless of config.
+	maxLookback := time.Duration(out.EdgeRetentionDays-1) * 24 * time.Hour
+	if maxLookback < 24*time.Hour {
+		maxLookback = 24 * time.Hour
+	}
+	if out.Lookback > maxLookback {
+		out.Lookback = maxLookback
 	}
 	return out
 }
