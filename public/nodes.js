@@ -74,29 +74,6 @@
   let wsHandler = null;
   let detailMap = null;
 
-  // #1461 followup: node-detail inset map tile layer that honors the
-  // customizer dark-tile-provider pick (#1420/#1430). Falls back to
-  // window.getTileUrl() output if the registry isn't loaded. Also applies
-  // the provider's invert CSS filter to the tile pane when needed.
-  function _applyTilesToNodeMap(map) {
-    if (!map) return;
-    var tileUrl = (window.getTileUrl && window.getTileUrl()) || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
-    var provider = window.getActiveTileProvider && window.getActiveTileProvider();
-    var attribution = (provider && provider.attribution) || '© OpenStreetMap contributors';
-    var layer = L.tileLayer(tileUrl, { maxZoom: 18, attribution: attribution }).addTo(map);
-    // Esri 2-layer provider: add the labels reference overlay too
-    if (provider && provider.refUrl) {
-      try { L.tileLayer(provider.refUrl, { maxZoom: 18 }).addTo(map); } catch (_e) {}
-    }
-    // Apply invert CSS filter to the tile pane if the provider needs it
-    try {
-      var pane = map.getPane && map.getPane('tilePane');
-      if (pane) pane.style.filter = (provider && provider.invertFilter) ? provider.invertFilter : '';
-    } catch (_e) {}
-    return layer;
-  }
-
-
   // ROLE_COLORS loaded from shared roles.js
   const TABS = [
     { key: 'all', label: 'All' },
@@ -202,14 +179,14 @@
     const info = getStatusInfo(n);
     let html = `<span class="badge" style="background:${roleColor}20;color:${roleColor}">${n.role}</span>`;
     if (n.hash_size) {
-      html += ` <span class="badge pubkey-prefix-badge">${n.public_key.slice(0, n.hash_size * 2).toUpperCase()}</span>`;
+      html += ` <span class="badge" style="background:var(--nav-bg);color:var(--nav-text);font-family:var(--mono)">${n.public_key.slice(0, n.hash_size * 2).toUpperCase()}</span>`;
     }
     // #1279 P2 #4: multibyte capability badge — surfaced from the observable
     // multibyte hash_size (firmware Feat1/Feat2 carry the wire capability bits
     // per AdvertDataHelpers.h:14-16, but Feat1/Feat2 aren't persisted per-node
     // in CoreScope today; hash_size is the observed effective capability).
     if (n.hash_size && Number(n.hash_size) >= 2) {
-      html += ` <span class="badge multibyte-badge" title="Node advertises multibyte hash path (firmware Feat1/Feat2)">Multibyte: ${Number(n.hash_size)}-byte</span>`;
+      html += ` <span class="badge multibyte-badge" title="Node advertises multibyte hash path (firmware Feat1/Feat2)" style="background:var(--accent-bg, rgba(20,184,166,0.2));color:var(--accent, #14b8a6);font-size:10px">Multibyte: ${Number(n.hash_size)}-byte</span>`;
     }
     if (n.hash_size_inconsistent) {
       html += ` <a href="#/nodes/${encodeURIComponent(n.public_key)}?section=node-packets" class="badge" style="background:var(--status-yellow);color:#000;font-size:10px;cursor:pointer;text-decoration:none">⚠️ variable hash size</a>`;
@@ -301,7 +278,7 @@
 
     // Always set spinner as initial DOM state (synchronous) so tests can observe it
     var spinnerEl = document.getElementById(containerId);
-    if (spinnerEl) spinnerEl.innerHTML = '<div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading neighbors…</div>';
+    if (spinnerEl) spinnerEl.innerHTML = PageState.loading('Loading neighbors…');
 
     // Check cache
     var cached = _neighborCache[pubkey];
@@ -313,9 +290,11 @@
     api('/nodes/' + encodeURIComponent(pubkey) + '/neighbors', { ttl: CLIENT_TTL.nodeDetail }).then(function(data) {
       _neighborCache[pubkey] = { data: data, ts: Date.now() };
       renderNeighborData(data, containerId, limit, headerSelector, viewAllPubkey);
-    }).catch(function() {
+    }).catch(function(err) {
       var el = document.getElementById(containerId);
-      if (el) el.innerHTML = '<div class="text-muted" style="padding:8px">Could not load neighbor data</div>';
+      if (el) PageState.error(el, err, function() {
+        fetchAndRenderNeighbors(pubkey, containerId, opts);
+      });
     });
   }
 
@@ -323,7 +302,7 @@
     var el = document.getElementById(containerId);
     if (!el) return;
     if (!data || !data.neighbors || !data.neighbors.length) {
-      el.innerHTML = '<div class="text-muted" style="padding:8px">No neighbor data available yet. Neighbor relationships are built from observed packet paths over time.</div>';
+      el.innerHTML = PageState.empty({ title: 'No neighbor data available yet', hint: 'Neighbor relationships are built from observed packet paths over time.' });
       if (headerSelector) {
         var h = document.querySelector(headerSelector);
         if (h) h.textContent = 'Neighbors (0)';
@@ -396,7 +375,7 @@
           <span class="node-full-title">Loading…</span>
         </div>
         <div class="node-full-body" id="nodeFullBody">
-          <div class="text-center text-muted" style="padding:40px">Loading…</div>
+          ${PageState.loading('Loading…')}
         </div>
       </div>`;
       document.getElementById('nodeBackBtn').addEventListener('click', () => { location.hash = '#/nodes'; });
@@ -570,14 +549,8 @@
           <tr><td>Status</td><td><span title="${si.statusTooltip}">${statusLabel}</span> <span style="font-size:11px;color:var(--text-muted);margin-left:4px">${statusExplanation}</span></td></tr>
           <tr><td>Last Heard</td><td>${renderNodeTimestampHtml(lastHeard || n.last_seen)}</td></tr>
           ${(n.role === 'repeater' || n.role === 'room') ? `<tr><td title="Last time this repeater appeared as a relay hop in a non-advert packet observed by the network. Distinct from 'Last Heard' (which counts the repeater's own adverts). See issue #662.">Last Relayed</td><td>${n.last_relayed ? renderNodeTimestampHtml(n.last_relayed) + ' ' + (n.relay_active ? '<span style="color:var(--status-green);font-size:11px">🟢 actively relaying</span>' : '<span style="color:var(--status-yellow);font-size:11px">🟡 alive (idle)</span>') : '<span style="color:var(--text-muted)">never observed as relay hop</span> <span style="color:var(--status-yellow);font-size:11px">🟡 alive (idle)</span>'}${(n.relay_count_1h != null || n.relay_count_24h != null) ? ` <span style="color:var(--text-muted);font-size:11px;margin-left:4px">(${n.relay_count_1h || 0} relays/hr, ${n.relay_count_24h || 0} relays/24h)</span>` : ''}</td></tr>` : ''}
-          ${(n.role === 'repeater' || n.role === 'room') && (n.traffic_share_score != null || n.usefulness_score != null) ? (() => {
-            // #1456: prefer the new traffic_share_score field; fall back
-            // to legacy usefulness_score for graceful degradation
-            // against stale servers. The visible label is now "Traffic
-            // share" (the old "Usefulness" implied a composite that
-            // doesn't exist yet — see #672).
-            const raw = (n.traffic_share_score != null) ? n.traffic_share_score : n.usefulness_score;
-            const s = Number(raw) || 0;
+          ${(n.role === 'repeater' || n.role === 'room') && n.usefulness_score != null ? (() => {
+            const s = Number(n.usefulness_score) || 0;
             const pct = (s * 100).toFixed(1);
             // Visual indicator: width % bar with green→yellow→red color by score.
             // Per issue #672 classification table: 0.8+ Critical, 0.6+ Valuable,
@@ -589,15 +562,15 @@
             else if (s >= 0.1) { label = 'Marginal'; color = 'var(--status-orange, #e67e22)'; }
             else { label = 'Redundant'; color = 'var(--status-red, #e74c3c)'; }
             const barWidth = Math.max(2, Math.round(s * 100));
-            const tooltip = "Fraction of all non-advert mesh traffic in the analyzer's memory that transited through this repeater as a relay hop. High = lots of packets pass through; low = quieter (may still be structurally important — see Bridge score). One of 4 planned scoring axes (#672); others pending.";
-            return `<tr id="row-usefulness-score" data-usefulness-score="${s.toFixed(4)}" data-traffic-share-score="${s.toFixed(4)}"><td title="${tooltip}">Traffic share <span style="color:var(--text-muted);cursor:help" aria-label="help">ⓘ</span></td><td><span style="display:inline-block;vertical-align:middle;width:80px;height:8px;background:var(--bg-secondary,#333);border-radius:4px;overflow:hidden;margin-right:6px"><span style="display:block;width:${barWidth}%;height:100%;background:${color}"></span></span><span style="color:${color};font-weight:600">${pct}%</span> <span style="color:var(--text-muted);font-size:11px;margin-left:4px">${label}</span></td></tr>`;
+            return `<tr id="row-usefulness-score" data-usefulness-score="${s.toFixed(4)}"><td title="Fraction of non-advert traffic in the network observed by Cornmeister.nl that this repeater carries as a relay hop (Traffic axis of issue #672). Range 0–1; higher = forwards more of the mesh's actual traffic.">Usefulness</td><td><span style="display:inline-block;vertical-align:middle;width:80px;height:8px;background:var(--bg-secondary,#333);border-radius:4px;overflow:hidden;margin-right:6px"><span style="display:block;width:${barWidth}%;height:100%;background:${color}"></span></span><span style="color:${color};font-weight:600">${pct}%</span> <span style="color:var(--text-muted);font-size:11px;margin-left:4px">${label}</span></td></tr>`;
           })() : ''}
           ${(n.role === 'repeater' || n.role === 'room') && n.bridge_score != null ? (() => {
             // Bridge axis (issue #672 axis 2 of 4): normalized betweenness
             // centrality from the neighbor-edges graph. Distinct from the
-            // Traffic-share score above — bridge measures STRUCTURAL
-            // importance (how many shortest paths between other node
-            // pairs go through this one) regardless of current traffic.
+            // Traffic-based Usefulness score above — bridge measures
+            // STRUCTURAL importance (how many shortest paths between
+            // other node pairs go through this one) regardless of
+            // current traffic.
             const b = Number(n.bridge_score) || 0;
             const bpct = (b * 100).toFixed(1);
             let blabel, bcolor;
@@ -607,8 +580,7 @@
             else if (b > 0) { blabel = 'Marginal'; bcolor = 'var(--status-orange, #e67e22)'; }
             else { blabel = 'No bridge role'; bcolor = 'var(--text-muted)'; }
             const bbarWidth = Math.max(2, Math.round(b * 100));
-            const btooltip = "Normalized betweenness centrality (0..1). How often this node sits on the shortest path between other pairs of nodes in the affinity graph. 1.0 = the most structurally critical node on the mesh. High Bridge + low Traffic share = a quiet but irreplaceable chokepoint.";
-            return `<tr id="row-bridge-score" data-bridge-score="${b.toFixed(4)}"><td title="${btooltip}">Bridge score <span style="color:var(--text-muted);cursor:help" aria-label="help">ⓘ</span></td><td><span style="display:inline-block;vertical-align:middle;width:80px;height:8px;background:var(--bg-secondary,#333);border-radius:4px;overflow:hidden;margin-right:6px"><span style="display:block;width:${bbarWidth}%;height:100%;background:${bcolor}"></span></span><span style="color:${bcolor};font-weight:600">${bpct}%</span> <span style="color:var(--text-muted);font-size:11px;margin-left:4px">${blabel}</span></td></tr>`;
+            return `<tr id="row-bridge-score" data-bridge-score="${b.toFixed(4)}"><td title="Structural importance of this repeater as a path between other nodes — normalized betweenness centrality on the neighbor-edges graph (Bridge axis of issue #672, axis 2 of 4). Higher = more pairs of nodes route shortest paths through this one. Independent of current traffic.">Bridge</td><td><span style="display:inline-block;vertical-align:middle;width:80px;height:8px;background:var(--bg-secondary,#333);border-radius:4px;overflow:hidden;margin-right:6px"><span style="display:block;width:${bbarWidth}%;height:100%;background:${bcolor}"></span></span><span style="color:${bcolor};font-weight:600">${bpct}%</span> <span style="color:var(--text-muted);font-size:11px;margin-left:4px">${blabel}</span></td></tr>`;
           })() : ''}
           <tr><td>First Seen</td><td>${renderNodeTimestampHtml(n.first_seen)}</td></tr>
           <tr><td>Total Packets</td><td>${stats.totalTransmissions || stats.totalPackets || n.advert_count || 0}${stats.totalObservations && stats.totalObservations !== (stats.totalTransmissions || stats.totalPackets) ? ' <span class="text-muted" style="font-size:0.85em">(seen ' + stats.totalObservations + '×)</span>' : ''}</td></tr>
@@ -675,21 +647,26 @@
           </table>
         </div>` : ''}
 
+        <div class="node-full-card" id="fullDirectPacketsSection">
+          <h4 id="fullDirectPacketsHeader">Directly Heard Packets</h4>
+          <div id="fullDirectPacketsContent"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading…</div></div>
+        </div>
+
         <div class="node-full-card" id="node-neighbors">
           <h4 id="fullNeighborsHeader">Neighbors</h4>
-          <div id="fullNeighborsContent"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading neighbors…</div></div>
+          <div id="fullNeighborsContent">${PageState.loading('Loading neighbors…')}</div>
         </div>
 
         <div class="node-full-card" id="node-affinity-debug" style="display:none">
           <h4 style="cursor:pointer" onclick="this.parentElement.querySelector('.affinity-debug-body').style.display=this.parentElement.querySelector('.affinity-debug-body').style.display==='none'?'block':'none'; this.querySelector('.toggle-icon').textContent=this.parentElement.querySelector('.affinity-debug-body').style.display==='none'?'▶':'▼'"><span class="toggle-icon">▶</span> 🔍 Affinity Debug</h4>
           <div class="affinity-debug-body" style="display:none">
-            <div id="affinityDebugContent"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading debug data…</div></div>
+            <div id="affinityDebugContent">${PageState.loading('Loading debug data…')}</div>
           </div>
         </div>
 
         <div class="node-full-card" id="fullPathsSection">
           <h4>Paths Through This Node</h4>
-          <div id="fullPathsContent"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading paths…</div></div>
+          <div id="fullPathsContent">${PageState.loading('Loading paths…')}</div>
         </div>
 
         <div class="node-full-card skew-detail-section" id="node-clock-skew" style="display:none"></div>`;
@@ -699,7 +676,7 @@
         try {
           if (detailMap) { detailMap.remove(); detailMap = null; }
           detailMap = L.map('nodeFullMap', { zoomControl: true, attributionControl: false }).setView([n.lat, n.lon], 13);
-          _applyTilesToNodeMap(detailMap);
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18 }).addTo(detailMap);
           L.marker([n.lat, n.lon]).addTo(detailMap).bindPopup(n.name || n.public_key.slice(0, 12));
           setTimeout(() => detailMap.invalidateSize(), 100);
         } catch {}
@@ -760,6 +737,81 @@
         });
       }
 
+      // Direct packets section (full-screen view)
+      (function loadDirectPackets(sinceHours, limit) {
+        const content = document.getElementById('fullDirectPacketsContent');
+        const header = document.getElementById('fullDirectPacketsHeader');
+        if (!content) return;
+        content.innerHTML = '<div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading…</div>';
+        const qs = '?limit=' + (limit || 20) + (sinceHours ? '&since=' + sinceHours : '');
+        api('/nodes/' + encodeURIComponent(n.public_key) + '/direct-packets' + qs, { ttl: 30 }).then(res => {
+          const pkts = (res && res.packets) || [];
+          const truncated = !!(res && res.truncated);
+          const timeframes = [
+            { label: '1h',  hours: 1   },
+            { label: '6h',  hours: 6   },
+            { label: '24h', hours: 24  },
+            { label: '7d',  hours: 168 },
+          ];
+          const TYPE_LABELS = { 0:'📦 Request', 1:'📦 Response', 2:'✉️ DM', 3:'📦 ACK', 4:'📡 Advert', 5:'💬 Channel', 7:'📦 Anon', 8:'📦 Path', 9:'📦 Trace' };
+          const typeCounts = {};
+          pkts.forEach(p => { typeCounts[p.payload_type] = (typeCounts[p.payload_type] || 0) + 1; });
+          const uniqueTypes = Object.keys(typeCounts).map(Number);
+          const activeTypes = new Set(uniqueTypes);
+
+          const activeSince = sinceHours || 0;
+          const timeRow = `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;font-size:12px;">
+            <span style="color:var(--text-muted);align-self:center;">Show all in:</span>
+            ${timeframes.map(tf => `<button data-since="${tf.hours}" style="padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:${activeSince===tf.hours?'var(--accent)':'var(--surface-2)'};color:${activeSince===tf.hours?'#fff':'var(--text)'};cursor:pointer;font-size:11px;">${tf.label}</button>`).join('')}
+          </div>`;
+          const typeRow = uniqueTypes.length > 1 ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;font-size:12px;">
+            <span style="color:var(--text-muted);align-self:center;">Filter:</span>
+            ${uniqueTypes.map(t => `<button data-ptype-filter="${t}" style="padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:var(--accent);color:#fff;cursor:pointer;font-size:11px;">${TYPE_LABELS[t] || '📦 Packet'} (${typeCounts[t]})</button>`).join('')}
+          </div>` : '';
+          const truncatedRow = truncated ? `<div style="margin-bottom:8px;padding:6px 10px;background:color-mix(in srgb,var(--status-yellow,#f59e0b) 12%,transparent);border:1px solid color-mix(in srgb,var(--status-yellow,#f59e0b) 35%,transparent);border-radius:6px;font-size:12px;color:var(--text-muted);">⚠️ Showing first ${pkts.length} packets — use a shorter timeframe to see all.</div>` : '';
+
+          const updateHeader = () => {
+            if (!header) return;
+            let vis = 0; activeTypes.forEach(t => { vis += typeCounts[t] || 0; });
+            header.textContent = 'Directly Heard Packets' + (pkts.length ? ' (' + (activeTypes.size === uniqueTypes.length ? pkts.length : vis + ' of ' + pkts.length) + (truncated ? '+' : '') + ')' : '');
+          };
+
+          if (header) header.textContent = 'Directly Heard Packets' + (pkts.length ? ' (' + pkts.length + (truncated ? '+' : '') + ')' : '');
+          if (!pkts.length) {
+            content.innerHTML = timeRow + '<div class="text-muted">No packets directly heard by this node' + (sinceHours ? ' in the last ' + timeframes.find(t => t.hours === sinceHours)?.label : '') + '</div>';
+          } else {
+            content.innerHTML = timeRow + typeRow + truncatedRow + '<div class="node-activity-list">' + pkts.map(p => {
+              let decoded; try { decoded = JSON.parse(p.decoded_json); } catch {}
+              const typeLabel = TYPE_LABELS[p.payload_type] || '📦 Packet';
+              const detail = decoded?.text ? ': ' + escapeHtml(truncate(decoded.text, 50)) : decoded?.name ? ' — ' + escapeHtml(decoded.name) : '';
+              const obs = p.observer_name || p.observer_id;
+              const obsBadge = p.observation_count > 1 ? ` <span class="badge badge-obs" title="Seen ${p.observation_count} times">👁 ${p.observation_count}</span>` : '';
+              return `<div class="node-activity-item" data-ptype="${p.payload_type}">
+                <span class="node-activity-time">${renderNodeTimestampHtml(p.timestamp)}</span>
+                <span>${typeLabel}${detail}${obsBadge}${obs ? ' via ' + escapeHtml(obs) : ''}${p.snr != null ? ' · SNR ' + p.snr + 'dB' : ''}${p.rssi != null ? ' · RSSI ' + p.rssi + 'dBm' : ''}</span>
+                <a href="#/packets/${p.hash}" class="ch-analyze-link" style="margin-left:8px;font-size:0.8em">Analyze →</a>
+              </div>`;
+            }).join('') + '</div>';
+          }
+          content.querySelectorAll('button[data-since]').forEach(btn => {
+            btn.addEventListener('click', () => loadDirectPackets(parseInt(btn.dataset.since), 2000));
+          });
+          content.querySelectorAll('button[data-ptype-filter]').forEach(btn => {
+            btn.addEventListener('click', () => {
+              const t = parseInt(btn.dataset.ptypeFilter);
+              if (activeTypes.has(t)) { activeTypes.delete(t); btn.style.background = 'var(--surface-2)'; btn.style.color = 'var(--text)'; }
+              else { activeTypes.add(t); btn.style.background = 'var(--accent)'; btn.style.color = '#fff'; }
+              content.querySelectorAll('[data-ptype]').forEach(row => {
+                row.style.display = activeTypes.has(parseInt(row.dataset.ptype)) ? '' : 'none';
+              });
+              updateHeader();
+            });
+          });
+        }).catch(() => {
+          if (content) content.innerHTML = '<div class="text-muted">Failed to load direct packets</div>';
+        });
+      })(0, 20);
+
       // Fetch neighbors for this node (full-screen view)
       fetchAndRenderNeighbors(n.public_key, 'fullNeighborsContent', {
         headerSelector: '#fullNeighborsHeader'
@@ -799,7 +851,7 @@
               });
               html += '</tbody></table>';
             } else {
-              html += '<div class="text-muted" style="padding:8px">No affinity edges for this node</div>';
+              html += PageState.empty({ title: 'No affinity edges for this node' });
             }
 
             // Resolutions
@@ -857,7 +909,7 @@
           })
           .catch(function (err) {
             var el = document.getElementById('affinityDebugContent');
-            if (el) el.innerHTML = '<div class="text-muted" style="padding:8px">Failed to load debug data: ' + escapeHtml(err.message) + '</div>';
+            if (el) el.innerHTML = PageState.errorText('Failed to load debug data: ' + err.message);
           });
       })();
 
@@ -866,7 +918,7 @@
         const el = document.getElementById('fullPathsContent');
         if (!el) return;
         if (!pathData || !pathData.paths || !pathData.paths.length) {
-          el.innerHTML = '<div class="text-muted" style="padding:8px">No paths observed through this node</div>';
+          el.innerHTML = PageState.empty({ title: 'No paths observed through this node' });
           return;
         }
         document.querySelector('#fullPathsSection h4').textContent = `Paths Through This Node (${pathData.totalPaths} unique, ${pathData.totalTransmissions} transmissions)`;
@@ -901,7 +953,7 @@
         }
       }).catch(() => {
         const el = document.getElementById('fullPathsContent');
-        if (el) el.innerHTML = '<div class="text-muted" style="padding:8px">Failed to load paths</div>';
+        if (el) el.innerHTML = PageState.errorText('Failed to load paths');
       });
 
     } catch (e) {
@@ -935,7 +987,7 @@
       if (retryBtn) {
         retryBtn.addEventListener('click', function () {
           if (titleEl) titleEl.textContent = 'Loading…';
-          body.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading…</div>';
+          body.innerHTML = PageState.loading('Loading…');
           loadFullNode(pubkey);
         });
       }
@@ -1157,7 +1209,7 @@
     } catch (e) {
       console.error('Failed to load nodes:', e);
       const tbody = document.getElementById('nodesBody');
-      if (tbody) tbody.innerHTML = '<tr><td colspan="6" class="text-center" style="padding:24px;color:var(--error,#ef4444)"><div role="alert" aria-live="polite">Failed to load nodes. Please try again.</div></td></tr>';
+      if (tbody) tbody.innerHTML = PageState.row(5, PageState.errorText('Failed to load nodes. Please try again.'));
     } finally {
       // Always signal data-loaded — even on error — so E2E tests can proceed.
       var nodesContainer = document.getElementById('nodesLeft') || document.getElementById('nodesBody');
@@ -1397,7 +1449,7 @@
           renderRows();
         }
       });
-      so.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading…</div>';
+      so.innerHTML = PageState.loading('Loading…');
       try {
         const data = await fetchNodeDetail(pubkey);
         if (selectedKey !== pubkey) return;
@@ -1416,7 +1468,7 @@
           '</dl>' +
           '<p style="margin-top:14px"><a class="btn-primary" href="#/nodes/' + encodeURIComponent(pubkey) + '">Open full detail →</a></p>';
       } catch (e) {
-        so.innerHTML = '<div class="text-muted">Error: ' + (e && e.message ? e.message : String(e)) + '</div>';
+        so.innerHTML = PageState.errorText(e && e.message ? e.message : String(e));
       }
       return;
     }
@@ -1425,13 +1477,13 @@
     renderRows();
     const panel = document.getElementById('nodesRight');
     panel.classList.remove('empty');
-    panel.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading…</div>';
+    panel.innerHTML = PageState.loading('Loading…');
 
     try {
       const data = await fetchNodeDetail(pubkey);
       renderDetail(panel, data);
     } catch (e) {
-      panel.innerHTML = `<div class="text-muted">Error: ${e.message}</div>`;
+      panel.innerHTML = PageState.errorText(e.message);
     }
   }
 
@@ -1465,10 +1517,8 @@
         </div>
         ${renderStatusExplanation(n)}
 
-        ${hasLoc ? `<div class="node-map-qr-wrap">
-          <div class="node-map-container node-detail-map" id="nodeMap" style="border-radius:8px;overflow:hidden;"></div>
-          <div class="node-map-qr-overlay node-qr" id="nodeQrCode"></div>
-        </div>` : `<div class="node-qr" id="nodeQrCode" style="margin:8px 0"></div>`}
+        ${hasLoc ? `<div class="node-map-container node-detail-map" id="nodeMap" style="border-radius:8px;overflow:hidden;margin-bottom:8px;"></div>` : ''}
+        <div class="node-qr" id="nodeQrCode" style="margin:8px 0"></div>
 
         <div class="node-detail-section">
           <div class="node-detail-key mono" style="font-size:11px;word-break:break-all;margin-bottom:4px">${n.public_key}</div>
@@ -1513,6 +1563,11 @@
           `; })()}
         </div>
 
+        <div class="node-detail-section" id="directPacketsSection">
+          <h4 id="directPacketsHeader">Directly Heard Packets</h4>
+          <div id="directPacketsContent"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading…</div></div>
+        </div>
+
         ${observers.length ? `<div class="node-detail-section">
           ${(() => { const regions = [...new Set(observers.map(o => o.iata).filter(Boolean))]; return regions.length ? `<div style="margin-bottom:6px;font-size:12px"><strong>Regions:</strong> ${regions.join(', ')}</div>` : ''; })()}
           <h4>Heard By (${observers.length} observer${observers.length > 1 ? 's' : ''})</h4>
@@ -1531,12 +1586,12 @@
 
         <div class="node-detail-section" id="panelNeighborsSection">
           <h4 id="panelNeighborsHeader">Neighbors</h4>
-          <div id="panelNeighborsContent"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading neighbors…</div></div>
+          <div id="panelNeighborsContent">${PageState.loading('Loading neighbors…')}</div>
         </div>
 
         <div class="node-detail-section" id="pathsSection">
           <h4>Paths Through This Node</h4>
-          <div id="pathsContent"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading paths…</div></div>
+          <div id="pathsContent">${PageState.loading('Loading paths…')}</div>
         </div>
 
         <div class="node-detail-section skew-detail-section" id="node-clock-skew" style="display:none"></div>
@@ -1547,7 +1602,7 @@
       try {
         if (detailMap) { detailMap.remove(); detailMap = null; }
         detailMap = L.map('nodeMap', { zoomControl: false, attributionControl: false }).setView([n.lat, n.lon], 13);
-        _applyTilesToNodeMap(detailMap);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18 }).addTo(detailMap);
         L.marker([n.lat, n.lon]).addTo(detailMap).bindPopup(n.name || n.public_key.slice(0, 12));
         setTimeout(() => detailMap.invalidateSize(), 100);
       } catch {}
@@ -1590,6 +1645,86 @@
       });
     }
 
+    // Direct packets section
+    (function loadDirectPackets(sinceHours, limit) {
+      const content = document.getElementById('directPacketsContent');
+      const header = document.getElementById('directPacketsHeader');
+      if (!content) return;
+      content.innerHTML = '<div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading…</div>';
+      const qs = '?limit=' + (limit || 20) + (sinceHours ? '&since=' + sinceHours : '');
+      api('/nodes/' + encodeURIComponent(n.public_key) + '/direct-packets' + qs, { ttl: 30 }).then(res => {
+        const pkts = (res && res.packets) || [];
+        const truncated = !!(res && res.truncated);
+        const timeframes = [
+          { label: '1h',  hours: 1   },
+          { label: '6h',  hours: 6   },
+          { label: '24h', hours: 24  },
+          { label: '7d',  hours: 168 },
+        ];
+        const TYPE_LABELS = { 0:'📦 Request', 1:'📦 Response', 2:'✉️ DM', 3:'📦 ACK', 4:'📡 Advert', 5:'💬 Channel', 7:'📦 Anon', 8:'📦 Path', 9:'📦 Trace' };
+        const typeCounts = {};
+        pkts.forEach(p => { typeCounts[p.payload_type] = (typeCounts[p.payload_type] || 0) + 1; });
+        const uniqueTypes = Object.keys(typeCounts).map(Number);
+        const activeTypes = new Set(uniqueTypes);
+
+        const activeSince = sinceHours || 0;
+        const timeRow = `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;font-size:12px;">
+          <span style="color:var(--text-muted);align-self:center;">Show all in:</span>
+          ${timeframes.map(tf => `<button data-since="${tf.hours}" style="padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:${activeSince===tf.hours?'var(--accent)':'var(--surface-2)'};color:${activeSince===tf.hours?'#fff':'var(--text)'};cursor:pointer;font-size:11px;">${tf.label}</button>`).join('')}
+        </div>`;
+        const typeRow = uniqueTypes.length > 1 ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;font-size:12px;">
+          <span style="color:var(--text-muted);align-self:center;">Filter:</span>
+          ${uniqueTypes.map(t => `<button data-ptype-filter="${t}" style="padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:var(--accent);color:#fff;cursor:pointer;font-size:11px;">${TYPE_LABELS[t] || '📦 Packet'} (${typeCounts[t]})</button>`).join('')}
+        </div>` : '';
+        const truncatedRow = truncated ? `<div style="margin-bottom:8px;padding:6px 10px;background:color-mix(in srgb,var(--status-yellow,#f59e0b) 12%,transparent);border:1px solid color-mix(in srgb,var(--status-yellow,#f59e0b) 35%,transparent);border-radius:6px;font-size:12px;color:var(--text-muted);">⚠️ Showing first ${pkts.length} packets — use a shorter timeframe to see all.</div>` : '';
+
+        const updateHeader = () => {
+          if (!header) return;
+          let vis = 0; activeTypes.forEach(t => { vis += typeCounts[t] || 0; });
+          header.textContent = 'Directly Heard Packets' + (pkts.length ? ' (' + (activeTypes.size === uniqueTypes.length ? pkts.length : vis + ' of ' + pkts.length) + (truncated ? '+' : '') + ')' : '');
+        };
+
+        if (header) header.textContent = 'Directly Heard Packets' + (pkts.length ? ' (' + pkts.length + (truncated ? '+' : '') + ')' : '');
+        if (!pkts.length) {
+          content.innerHTML = timeRow + '<div class="text-muted" style="padding:8px">No packets directly heard by this node' + (sinceHours ? ' in the last ' + timeframes.find(t=>t.hours===sinceHours)?.label : '') + '</div>';
+        } else {
+          content.innerHTML = timeRow + typeRow + truncatedRow + pkts.map(a => {
+            let decoded; try { decoded = JSON.parse(a.decoded_json); } catch {}
+            const icon = a.payload_type === 4 ? '📡' : a.payload_type === 5 ? '💬' : a.payload_type === 2 ? '✉️' : '📦';
+            const pType = PAYLOAD_TYPES[a.payload_type] || 'Packet';
+            const detail = decoded?.text ? ': ' + escapeHtml(truncate(decoded.text, 50)) : decoded?.name ? ' — ' + escapeHtml(decoded.name) : '';
+            const obs = a.observer_name || a.observer_id;
+            return `<div class="advert-entry" data-ptype="${a.payload_type}">
+              <span class="advert-dot" style="background:${roleColor}"></span>
+              <div class="advert-info">
+                <strong>${renderNodeTimestampHtml(a.timestamp)}</strong> ${icon} ${pType}${detail}
+                ${a.observation_count > 1 ? ' <span class="badge badge-obs">👁 ' + a.observation_count + '</span>' : ''}
+                ${obs ? ' via ' + escapeHtml(obs) : ''}
+                ${a.snr != null ? ` · SNR ${a.snr}dB` : ''}${a.rssi != null ? ` · RSSI ${a.rssi}dBm` : ''}
+                <br><a href="#/packets/${a.hash}" class="ch-analyze-link">Analyze →</a>
+              </div>
+            </div>`;
+          }).join('');
+        }
+        content.querySelectorAll('button[data-since]').forEach(btn => {
+          btn.addEventListener('click', () => loadDirectPackets(parseInt(btn.dataset.since), 2000));
+        });
+        content.querySelectorAll('button[data-ptype-filter]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const t = parseInt(btn.dataset.ptypeFilter);
+            if (activeTypes.has(t)) { activeTypes.delete(t); btn.style.background = 'var(--surface-2)'; btn.style.color = 'var(--text)'; }
+            else { activeTypes.add(t); btn.style.background = 'var(--accent)'; btn.style.color = '#fff'; }
+            content.querySelectorAll('[data-ptype]').forEach(row => {
+              row.style.display = activeTypes.has(parseInt(row.dataset.ptype)) ? '' : 'none';
+            });
+            updateHeader();
+          });
+        });
+      }).catch(() => {
+        if (content) content.innerHTML = '<div class="text-muted" style="padding:8px">Failed to load direct packets</div>';
+      });
+    })(0, 20);
+
     // Fetch neighbors for this node (condensed panel — top 5)
     fetchAndRenderNeighbors(n.public_key, 'panelNeighborsContent', {
       limit: 5,
@@ -1606,7 +1741,7 @@
       const el = document.getElementById('pathsContent');
       if (!el) return;
       if (!pathData || !pathData.paths || !pathData.paths.length) {
-        el.innerHTML = '<div class="text-muted" style="padding:8px">No paths observed through this node</div>';
+        el.innerHTML = PageState.empty({ title: 'No paths observed through this node' });
         document.querySelector('#pathsSection h4').textContent = 'Paths Through This Node';
         return;
       }
@@ -1638,7 +1773,7 @@
       }
     }).catch(() => {
       const el = document.getElementById('pathsContent');
-      if (el) el.innerHTML = '<div class="text-muted" style="padding:8px">Failed to load paths</div>';
+      if (el) el.innerHTML = PageState.errorText('Failed to load paths');
     });
   }
 
