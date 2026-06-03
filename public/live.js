@@ -1134,7 +1134,9 @@
               <option value="hillshade_blend">Hillshade Blend</option>
               <option value="neon_tactical">Neon Tactical</option>
               <option value="military_satcom">Military SATCOM</option>
-              <option value="nvg">NVG Green</option>
+              <option value="esri_dark_gray">Esri Dark Gray + Labels</option>
+              <option value="voyager_inverted">Carto Voyager (inverted)</option>
+              <option value="positron_inverted">Carto Positron (inverted)</option>
             </select></label>
             <label title="Overlay a density heat map on the mesh nodes"><input type="checkbox" id="liveHeatToggle" checked aria-describedby="heatDesc"> Heat</label>
             <span id="heatDesc" class="sr-only">Overlay a density heat map on the mesh nodes</span>
@@ -1316,6 +1318,12 @@
     const _CARTO_DARK      = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
     const _CARTO_DARK_NL   = 'https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png';
     const _CARTO_LIGHT_LBL = 'https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png';
+    const _CARTO_LIGHT     = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+    const _CARTO_VOYAGER   = 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png';
+    const _ESRI_DGRAY_BASE = 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}';
+    const _ESRI_DGRAY_REF  = 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}';
+    // Inverted dark-tile CSS filter (shared by Dark Map Tiles "inverted" variants, #1420)
+    const _INVERT_DARK     = 'invert(1) hue-rotate(180deg) brightness(0.9) contrast(1.05)';
     const _SATMAP_CONFIG = {
       positron:         { base: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png' },
       dark_matter:      { base: _CARTO_DARK },
@@ -1340,13 +1348,16 @@
                           ],
                           filter: 'contrast(1.15) brightness(0.8) saturate(0.85)',
                           mapMaxZoom: 17 },
-      nvg:              { base: _CARTO_DARK,
-                          filter: 'sepia(1) hue-rotate(85deg) saturate(4) brightness(0.65) contrast(1.2)' },
+      // Dark Map Tiles providers carried over from the customise panel (#1420)
+      esri_dark_gray:   { base: _ESRI_DGRAY_BASE, overlay: _ESRI_DGRAY_REF, overlayOpacity: 1 },
+      voyager_inverted: { base: _CARTO_VOYAGER, filter: _INVERT_DARK },
+      positron_inverted:{ base: _CARTO_LIGHT,   filter: _INVERT_DARK },
     };
     let _overlayLayers = [];
 
     function applySatmap(provider) {
       if (provider === 'default') provider = 'positron'; // migrate legacy value
+      if (provider === 'nvg') provider = 'dark_matter';  // NVG Green removed → nearest dark equivalent
       _overlayLayers.forEach(l => map.removeLayer(l));
       _overlayLayers = [];
       document.getElementById('liveMap').style.filter = '';
@@ -1369,7 +1380,8 @@
     const _savedSatmap = localStorage.getItem('meshcore-live-satmap') ||
       (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark_matter' : 'positron');
     const _satmapSel = document.getElementById('liveSatmapSelect');
-    _satmapSel.value = _savedSatmap === 'default' ? 'positron' : _savedSatmap;
+    _satmapSel.value = _savedSatmap === 'default' ? 'positron'
+      : _savedSatmap === 'nvg' ? 'dark_matter' : _savedSatmap;
     applySatmap(_savedSatmap);
     _satmapSel.addEventListener('change', (e) => applySatmap(e.target.value));
 
