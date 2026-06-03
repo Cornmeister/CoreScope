@@ -29,9 +29,9 @@ function renderVersionCard(health) {
   var ver = health.version && health.version !== 'unknown' ? health.version : null;
   var sha = health.commit && health.commit !== 'unknown' ? health.commit : null;
   if (!ver && !sha) return '';
-  var vTag = ver ? (ver.charAt(0) === 'v' ? ver : 'v' + ver) : null;
+  var vTag = ver ? (ver.charAt(0) === 'corn' ? ver : 'corn' + ver) : null;
   var parts = [];
-  if (vTag) parts.push('<a href="' + GH + '/releases/tag/' + vTag + '" target="_blank" rel="noopener">' + vTag + '</a>');
+  if (vTag) parts.push('<a href="' + GH + '" target="_blank" rel="noopener">' + vTag + '</a>');
   if (sha) parts.push('<a href="' + GH + '/commit/' + sha + '" target="_blank" rel="noopener">' + sha.slice(0, 7) + '</a>');
   return '<div class="perf-card"><div class="perf-num perf-num--small">' + parts.join(' · ') + '</div><div class="perf-label">Version</div></div>';
 }
