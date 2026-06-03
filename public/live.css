@@ -360,6 +360,15 @@
   border: 1px solid #fff;
   opacity: 0.45;
 }
+.live-dash-swatch {
+  display: inline-block;
+  width: 18px;
+  height: 0;
+  border-top: 2px dashed #94a3b8;
+  opacity: 0.55;
+  margin-right: 6px;
+  vertical-align: middle;
+}
 
 /* ---- Tooltip ---- */
 .live-tooltip {

@@ -1094,7 +1094,7 @@
         <div class="live-controls" id="liveControls">
           <div class="live-controls-body" data-live-controls-body id="liveControlsBody">
             <div class="live-toggles">
-            <label>Map style <select id="liveSatmapSelect" class="live-satmap-select" aria-label="Map tile style">
+            <label title="Choose the map tile style">Map style <select id="liveSatmapSelect" class="live-satmap-select" aria-label="Map tile style">
               <option value="positron">Positron</option>
               <option value="dark_matter">Dark Matter</option>
               <option value="gray_canvas">Gray Canvas</option>
@@ -1108,22 +1108,29 @@
               <option value="military_satcom">Military SATCOM</option>
               <option value="nvg">NVG Green</option>
             </select></label>
-            <label><input type="checkbox" id="liveHeatToggle" checked aria-describedby="heatDesc"> Heat</label>
+            <label title="Overlay a density heat map on the mesh nodes"><input type="checkbox" id="liveHeatToggle" checked aria-describedby="heatDesc"> Heat</label>
             <span id="heatDesc" class="sr-only">Overlay a density heat map on the mesh nodes</span>
-            <label><input type="checkbox" id="liveGhostToggle" checked aria-describedby="ghostDesc"> Inferred Hops</label>
+            <label title="Show inferred hop markers for unknown hops"><input type="checkbox" id="liveGhostToggle" checked aria-describedby="ghostDesc"> Inferred Hops</label>
             <span id="ghostDesc" class="sr-only">Show inferred hop markers for unknown hops</span>
-            <label><input type="checkbox" id="liveRealisticToggle" aria-describedby="realisticDesc"> Realistic</label>
+            <label title="Buffer packets by hash and animate all paths simultaneously"><input type="checkbox" id="liveRealisticToggle" aria-describedby="realisticDesc"> Realistic</label>
             <span id="realisticDesc" class="sr-only">Buffer packets by hash and animate all paths simultaneously</span>
-            <label><input type="checkbox" id="liveColorHashToggle" aria-describedby="colorHashDesc"> Color by hash</label>
+            <label title="Color flying-packet dots and contrails by packet hash for propagation tracing"><input type="checkbox" id="liveColorHashToggle" aria-describedby="colorHashDesc"> Color by hash</label>
             <span id="colorHashDesc" class="sr-only">Color flying-packet dots and contrails by packet hash for propagation tracing</span>
-            <label><input type="checkbox" id="liveMatrixToggle" aria-describedby="matrixDesc"> Matrix</label>
+            <label title="Animate packet hex bytes flowing along paths like the Matrix"><input type="checkbox" id="liveMatrixToggle" aria-describedby="matrixDesc"> Matrix</label>
             <span id="matrixDesc" class="sr-only">Animate packet hex bytes flowing along paths like the Matrix</span>
-            <label><input type="checkbox" id="liveMatrixRainToggle" aria-describedby="rainDesc"> Rain</label>
+            <label title="Matrix rain overlay — packets fall as hex columns"><input type="checkbox" id="liveMatrixRainToggle" aria-describedby="rainDesc"> Rain</label>
             <span id="rainDesc" class="sr-only">Matrix rain overlay — packets fall as hex columns</span>
-            <label><input type="checkbox" id="liveAudioToggle" aria-describedby="audioDesc"> 🎵 Audio</label>
+            <label title="Sonify packets — turn raw bytes into generative music"><input type="checkbox" id="liveAudioToggle" aria-describedby="audioDesc"> 🎵 Audio</label>
             <span id="audioDesc" class="sr-only">Sonify packets — turn raw bytes into generative music</span>
-            <label><input type="checkbox" id="liveFavoritesToggle" aria-describedby="favDesc"> ⭐ Favorites</label>
+            <label title="Show only favorited and claimed nodes"><input type="checkbox" id="liveFavoritesToggle" aria-describedby="favDesc"> ⭐ Favorites</label>
             <span id="favDesc" class="sr-only">Show only favorited and claimed nodes</span>
+            <label title="Show a 24-hour packet route history overlay on the map"><input type="checkbox" id="liveOverlayRouteHistory" aria-describedby="routeHistDesc"> 📈 Route History</label>
+            <span id="routeHistDesc" class="sr-only">Show a 24-hour packet route history overlay on the map</span>
+            <label id="liveOverlayRadarLabel" title="Overlay live weather radar from RainViewer"><input type="checkbox" id="liveOverlayRadar" aria-describedby="radarDesc"> 🌧️ Radar</label>
+            <span id="radarDesc" class="sr-only">Overlay live weather radar from RainViewer</span>
+            <label title="Show animated wind speed and direction overlay from Open-Meteo"><input type="checkbox" id="liveOverlayWind" aria-describedby="windDesc"> 💨 Wind</label>
+            <span id="windDesc" class="sr-only">Show animated wind speed and direction overlay from Open-Meteo</span>
+            <label id="liveOverlayMeshMapperLabel" style="display:none"><input type="checkbox" id="liveOverlayMeshMapper"> 📶 MeshMapper</label>
             <div class="live-node-filter-wrap" style="position:relative">
               <input type="text" id="liveNodeFilterInput" placeholder="Filter by node…" autocomplete="off" class="live-node-filter-input" role="combobox" aria-expanded="false" aria-owns="liveNodeFilterDropdown" aria-autocomplete="list" aria-activedescendant="">
               <div id="liveNodeFilterDropdown" class="live-node-filter-dropdown hidden" role="listbox"></div>
@@ -1132,18 +1139,14 @@
             <div id="liveNodeFilterCount" class="live-filter-count hidden"></div>
             <label id="liveGeoFilterLabel" style="display:none"><input type="checkbox" id="liveGeoFilterToggle"> Mesh live area</label>
             <div id="liveRegionFilter" class="region-filter-container live-region-filter-container" aria-label="Filter live packets by IATA region"></div>
-            <label><input type="checkbox" id="liveOverlayRouteHistory"> 📈 Route History</label>
-            <label id="liveOverlayRadarLabel"><input type="checkbox" id="liveOverlayRadar"> 🌧️ Radar</label>
-            <label><input type="checkbox" id="liveOverlayWind"> 💨 Wind</label>
-            <label id="liveOverlayMeshMapperLabel" style="display:none"><input type="checkbox" id="liveOverlayMeshMapper"> 📶 MeshMapper</label>
           </div>
           <div class="audio-controls hidden" id="audioControls">
             <label class="audio-slider-label">Voice <select id="audioVoiceSelect" class="audio-voice-select"></select></label>
             <label class="audio-slider-label">BPM <input type="range" id="audioBpmSlider" min="40" max="300" value="120" class="audio-slider"><span id="audioBpmVal">120</span></label>
             <label class="audio-slider-label">Vol <input type="range" id="audioVolSlider" min="0" max="100" value="30" class="audio-slider"><span id="audioVolVal">30</span></label>
           </div>
+          <div id="liveAreaFilter"></div>
         </div><!-- /#liveControlsBody -->
-        <div id="liveAreaFilter"></div>
         <button class="live-controls-toggle" data-live-controls-toggle id="liveControlsToggle"
                 aria-expanded="false" aria-controls="liveControlsBody"
                 aria-label="Show live controls">⚙</button>
@@ -1197,6 +1200,7 @@
           <ul class="legend-list">
             <li><span class="live-ring live-ring--repeater" aria-hidden="true"></span> Bright white ring — repeater</li>
             <li><span class="live-ring live-ring--other" aria-hidden="true"></span> Faded ring — companion / sensor / room</li>
+            <li><span class="live-dash-swatch" aria-hidden="true"></span> Grey dashed trail — inferred or unreached hop</li>
           </ul>
           </div>
         </div>
