@@ -92,7 +92,12 @@ func (s *PacketStore) GetChannels(region string) []map[string]interface{} {
 		}
 		channelName := decoded.Channel
 		if channelName == "" {
-			channelName = "unknown"
+			// Issue #1373: encrypted-no-key packets decode with channel="".
+			// Previously we bucketed them under a literal "unknown" channel
+			// which then leaked into /api/channels as a ghost entry next to
+			// real channels. Skip them — they belong in encrypted-channels
+			// analytics, not the user-facing channel list.
+			continue
 		}
 		ch := channelMap[channelName]
 		if ch == nil {
@@ -384,6 +389,19 @@ func (s *PacketStore) GetChannelMessages(channelHash string, limit, offset int, 
 
 			senderTs := decoded.SenderTimestamp
 
+			// Issue #1366: emit tx.LatestSeen (max observation timestamp,
+			// server UTC) as the rendered timestamp — NOT tx.FirstSeen,
+			// which stays pinned at the first-ever observation of a hash
+			// and lags reality for heartbeat-style retransmissions. Fall
+			// back to FirstSeen only when LatestSeen is empty (no obs).
+			// sender_timestamp from the decoded payload is NOT used as the
+			// rendered field: client RTCs are unreliable. It remains in
+			// the response for debug surfaces.
+			displayTs := tx.LatestSeen
+			if displayTs == "" {
+				displayTs = tx.FirstSeen
+			}
+
 			observers := []string{}
 			obsName := tx.ObserverName
 			if obsName == "" {
@@ -397,7 +415,8 @@ func (s *PacketStore) GetChannelMessages(channelHash string, limit, offset int, 
 				Data: map[string]interface{}{
 					"sender":           displaySender,
 					"text":             displayText,
-					"timestamp":        strOrNil(tx.FirstSeen),
+					"timestamp":        strOrNil(displayTs),
+					"first_seen":       strOrNil(tx.FirstSeen),
 					"sender_timestamp": senderTs,
 					"packetId":         tx.ID,
 					"packetHash":       strOrNil(tx.Hash),
@@ -413,6 +432,18 @@ func (s *PacketStore) GetChannelMessages(channelHash string, limit, offset int, 
 			msgOrder = append(msgOrder, dedupeKey)
 		}
 	}
+
+	// Issue #1366 follow-up: msgOrder is in tx insertion order
+	// (≈ FirstSeen ascending). Re-sort by the rendered timestamp field
+	// (= LatestSeen, set above) ascending, so the page tail = newest
+	// LatestSeen. Without this, a long-running heartbeat with old
+	// FirstSeen but fresh LatestSeen ends up at the head of msgOrder
+	// and gets sliced off by the tail selection below.
+	sort.SliceStable(msgOrder, func(i, j int) bool {
+		ti, _ := msgMap[msgOrder[i]].Data["timestamp"].(string)
+		tj, _ := msgMap[msgOrder[j]].Data["timestamp"].(string)
+		return ti < tj
+	})
 
 	total := len(msgOrder)
 	// Return latest messages (tail)

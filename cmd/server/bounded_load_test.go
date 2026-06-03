@@ -341,12 +341,21 @@ func createTestDBAt(tb testing.TB, dbPath string, numTx int) {
 	defer txStmt.Close()
 	defer obsStmt.Close()
 
+	// Wrap inserts in a single transaction — critical for WAL mode on Windows
+	// where per-row auto-commit is prohibitively slow (each row is an fsync).
+	dbTx, err := conn.Begin()
+	if err != nil {
+		tb.Fatalf("begin insert transaction: %v", err)
+	}
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for i := 1; i <= numTx; i++ {
 		ts := base.Add(time.Duration(i) * time.Minute).Format(time.RFC3339)
 		hash := fmt.Sprintf("h%04d", i)
-		txStmt.Exec(i, "aabb", hash, ts, 0, 4, 1, fmt.Sprintf(`{"pubKey":"pk%04d"}`, i))
-		obsStmt.Exec(i, i, "obs1", "Obs1", "RX", -10.0, -80.0, 5, `["aa","bb"]`, ts)
+		dbTx.Stmt(txStmt).Exec(i, "aabb", hash, ts, 0, 4, 1, fmt.Sprintf(`{"pubKey":"pk%04d"}`, i))
+		dbTx.Stmt(obsStmt).Exec(i, i, "obs1", "Obs1", "RX", -10.0, -80.0, 5, `["aa","bb"]`, ts)
+	}
+	if err := dbTx.Commit(); err != nil {
+		tb.Fatalf("commit insert transaction: %v", err)
 	}
 }
 
@@ -392,6 +401,12 @@ func createTestDBWithObs(tb testing.TB, dbPath string, numTx int) {
 	defer txStmt.Close()
 	defer obsStmt.Close()
 
+	// Wrap inserts in a single transaction — critical for WAL mode on Windows
+	// where per-row auto-commit is prohibitively slow (each row is an fsync).
+	dbTx2, err := conn.Begin()
+	if err != nil {
+		tb.Fatalf("begin insert transaction: %v", err)
+	}
 	observers := []string{"obs1", "obs2", "obs3", "obs4", "obs5"}
 	obsNames := []string{"Alpha", "Bravo", "Charlie", "Delta", "Echo"}
 	obsID := 1
@@ -399,13 +414,16 @@ func createTestDBWithObs(tb testing.TB, dbPath string, numTx int) {
 	for i := 1; i <= numTx; i++ {
 		ts := base.Add(time.Duration(i) * time.Minute).Format(time.RFC3339)
 		hash := fmt.Sprintf("h%06d", i)
-		txStmt.Exec(i, "aabb", hash, ts, 0, 4, 1, fmt.Sprintf(`{"pubKey":"pk%06d"}`, i))
+		dbTx2.Stmt(txStmt).Exec(i, "aabb", hash, ts, 0, 4, 1, fmt.Sprintf(`{"pubKey":"pk%06d"}`, i))
 		nObs := (i % 5) + 1 // 1–5 observations per transmission
 		for j := 0; j < nObs; j++ {
 			snr := -5.0 + float64(j)*2.5
 			rssi := -90.0 + float64(j)*5.0
-			obsStmt.Exec(obsID, i, observers[j], obsNames[j], "RX", snr, rssi, 5-j, `["aa","bb"]`, ts)
+			dbTx2.Stmt(obsStmt).Exec(obsID, i, observers[j], obsNames[j], "RX", snr, rssi, 5-j, `["aa","bb"]`, ts)
 			obsID++
 		}
+	}
+	if err := dbTx2.Commit(); err != nil {
+		tb.Fatalf("commit insert transaction: %v", err)
 	}
 }

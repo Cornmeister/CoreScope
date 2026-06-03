@@ -65,10 +65,7 @@ async function run() {
     await page.goto(BASE, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('nav, .navbar, .nav, [class*="nav"]');
     const title = await page.title();
-    assert(
-      title.toLowerCase().includes('corescope') || title.toLowerCase().includes('cornmeister'),
-      `Title "${title}" doesn't contain CoreScope or Cornmeister`
-    );
+    assert(title.toLowerCase().includes('corescope'), `Title "${title}" doesn't contain CoreScope`);
     const nav = await page.$('nav, .navbar, .nav, [class*="nav"]');
     assert(nav, 'Nav bar not found');
   });
@@ -86,17 +83,13 @@ async function run() {
       return document.fonts.check('1em Aldrich');
     });
     assert(aldrichLoaded, 'document.fonts.check("1em Aldrich") returned false — Aldrich is not loaded');
-    // Sanity: if the navbar uses a text-based SVG logo (CoreScope upstream), verify
-    // the <text> element still declares Aldrich. Forks with a purely geometric logo
-    // (no <text>) skip this check — the font-load assertion above is sufficient.
+    // Sanity: the inline SVG <text> still declares Aldrich in its font-family.
     const fontFamily = await page.evaluate(() => {
       const t = document.querySelector('nav svg text, .navbar svg text, header svg text');
       return t ? (t.getAttribute('font-family') || getComputedStyle(t).fontFamily) : null;
     });
-    if (fontFamily !== null) {
-      assert(/aldrich/i.test(fontFamily),
-        `Navbar SVG <text> font-family should include Aldrich, got: ${fontFamily}`);
-    }
+    assert(fontFamily && /aldrich/i.test(fontFamily),
+      `Navbar SVG <text> font-family should include Aldrich, got: ${fontFamily}`);
   });
 
   // Test 6: Theme customizer opens (reuses home page from test 1)
@@ -195,17 +188,30 @@ async function run() {
     await page.goto(BASE, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('nav, .navbar, .nav, [class*="nav"]');
     const themeBefore = await page.$eval('html', el => el.getAttribute('data-theme'));
-    // Find toggle button
-    const allButtons = await page.$$('button');
+
+    // The toggle may be a <label#darkModeToggle> wrapping a checkbox (new toggle-switch
+    // design) or a <button#darkModeToggle> (legacy button design). Try the checkbox path
+    // first, then fall back to the old button scan.
     let toggled = false;
-    for (const b of allButtons) {
-      const text = await b.textContent();
-      if (text.includes('\u2600') || text.includes('\ud83c\udf19') || text.includes('\ud83c\udf11') || text.includes('\ud83c\udf15')) {
-        await b.click();
-        toggled = true;
-        break;
+
+    // New toggle-switch: click the label or directly set the checkbox
+    const toggleLabel = await page.$('#darkModeToggle');
+    if (toggleLabel) {
+      await toggleLabel.click();
+      toggled = true;
+    } else {
+      // Legacy fallback: scan buttons for sun/moon emoji
+      const allButtons = await page.$$('button');
+      for (const b of allButtons) {
+        const text = await b.textContent();
+        if (text.includes('\u2600') || text.includes('\ud83c\udf19') || text.includes('\ud83c\udf11') || text.includes('\ud83c\udf15')) {
+          await b.click();
+          toggled = true;
+          break;
+        }
       }
     }
+
     assert(toggled, 'Could not find dark mode toggle button');
     await page.waitForFunction(
       (before) => document.documentElement.getAttribute('data-theme') !== before,
@@ -213,40 +219,68 @@ async function run() {
     );
     const themeAfter = await page.$eval('html', el => el.getAttribute('data-theme'));
     assert(themeBefore !== themeAfter, `Theme didn't change: before=${themeBefore}, after=${themeAfter}`);
+
+    // PR #893 follow-up: tighten — if the new toggle-switch is present, verify
+    // (a) the checkbox is present and behaves as role="switch", and
+    // (b) the chosen theme persists across a full reload (localStorage path).
+    const checkbox = await page.$('#darkModeCheckbox');
+    if (checkbox) {
+      const role = await checkbox.evaluate(el => el.getAttribute('role'));
+      assert(role === 'switch', `Expected role="switch" on #darkModeCheckbox, got "${role}"`);
+      const checkedNow = await checkbox.evaluate(el => el.checked);
+      assert(checkedNow === (themeAfter === 'dark'),
+        `Checkbox state out of sync: checked=${checkedNow}, theme=${themeAfter}`);
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#darkModeToggle');
+      const themePersisted = await page.$eval('html', el => el.getAttribute('data-theme'));
+      assert(themePersisted === themeAfter,
+        `Theme did not persist across reload: was=${themeAfter}, after-reload=${themePersisted}`);
+    }
   });
 
-  // Test: Stats bar shows version/commit badge
-  await test('Stats bar shows version and commit badge', async () => {
+  // Test: Version info is on Perf page (not navbar)
+  await test('Version info lives on Perf dashboard, not in navbar', async () => {
     await page.goto(BASE, { waitUntil: 'domcontentloaded' });
-    // Wait for stats to load (fetched from /api/stats)
+    // Wait for nav stats bar to load
     await page.waitForFunction(() => {
       const stats = document.getElementById('navStats');
       return stats && stats.textContent.trim().length > 5;
     }, { timeout: 10000 });
     const navStats = await page.$('#navStats');
     assert(navStats, 'Nav stats bar (#navStats) not found');
-    // Check if stats API exposes version info
+    // Version/engine badges must NOT appear in the navbar
+    const navVersionBadge = await page.$('#navStats .version-badge');
+    assert(!navVersionBadge, 'version-badge should not be in the navbar (moved to Perf dashboard)');
+    const navEngineBadge = await page.$('#navStats .engine-badge');
+    assert(!navEngineBadge, 'engine-badge should not be in the navbar (moved to Perf dashboard)');
+    // Check if health API exposes version info
     const hasVersionData = await page.evaluate(async () => {
       try {
-        const res = await fetch('/api/stats');
+        const res = await fetch('/api/health');
         const data = await res.json();
-        return !!(data.version || data.commit || data.engine);
+        return !!(data.version || data.commit);
       } catch { return false; }
     });
     if (!hasVersionData) {
-      console.log('    ⏭️  Server does not expose version/commit in /api/stats — badge test skipped');
+      console.log('    ⏭️  Server does not expose version/commit in /api/health — perf card test skipped');
       return;
     }
-    // Version badge should appear when data is available
-    await page.waitForFunction(() => !!document.querySelector('.version-badge'), { timeout: 5000 });
-    const badgeText = await page.$eval('.version-badge', el => el.textContent.trim());
-    assert(badgeText.length > 3, `Version badge should have content but got "${badgeText}"`);
-    const hasCommitHash = /[0-9a-f]{7}/i.test(badgeText);
-    assert(hasCommitHash, `Version badge should contain a commit hash, got "${badgeText}"`);
-    const engineBadge = await page.$('.engine-badge');
-    assert(engineBadge, 'Engine badge (.engine-badge) not found');
-    const engineText = await page.$eval('.engine-badge', el => el.textContent.trim().toLowerCase());
-    assert(engineText.includes('node') || engineText.includes('go'), `Engine should contain "node" or "go", got "${engineText}"`);
+    // Version card should appear on the Perf dashboard
+    await page.goto(`${BASE}/#/perf`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => {
+      const cards = document.querySelectorAll('.perf-card .perf-label');
+      return Array.from(cards).some(el => el.textContent.trim() === 'Version');
+    }, { timeout: 10000 });
+    // waitForFunction already confirmed the Version label exists; just grab the num text
+    const versionNumText = await page.evaluate(() => {
+      const labels = document.querySelectorAll('.perf-card .perf-label');
+      const label = Array.from(labels).find(el => el.textContent.trim() === 'Version');
+      if (!label) return null;
+      const num = label.closest('.perf-card').querySelector('.perf-num, .perf-num--small');
+      return num ? num.textContent.trim() : '';
+    });
+    assert(versionNumText !== null, 'Version perf-card not found on #/perf');
+    assert(versionNumText.length > 0, 'Version card .perf-num should have non-empty text');
   });
 
   // --- Group: Nodes page (tests 2, 5) ---
@@ -636,6 +670,15 @@ async function run() {
     assert(hasChannelHash, 'Undecrypted GRP_TXT detail should show "Channel Hash"');
   });
 
+  await test('#1530 copy-link-btn color differs from accent', async () => {
+    const hash = await page.evaluate(async () => (await (await fetch('/api/packets?limit=1')).json()).packets?.[0]?.hash);
+    if (!hash) return console.log('    ⏭️  Skipped (no packets)');
+    await page.goto(`${BASE}/#/packets/${hash}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('.copy-link-btn', { timeout: 8000 });
+    const diff = await page.evaluate(() => window.getComputedStyle(document.querySelector('.copy-link-btn')).color !== window.getComputedStyle(document.documentElement).getPropertyValue('--accent').trim());
+    assert(diff, 'copy-link-btn color should not match --accent');
+  });
+
   // --- Group: Analytics page (test 8 + sub-tabs) ---
 
   // Test 8: Analytics page loads with overview
@@ -895,29 +938,8 @@ async function run() {
   // the .active class.
   await test('Live nav-link does not wrap or change nav height when active (#1046)', async () => {
     // Use the exact viewport width from the issue screenshots.
-    // Use 1920px so all high-priority links (including Live) are inline even
-    // after nav-stats populates. The wrapping concern from #1046 is a CSS
-    // property issue independent of viewport — testing wider is still valid.
-    await page.setViewportSize({ width: 1920, height: 800 });
+    await page.setViewportSize({ width: 1115, height: 800 });
     await page.goto(BASE, { waitUntil: 'domcontentloaded' });
-    // Wait for nav-stats to be populated (async fetch) so applyNavPriority runs
-    // with the real nav-right width before we measure.
-    await page.waitForFunction(() => {
-      const s = document.getElementById('navStats');
-      return s && s.textContent.trim().length > 5;
-    }, { timeout: 5000 }).catch(() => {});
-    // Then wait for layout to settle across two consecutive frames.
-    await page.waitForFunction(() => {
-      const el = document.querySelector('.top-nav .nav-right');
-      if (!el) return false;
-      const r1 = el.getBoundingClientRect();
-      return new Promise(resolve => {
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          const r2 = el.getBoundingClientRect();
-          resolve(r1.right === r2.right && r1.left === r2.left);
-        }));
-      });
-    });
     await page.waitForSelector('a.nav-link[data-route="live"]');
 
     const measure = await page.evaluate(() => {
@@ -1279,13 +1301,13 @@ async function run() {
   await test('Customizer has separate map and live opacity sliders', async () => {
     // Verify by checking JS source \u2014 avoids heavy page reloads that crash ARM chromium
     const custJs = await page.evaluate(async () => {
-      const res = await fetch('/customize-v2.js?_=' + Date.now());
+      const res = await fetch('/customize.js?_=' + Date.now());
       return res.text();
     });
-    assert(custJs.includes('heatmapOpacity'), 'customize-v2.js should have map opacity slider (heatmapOpacity)');
-    assert(custJs.includes('liveHeatmapOpacity'), 'customize-v2.js should have live opacity slider (liveHeatmapOpacity)');
-    assert(custJs.includes('meshcore-heatmap-opacity'), 'customize-v2.js should use meshcore-heatmap-opacity key');
-    assert(custJs.includes('meshcore-live-heatmap-opacity'), 'customize-v2.js should use meshcore-live-heatmap-opacity key');
+    assert(custJs.includes('custHeatOpacity'), 'customize.js should have map opacity slider (custHeatOpacity)');
+    assert(custJs.includes('custLiveHeatOpacity'), 'customize.js should have live opacity slider (custLiveHeatOpacity)');
+    assert(custJs.includes('meshcore-heatmap-opacity'), 'customize.js should use meshcore-heatmap-opacity key');
+    assert(custJs.includes('meshcore-live-heatmap-opacity'), 'customize.js should use meshcore-live-heatmap-opacity key');
     // Verify labels are distinct
     assert(custJs.includes('Nodes Map') || custJs.includes('nodes map') || custJs.includes('\ud83d\uddfa'), 'Map slider should have map-related label');
     assert(custJs.includes('Live Map') || custJs.includes('live map') || custJs.includes('\ud83d\udce1'), 'Live slider should have live-related label');
@@ -2034,14 +2056,21 @@ async function run() {
     // Use a mobile viewport
     await page.setViewportSize({ width: 480, height: 800 });
     await page.goto(`${BASE}/#/packets`);
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(1500);
 
     const filterBar = await page.$('.filter-bar');
     assert(filterBar, 'Filter bar should exist on packets page');
 
-    // Before clicking toggle, filter inputs should be hidden
-    const toggleBtn = await page.$('.filter-toggle-btn');
-    assert(toggleBtn, 'Filter toggle button should exist on mobile');
+    // #1471: on mobile, the in-page .filter-toggle-btn is hidden + the
+    // operator-visible toggle is the navbar mirror injected by
+    // public/mobile-page-actions.js (class: filter-toggle-btn-mirror).
+    // Try mirror first, fall back to in-page button for any test rig where
+    // the mirror script didn't load.
+    let toggleBtn = await page.$('.filter-toggle-btn-mirror');
+    if (!toggleBtn) {
+      toggleBtn = await page.$('.filter-toggle-btn');
+    }
+    assert(toggleBtn, 'Filter toggle button (navbar mirror or in-page fallback) should exist on mobile');
 
     await toggleBtn.click();
     await page.waitForTimeout(300);
@@ -2068,6 +2097,89 @@ async function run() {
   });
 
   // ─── End mobile filter tests ──────────────────────────────────────────────
+
+  // ─── #1468 — drop client-side "unknown" channel synthesis ────────────────
+
+  await test('#1468: live WS CHAN message with no payload.channel is dropped (no "unknown" bucket)', async () => {
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.goto(`${BASE}/#/channels`, { waitUntil: 'domcontentloaded' });
+    // Wait for the channels init() to mount and expose the test hook.
+    await page.waitForFunction(() => typeof window._channelsProcessWSBatchForTest === 'function', { timeout: 10000 });
+
+    // Snapshot starting state so we can compare deltas.
+    const before = await page.evaluate(() => {
+      const s = window._channelsGetStateForTest();
+      return { count: s.channels.length, names: s.channels.map(c => c.name || c.channel || '') };
+    });
+
+    // Feed a CHAN-like message with NO payload.channel field (but valid hash).
+    await page.evaluate(() => {
+      window._channelsProcessWSBatchForTest([
+        {
+          type: 'packet',
+          data: {
+            hash: 'test1468drophash' + Date.now(),
+            decoded: {
+              header: { payloadTypeName: 'GRP_TXT' },
+              payload: { /* no `channel` */ text: 'orphan: hello' },
+            },
+          },
+        },
+      ], null);
+    });
+
+    const after = await page.evaluate(() => {
+      const s = window._channelsGetStateForTest();
+      return { count: s.channels.length, names: s.channels.map(c => c.name || c.channel || '') };
+    });
+
+    // No "unknown" channel materialized.
+    assert(!after.names.includes('unknown'),
+      'channels list does not contain a synthesized "unknown" entry — got ' + JSON.stringify(after.names));
+    // And the channel-count delta is 0 — the orphan message was dropped, not bucketed.
+    assert(after.count === before.count,
+      `channel count unchanged after orphan WS msg — before=${before.count}, after=${after.count}`);
+  });
+
+  await test('#1468 control: same WS message WITH payload.channel is still routed', async () => {
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.goto(`${BASE}/#/channels`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => typeof window._channelsProcessWSBatchForTest === 'function', { timeout: 10000 });
+
+    const sentinel = '__test_chan_1468_' + Date.now();
+    const before = await page.evaluate((name) => {
+      const s = window._channelsGetStateForTest();
+      return { hasSentinel: s.channels.some(c => (c.name || c.channel) === name) };
+    }, sentinel);
+    assert(!before.hasSentinel, 'pre: sentinel channel does not pre-exist');
+
+    await page.evaluate((name) => {
+      window._channelsProcessWSBatchForTest([
+        {
+          type: 'packet',
+          data: {
+            hash: 'test1468hash' + Date.now(),
+            decoded: {
+              header: { payloadTypeName: 'GRP_TXT' },
+              payload: { channel: name, text: 'alice: hi', sender: 'alice' },
+            },
+          },
+        },
+      ], null);
+    }, sentinel);
+
+    const after = await page.evaluate((name) => {
+      const s = window._channelsGetStateForTest();
+      return {
+        hasSentinel: s.channels.some(c => (c.name || c.channel) === name),
+        names: s.channels.map(c => c.name || c.channel || ''),
+      };
+    }, sentinel);
+    assert(after.hasSentinel,
+      'control: channel WITH payload.channel IS routed into the registry — got ' + JSON.stringify(after.names));
+  });
+
+  // ─── End #1468 tests ──────────────────────────────────────────────────────
 
   // Extract frontend coverage if instrumented server is running
   try {
@@ -2646,29 +2758,6 @@ async function run() {
     assert(hasStripe, 'At least one .live-feed-item should have hash-color border-left stripe when toggle ON');
   });
 
-  // --- Map polyline uses hash color ---
-  await test('Map trace polyline uses hash-derived color when toggle ON', async () => {
-    await page.evaluate(() => localStorage.setItem('meshcore-color-packets-by-hash', 'true'));
-    await page.goto(BASE + '/#/live');
-    await page.waitForTimeout(3000);
-    // Use the dedicated .live-packet-trace class so we don't pick up
-    // unrelated leaflet paths (geofilter polygons, region overlays, etc).
-    const pathCount = await page.evaluate(() => document.querySelectorAll('path.live-packet-trace').length);
-    if (pathCount === 0) {
-      console.log('    (skipped — no live-packet-trace polylines drawn in 3s window)');
-      return;
-    }
-    const hasHslPolyline = await page.evaluate(() => {
-      const paths = document.querySelectorAll('path.live-packet-trace');
-      for (const p of paths) {
-        const stroke = p.getAttribute('stroke') || '';
-        if (stroke.startsWith('hsl(')) return true;
-      }
-      return false;
-    });
-    assert(hasHslPolyline, 'At least one live-packet-trace polyline should have hsl() stroke color from hash');
-  });
-
   // --- Roles folded into Analytics (issue #1085) ---
   // Acceptance criteria:
   //   1. "Roles" link does NOT exist in top nav
@@ -3180,6 +3269,30 @@ async function run() {
       `#1270 2-byte: prefix-tool shows ${got[2]}, hash-sizes API shows ${expected[2]}`);
     assert(got[3] === expected[3],
       `#1270 3-byte: prefix-tool shows ${got[3]}, hash-sizes API shows ${expected[3]}`);
+  });
+
+  await test('Live page: Area dropdown items have transparent background to prevent unreadable text', async () => {
+    await page.goto(`${BASE}/#/live`);
+    await page.waitForTimeout(1000);
+    // Expand the cog menu first
+    const cog = await page.$('#liveControlsToggle');
+    if (cog) {
+      const expanded = await page.$eval('#liveControlsToggle', el => el.getAttribute('aria-expanded') === 'true');
+      if (!expanded) await cog.click();
+      await page.waitForTimeout(500);
+    }
+    // Click the area filter dropdown trigger on the live page
+    const trigger = await page.$('#liveAreaFilter .region-dropdown-trigger');
+    if (trigger) {
+      await trigger.click();
+      await page.waitForSelector('.region-dropdown-item', { state: 'attached', timeout: 2000 });
+      const bg = await page.evaluate(() => {
+        const item = document.querySelector('.region-dropdown-item');
+        return item ? window.getComputedStyle(item).backgroundColor : null;
+      });
+      assert(bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent',
+        `Expected dropdown item background to be transparent, got ${bg}`);
+    }
   });
 
   await browser.close();

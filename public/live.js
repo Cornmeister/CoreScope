@@ -1110,8 +1110,8 @@
             </select></label>
             <label><input type="checkbox" id="liveHeatToggle" checked aria-describedby="heatDesc"> Heat</label>
             <span id="heatDesc" class="sr-only">Overlay a density heat map on the mesh nodes</span>
-            <label><input type="checkbox" id="liveGhostToggle" checked aria-describedby="ghostDesc"> Ghosts</label>
-            <span id="ghostDesc" class="sr-only">Show interpolated ghost markers for unknown hops</span>
+            <label><input type="checkbox" id="liveGhostToggle" checked aria-describedby="ghostDesc"> Inferred Hops</label>
+            <span id="ghostDesc" class="sr-only">Show inferred hop markers for unknown hops</span>
             <label><input type="checkbox" id="liveRealisticToggle" aria-describedby="realisticDesc"> Realistic</label>
             <span id="realisticDesc" class="sr-only">Buffer packets by hash and animate all paths simultaneously</span>
             <label><input type="checkbox" id="liveColorHashToggle" aria-describedby="colorHashDesc"> Color by hash</label>
@@ -1340,9 +1340,21 @@
     applySatmap(_savedSatmap);
     _satmapSel.addEventListener('change', (e) => applySatmap(e.target.value));
 
+    // #1490 — animations + trails need their own pane above markerPane.
+    // PR #1334 moved node markers from L.circleMarker (overlayPane @ 400)
+    // to L.marker+divIcon (markerPane @ 600); animations stayed in the
+    // default overlayPane and were occluded by every node marker. Custom
+    // pane @ 650 puts them strictly above all nodes. (tooltipPane shares
+    // 650 — tooltips are user-triggered, harmless to share.)
+    map.createPane('liveAnimPane');
+    map.getPane('liveAnimPane').style.zIndex = 650;
+    // Pointer-events default to none so the pane doesn't steal clicks
+    // from the marker pane underneath (clickablePathsLayer handles that).
+    map.getPane('liveAnimPane').style.pointerEvents = 'none';
+
     nodesLayer = L.layerGroup().addTo(map);
-    pathsLayer = L.layerGroup().addTo(map);
-    animLayer = L.layerGroup().addTo(map);
+    pathsLayer = L.layerGroup({ pane: 'liveAnimPane' }).addTo(map);
+    animLayer = L.layerGroup({ pane: 'liveAnimPane' }).addTo(map);
     clickablePathsLayer = L.layerGroup().addTo(map);
 
     injectSVGFilters();
@@ -3605,6 +3617,10 @@
         return;
       }
       const elapsed = now - lastStep;
+      // Tab-wake fix: if the tab was hidden for a long time, elapsed can be
+      // enormous, causing the animation to fast-forward. Reset the clock so
+      // the animation resumes smoothly from the current step.
+      if (elapsed > 500) { lastStep = now; requestAnimationFrame(animateLine); return; }
       const stepMs = 33 / VCR.speed;
       if (elapsed >= stepMs) {
         const ticks = Math.min(Math.floor(elapsed / stepMs), 4);

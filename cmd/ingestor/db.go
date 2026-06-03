@@ -661,6 +661,25 @@ func applySchema(db *sql.DB) error {
 		log.Println("[migration] compound observer/timestamp index created")
 	}
 
+	// #1483: normalize nodes.public_key to lowercase. The server's
+	// GetNodeLocationsByKeys lookup dropped LOWER(public_key) for perf
+	// (#1481 P0-3) and now relies on stored keys being lowercase. The
+	// decoder writes lowercase today, but legacy/admin/API inserts may
+	// have left mixed-case rows. Idempotent: counts and lowers any
+	// non-lowercase rows on every boot.
+	if r := db.QueryRow("SELECT COUNT(*) FROM nodes WHERE public_key != lower(public_key)"); r != nil {
+		var n int64
+		_ = r.Scan(&n)
+		if n > 0 {
+			log.Printf("[migration] Normalizing %d nodes.public_key row(s) to lowercase (#1483)...", n)
+			if _, err := db.Exec(`UPDATE nodes SET public_key = lower(public_key) WHERE public_key != lower(public_key)`); err != nil {
+				log.Printf("[migration] public_key lowercase normalize failed: %v", err)
+			} else {
+				log.Printf("[migration] public_key lowercase normalize complete (%d rows)", n)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -880,7 +899,11 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 			observerIdx = &rowid
 			// Update observer last_seen and last_packet_at on every packet to prevent
 			// low-traffic observers from appearing offline (#463)
-			if _, uerr := tx.Stmt(s.stmtUpdateObserverLastSeen).Exec(ingestNow, rxTime, ingestNow, rxTime, rowid); uerr != nil {
+			// observer.last_seen and last_packet_at answer "when did the analyzer
+			// last hear from this observer" — both are ingest-time questions.
+			// Per-packet rxTime is stored separately on observations/transmissions.
+			// Issue #1465: always use ingestNow, never envelope rxTime.
+			if _, uerr := tx.Stmt(s.stmtUpdateObserverLastSeen).Exec(ingestNow, ingestNow, ingestNow, ingestNow, rowid); uerr != nil {
 				s.Stats.WriteErrors.Add(1)
 			}
 		}
@@ -1244,6 +1267,34 @@ func (s *Store) RunAnalyze() {
 		return
 	}
 	log.Println("[db] ANALYZE complete — query planner stats refreshed")
+}
+
+// RecordNaiveSkew records a naive-clock skew event for an observer (#1478).
+// Updates clock_skew_seconds (latest delta in seconds), clock_last_naive_at
+// (timestamp of this event), and clock_skew_count_24h (rolling count reset
+// when last event > 24h ago). Safe to call from concurrent goroutines.
+func (s *Store) RecordNaiveSkew(observerID string, deltaSec int64, now time.Time) error {
+	if observerID == "" {
+		return nil
+	}
+	nowStr := now.UTC().Format(time.RFC3339)
+	cutoff := now.Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+	// One INSERT-or-UPDATE round trip. ON CONFLICT path resets the rolling
+	// counter when the previous event is older than the 24h window, otherwise
+	// increments it.
+	_, err := s.db.Exec(`
+		INSERT INTO observers (id, clock_skew_seconds, clock_skew_count_24h, clock_last_naive_at)
+		VALUES (?, ?, 1, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			clock_skew_seconds = excluded.clock_skew_seconds,
+			clock_last_naive_at = excluded.clock_last_naive_at,
+			clock_skew_count_24h = CASE
+				WHEN clock_last_naive_at IS NULL OR clock_last_naive_at < ?
+					THEN 1
+				ELSE COALESCE(clock_skew_count_24h, 0) + 1
+			END
+	`, observerID, deltaSec, nowStr, cutoff)
+	return err
 }
 
 // BackfillPathJSONAsync launches the path_json backfill in a background goroutine.
@@ -1611,7 +1662,7 @@ func BuildPacketData(msg *MQTTPacketMessage, decoded *DecodedPacket, observerID,
 
 	pd := &PacketData{
 		RawHex:         msg.Raw,
-		Timestamp:      msg.Timestamp,
+		Timestamp:      time.Now().UTC().Format(time.RFC3339), // #1370 (counters #1233): server ingest time, not envelope rxTime
 		ObserverID:     observerID,
 		ObserverName:   msg.Origin,
 		SNR:            msg.SNR,

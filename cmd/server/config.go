@@ -132,6 +132,23 @@ type Config struct {
 	RF *RFConfig `json:"rf,omitempty"`
 
 	MeshMapper *MeshMapperConfig `json:"meshMapper,omitempty"`
+
+	// MarkerStroke configures the server-side default for marker stroke overlay
+	// so the frontend can apply it before localStorage loads. Issue #1488.
+	MarkerStroke map[string]interface{} `json:"markerStroke,omitempty"`
+
+	// ObserversCache configures the /api/observers default-shape cache.
+	// Issue #1481 P0-3 / #1483.
+	ObserversCache *ObserversCacheConfig `json:"observersCache,omitempty"`
+}
+
+// ObserversCacheConfig controls the /api/observers default-shape cache.
+// #1481 P0-3 / #1483.
+type ObserversCacheConfig struct {
+	// TTLSeconds: how long the cached default-shape /api/observers
+	// response is served before a singleflight-collapsed refill.
+	// 0/missing = default 30. Lower = fresher data, more SQL pressure.
+	TTLSeconds int `json:"ttlSeconds,omitempty"`
 }
 
 // RateLimitConfig configures the per-IP token-bucket rate limiter. All limits
@@ -494,6 +511,9 @@ type ThemeFile struct {
 	NodeColors map[string]interface{} `json:"nodeColors"`
 	TypeColors map[string]interface{} `json:"typeColors"`
 	Home       map[string]interface{} `json:"home"`
+	// #1488 — marker stroke overlay so the frontend can apply server-side
+	// defaults before the operator's localStorage override loads.
+	MarkerStroke map[string]interface{} `json:"markerStroke,omitempty"`
 }
 
 func LoadConfig(baseDirs ...string) (*Config, error) {
@@ -518,11 +538,13 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 		cfg.normalizePacketStoreConfig()
 		cfg.NormalizeTimestampConfig()
 		cfg.sanitizeCORS()
+		applyCORSEnv(cfg)
 		return cfg, nil
 	}
 	cfg.normalizePacketStoreConfig()
 	cfg.NormalizeTimestampConfig()
 	cfg.sanitizeCORS()
+	applyCORSEnv(cfg)
 	return cfg, nil // defaults
 }
 

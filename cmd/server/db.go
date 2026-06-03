@@ -27,8 +27,9 @@ type DB struct {
 	isV3            bool   // v3 schema: observer_idx in observations (vs observer_id in v2)
 	hasResolvedPath bool   // observations table has resolved_path column
 	hasObsRawHex    bool   // observations table has raw_hex column (#881)
-	hasScopeName    bool   // transmissions.scope_name column exists (#899)
-	hasDefaultScope bool   // nodes.default_scope column exists (#899)
+	hasScopeName        bool   // transmissions.scope_name column exists (#899)
+	hasDefaultScope     bool   // nodes.default_scope column exists (#899)
+	hasMultibyteSupCols bool   // nodes/inactive_nodes have multibyte_sup/multibyte_evidence (#903)
 
 	// Channel list cache (60s TTL) — avoids repeated GROUP BY scans (#762)
 	channelsCacheMu  sync.Mutex
@@ -199,8 +200,11 @@ func (db *DB) detectSchema() {
 		var notNull, pk int
 		var dflt sql.NullString
 		if nodeRows.Scan(&cid, &colName, &colType, &notNull, &dflt, &pk) == nil {
-			if colName == "default_scope" {
+			switch colName {
+			case "default_scope":
 				db.hasDefaultScope = true
+			case "multibyte_sup":
+				db.hasMultibyteSupCols = true
 			}
 		}
 	}
@@ -318,6 +322,15 @@ type Observer struct {
 	NoiseFloor    *float64 `json:"noise_floor"`
 	LastPacketAt  *string  `json:"last_packet_at"`
 	Repeat        *string  `json:"repeat"`
+
+	// Issue #1478: per-observer naive-clock skew tracking.
+	// Written by the ingestor in cmd/ingestor/db.go RecordNaiveSkew whenever
+	// resolveRxTime clamps a naive envelope timestamp >15 min off UTC. The
+	// server reads these as-is; the handler derives the bool `clock_naive`
+	// from clock_last_naive_at being within the last 24h.
+	ClockSkewSeconds  *int64  `json:"clock_skew_seconds"`
+	ClockSkewCount24h int     `json:"clock_skew_count_24h"`
+	ClockLastNaiveAt  *string `json:"clock_last_naive_at"`
 }
 
 // Transmission represents a row from the transmissions table.
@@ -655,7 +668,13 @@ func (db *DB) QueryPackets(q PacketQuery) (*PacketResult, error) {
 	}
 
 	selectCols, observerJoin := db.transmissionBaseSQL()
-	querySQL := fmt.Sprintf("SELECT %s FROM transmissions t %s %s ORDER BY t.first_seen %s LIMIT ? OFFSET ?",
+	// Issue #1345: order by ingest id, NOT first_seen. PR #1233 made first_seen=rxTime,
+	// so buffered-then-uploaded observer packets with hours-old rxTime were
+	// sorting to the top/middle and hiding fresh ingest. Ordering by id keeps
+	// "latest activity" semantically equal to "what we ingested last" — which
+	// is what the packets page is showing. The `since=` filter still uses
+	// first_seen / observation timestamp, preserving "received-by-radio since X."
+	querySQL := fmt.Sprintf("SELECT %s FROM transmissions t %s %s ORDER BY t.id %s LIMIT ? OFFSET ?",
 		selectCols, observerJoin, w, q.Order)
 
 	qArgs := make([]interface{}, len(args))
@@ -1171,7 +1190,8 @@ func (db *DB) GetRecentTransmissionsForNode(pubkey string, limit int) ([]map[str
 
 	selectCols, observerJoin := db.transmissionBaseSQL()
 
-	querySQL := fmt.Sprintf("SELECT %s FROM transmissions t %s WHERE t.from_pubkey = ? ORDER BY t.first_seen DESC LIMIT ?",
+	// Issue #1345: order by ingest id (not first_seen) for consistent ordering.
+	querySQL := fmt.Sprintf("SELECT %s FROM transmissions t %s WHERE t.from_pubkey = ? ORDER BY t.id DESC LIMIT ?",
 		selectCols, observerJoin)
 	args := []interface{}{pubkey, limit}
 
@@ -1446,7 +1466,8 @@ func (db *DB) GetObserverPathSample(observerID string, since time.Time, bucketSe
 // GetObservers returns active observers (not soft-deleted) sorted by last_seen DESC.
 func (db *DB) GetObservers() ([]Observer, error) {
 	// last_packet_at and repeat are always present in the schema managed by internal/dbschema.
-	cols := "id, name, iata, last_seen, first_seen, packet_count, model, firmware, client_version, radio, battery_mv, uptime_secs, noise_floor, last_packet_at, repeat"
+	// clock_skew_* columns added by migration (#1478).
+	cols := "id, name, iata, last_seen, first_seen, packet_count, model, firmware, client_version, radio, battery_mv, uptime_secs, noise_floor, last_packet_at, repeat, clock_skew_seconds, clock_skew_count_24h, clock_last_naive_at"
 	rows, err := db.conn.Query("SELECT " + cols + " FROM observers WHERE inactive IS NULL OR inactive = 0 ORDER BY last_seen DESC")
 	if err != nil {
 		return nil, err
@@ -1458,7 +1479,8 @@ func (db *DB) GetObservers() ([]Observer, error) {
 		var o Observer
 		var batteryMv, uptimeSecs sql.NullInt64
 		var noiseFloor sql.NullFloat64
-		dest := []interface{}{&o.ID, &o.Name, &o.IATA, &o.LastSeen, &o.FirstSeen, &o.PacketCount, &o.Model, &o.Firmware, &o.ClientVersion, &o.Radio, &batteryMv, &uptimeSecs, &noiseFloor, &o.LastPacketAt, &o.Repeat}
+		var clockSkewSec, clockSkewCount sql.NullInt64
+		dest := []interface{}{&o.ID, &o.Name, &o.IATA, &o.LastSeen, &o.FirstSeen, &o.PacketCount, &o.Model, &o.Firmware, &o.ClientVersion, &o.Radio, &batteryMv, &uptimeSecs, &noiseFloor, &o.LastPacketAt, &o.Repeat, &clockSkewSec, &clockSkewCount, &o.ClockLastNaiveAt}
 		if scanErr := rows.Scan(dest...); scanErr != nil {
 			continue
 		}
@@ -1471,6 +1493,13 @@ func (db *DB) GetObservers() ([]Observer, error) {
 		}
 		if noiseFloor.Valid {
 			o.NoiseFloor = &noiseFloor.Float64
+		}
+		if clockSkewSec.Valid {
+			v := clockSkewSec.Int64
+			o.ClockSkewSeconds = &v
+		}
+		if clockSkewCount.Valid {
+			o.ClockSkewCount24h = int(clockSkewCount.Int64)
 		}
 		observers = append(observers, o)
 	}
@@ -1521,9 +1550,11 @@ func (db *DB) GetObserverByID(id string) (*Observer, error) {
 	var o Observer
 	var batteryMv, uptimeSecs sql.NullInt64
 	var noiseFloor sql.NullFloat64
+	var clockSkewSec, clockSkewCount sql.NullInt64
 	// last_packet_at and repeat are always present in the schema managed by internal/dbschema.
-	cols := "id, name, iata, last_seen, first_seen, packet_count, model, firmware, client_version, radio, battery_mv, uptime_secs, noise_floor, last_packet_at, repeat"
-	dest := []interface{}{&o.ID, &o.Name, &o.IATA, &o.LastSeen, &o.FirstSeen, &o.PacketCount, &o.Model, &o.Firmware, &o.ClientVersion, &o.Radio, &batteryMv, &uptimeSecs, &noiseFloor, &o.LastPacketAt, &o.Repeat}
+	// clock_skew_* columns added by migration (#1478).
+	cols := "id, name, iata, last_seen, first_seen, packet_count, model, firmware, client_version, radio, battery_mv, uptime_secs, noise_floor, last_packet_at, repeat, clock_skew_seconds, clock_skew_count_24h, clock_last_naive_at"
+	dest := []interface{}{&o.ID, &o.Name, &o.IATA, &o.LastSeen, &o.FirstSeen, &o.PacketCount, &o.Model, &o.Firmware, &o.ClientVersion, &o.Radio, &batteryMv, &uptimeSecs, &noiseFloor, &o.LastPacketAt, &o.Repeat, &clockSkewSec, &clockSkewCount, &o.ClockLastNaiveAt}
 	err := db.conn.QueryRow("SELECT "+cols+" FROM observers WHERE id = ?", id).Scan(dest...)
 	if err != nil {
 		return nil, err
@@ -1537,6 +1568,13 @@ func (db *DB) GetObserverByID(id string) (*Observer, error) {
 	}
 	if noiseFloor.Valid {
 		o.NoiseFloor = &noiseFloor.Float64
+	}
+	if clockSkewSec.Valid {
+		v := clockSkewSec.Int64
+		o.ClockSkewSeconds = &v
+	}
+	if clockSkewCount.Valid {
+		o.ClockSkewCount24h = int(clockSkewCount.Int64)
 	}
 	return &o, nil
 }
@@ -2058,27 +2096,38 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		return nil, 0, err
 	}
 
-	// 2) Page of transmission IDs — newest LIMIT msgs minus OFFSET, returned
-	//    in ASC order to match prior API contract (tail of message log).
-	pageSQL := `SELECT t.id FROM (
-			SELECT id FROM transmissions
-			WHERE channel_hash = ? AND payload_type = 5
-			ORDER BY first_seen DESC
-			LIMIT ? OFFSET ?
-		) t`
-	// When a region filter is in play, we must filter on the inner subquery
-	// against the transmissions table — re-use the same EXISTS form but
-	// wrap so we still get DESC-then-ASC pagination.
+	// 2) Page of transmission IDs — newest LIMIT msgs minus OFFSET.
+	//    Issue #1366 follow-up (fix #2): select page by latest observation
+	//    timestamp (LatestSeen) DESC, NOT by t.first_seen DESC — otherwise
+	//    a heartbeat tx whose FirstSeen is 24h old but whose latest
+	//    observation is fresh gets pushed off page 1.
+	//
+	//    PR #1368 perf fix: use a correlated subquery for MAX(timestamp) per
+	//    transmission. With the composite index idx_observations_tx_ts
+	//    (transmission_id, timestamp) sqlite resolves MAX as an index-only
+	//    rightmost-leaf lookup — total O(N_tx · log N_obs). The previously-
+	//    used grouped derived table (`GROUP BY transmission_id` over the
+	//    whole observations table) scanned all observation rows (O(N_obs))
+	//    and blew the 1.5s perf budget on 1500 tx × 50 obs under -race.
+	//    LEFT JOIN + GROUP BY t.id was even slower because GROUP BY forced
+	//    a temp B-tree on the full transmissions×observations join.
+	//
+	//    The returned page is in newest-LatestSeen-FIRST (DESC) order.
+	//    The Go side re-orders the emitted rows ASC below (fix #3) so the
+	//    contract matches the in-memory path's tail-of-msgOrder convention.
+	pageSQL := `SELECT t.id,
+		COALESCE((SELECT MAX(timestamp) FROM observations WHERE transmission_id = t.id), 0) AS latest_obs_epoch
+		FROM transmissions t
+		WHERE t.channel_hash = ? AND t.payload_type = 5
+		ORDER BY latest_obs_epoch DESC, t.id DESC
+		LIMIT ? OFFSET ?`
 	if len(regionCodes) > 0 {
-		pageSQL = `SELECT id FROM (
-				SELECT t.id, t.first_seen FROM transmissions t
-				WHERE t.channel_hash = ? AND t.payload_type = 5` + regionFilter + `
-				ORDER BY t.first_seen DESC
-				LIMIT ? OFFSET ?
-			) sub
-			ORDER BY first_seen ASC`
-	} else {
-		pageSQL += ` ORDER BY (SELECT first_seen FROM transmissions WHERE id = t.id) ASC`
+		pageSQL = `SELECT t.id,
+			COALESCE((SELECT MAX(timestamp) FROM observations WHERE transmission_id = t.id), 0) AS latest_obs_epoch
+			FROM transmissions t
+			WHERE t.channel_hash = ? AND t.payload_type = 5` + regionFilter + `
+			ORDER BY latest_obs_epoch DESC, t.id DESC
+			LIMIT ? OFFSET ?`
 	}
 	pageArgs := []interface{}{channelHash}
 	pageArgs = append(pageArgs, regionArgs...)
@@ -2091,7 +2140,8 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 	pageIDs := make([]int, 0, limit)
 	for idRows.Next() {
 		var id int
-		if err := idRows.Scan(&id); err == nil {
+		var le sql.NullInt64
+		if err := idRows.Scan(&id, &le); err == nil {
 			pageIDs = append(pageIDs, id)
 		}
 	}
@@ -2113,7 +2163,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 	var obsSQL string
 	if db.isV3 {
 		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen,
-				obs.id, obs.name, o.snr, o.path_json
+				obs.id, obs.name, o.snr, o.path_json, o.timestamp
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
 			LEFT JOIN observers obs ON obs.rowid = o.observer_idx
@@ -2121,7 +2171,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			ORDER BY o.id ASC`
 	} else {
 		obsSQL = `SELECT o.id, t.id, t.hash, t.decoded_json, t.first_seen,
-				o.observer_id, o.observer_name, o.snr, o.path_json
+				o.observer_id, o.observer_name, o.snr, o.path_json, o.timestamp
 			FROM observations o
 			JOIN transmissions t ON t.id = o.transmission_id
 			WHERE t.id IN (` + strings.Join(idPlaceholders, ",") + `)
@@ -2135,8 +2185,9 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 	defer rows.Close()
 
 	type msg struct {
-		Data    map[string]interface{}
-		Repeats int
+		Data        map[string]interface{}
+		Repeats     int
+		LatestEpoch int64 // max observation timestamp (unix seconds) — issue #1366
 	}
 	msgMap := make(map[int]*msg, len(pageIDs))
 
@@ -2144,12 +2195,16 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		var pktID, txID int
 		var pktHash, dj, fs, obsID, obsName, pathJSON sql.NullString
 		var snr sql.NullFloat64
-		rows.Scan(&pktID, &txID, &pktHash, &dj, &fs, &obsID, &obsName, &snr, &pathJSON)
+		var obsTs sql.NullInt64
+		rows.Scan(&pktID, &txID, &pktHash, &dj, &fs, &obsID, &obsName, &snr, &pathJSON, &obsTs)
 		if !dj.Valid {
 			continue
 		}
 		if existing, ok := msgMap[txID]; ok {
 			existing.Repeats++
+			if obsTs.Valid && obsTs.Int64 > existing.LatestEpoch {
+				existing.LatestEpoch = obsTs.Int64
+			}
 			// Accumulate additional observer names so the SF range (e.g. SF7-SF8)
 			// is preserved when multiple observers heard the same transmission.
 			obsKey := ""
@@ -2207,6 +2262,7 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 				"sender":           displaySender,
 				"text":             displayText,
 				"timestamp":        nullStr(fs),
+				"first_seen":       nullStr(fs),
 				"sender_timestamp": senderTs,
 				"packetId":         pktID,
 				"packetHash":       nullStr(pktHash),
@@ -2217,6 +2273,9 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			},
 			Repeats: 1,
 		}
+		if obsTs.Valid {
+			m.LatestEpoch = obsTs.Int64
+		}
 		if obsName.Valid {
 			m.Data["observers"] = []string{obsName.String}
 		} else if obsID.Valid {
@@ -2225,7 +2284,16 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 		msgMap[txID] = m
 	}
 
-	messages := make([]map[string]interface{}, 0, len(pageIDs))
+	// Issue #1366 follow-up: emit batch sorted by LatestSeen ascending
+	// (newest LAST) — matches the in-memory path's tail-of-msgOrder
+	// convention and the frontend's scrollToBottom() behavior. pageIDs
+	// order is not LatestSeen-ordered for in-page rows after fix #2.
+	type emitted struct {
+		latestEpoch int64
+		txID        int
+		data        map[string]interface{}
+	}
+	rowsOut := make([]emitted, 0, len(pageIDs))
 	for _, id := range pageIDs {
 		m, ok := msgMap[id]
 		if !ok {
@@ -2235,7 +2303,22 @@ func (db *DB) GetChannelMessages(channelHash string, limit, offset int, region .
 			continue
 		}
 		m.Data["repeats"] = m.Repeats
-		messages = append(messages, m.Data)
+		// Issue #1366: emit LatestSeen (max obs timestamp) as the rendered
+		// `timestamp` field. `first_seen` stays alongside for debug.
+		if m.LatestEpoch > 0 {
+			m.Data["timestamp"] = time.Unix(m.LatestEpoch, 0).UTC().Format(time.RFC3339)
+		}
+		rowsOut = append(rowsOut, emitted{latestEpoch: m.LatestEpoch, txID: id, data: m.Data})
+	}
+	sort.SliceStable(rowsOut, func(i, j int) bool {
+		if rowsOut[i].latestEpoch != rowsOut[j].latestEpoch {
+			return rowsOut[i].latestEpoch < rowsOut[j].latestEpoch
+		}
+		return rowsOut[i].txID < rowsOut[j].txID
+	})
+	messages := make([]map[string]interface{}, 0, len(rowsOut))
+	for _, e := range rowsOut {
+		messages = append(messages, e.data)
 	}
 
 	return messages, total, nil

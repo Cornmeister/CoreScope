@@ -53,29 +53,9 @@
     if (table[REVEAL_FLAG]) {
       // user explicitly requested reveal — clear hidden state and skip
       clearHidden(table);
-      // Switch off fixed-layout so revealed columns size by content rather
-      // than being crammed into percentage slices of the container width.
-      // makeColumnsResizable sets tableLayout:fixed + width:100%, which
-      // squeezes all columns into the viewport; auto layout lets the
-      // container scroll horizontally instead.
-      if (table.dataset.resizable) {
-        table.style.tableLayout = 'auto';
-        table.style.width = 'auto';
-      }
-      // Re-anchor the wrap-width baseline after revealing columns. Without
-      // this, showing all columns may shift a scrollbar (changing clientWidth)
-      // which the ResizeObserver would misread as a real container resize and
-      // immediately re-hide the columns the user just expanded.
-      var _rw = table.closest('.table-fluid-wrap, .obs-table-scroll, .table-scroll-wrap') || table.parentElement;
-      if (_rw) lastWrapW.set(table, _rw.clientWidth || 0);
       return;
     }
     clearHidden(table);
-    // Restore fixed-layout if it was released during a previous reveal.
-    if (table.dataset.resizable) {
-      table.style.tableLayout = 'fixed';
-      table.style.width = '100%';
-    }
 
     const ths = thsOf(table);
     if (ths.length === 0) return;
@@ -119,15 +99,6 @@
         ev.preventDefault();
         table[REVEAL_FLAG] = true;
         clearHidden(table);
-        if (table.dataset.resizable) {
-          table.style.tableLayout = 'auto';
-          table.style.width = 'auto';
-        }
-        // Re-anchor the wrap-width baseline now that columns are revealed, so
-        // the ResizeObserver doesn't mistake the scrollbar shift for a real
-        // container resize and immediately re-hide the columns.
-        var _rw = table.closest('.table-fluid-wrap, .obs-table-scroll, .table-scroll-wrap') || table.parentElement;
-        if (_rw) lastWrapW.set(table, _rw.clientWidth || 0);
         // Add a small "hide again" affordance after reveal so the user isn't stuck.
         const rehide = document.createElement('button');
         rehide.type = 'button';
@@ -190,14 +161,12 @@
         ro = new ResizeObserver(() => {
           const prev = lastWrapW.get(table) || 0;
           const cur = wrap.clientWidth || 0;
+          // Ignore self-induced layout reflows from apply()/clearHidden() —
+          // they don't change the wrap width. Only real viewport/container
+          // changes (>2px) clear the reveal flag.
           if (Math.abs(cur - prev) <= 2) return;
           lastWrapW.set(table, cur);
-          // Re-evaluate column visibility for the new container width, but
-          // intentionally do NOT clear REVEAL_FLAG here.
-          // Scrollbar appearance, sidebar toggles, and layout reflows all
-          // change clientWidth and would otherwise undo the user's explicit
-          // expand. Only a real viewport-width change (handled by the
-          // window-resize listener below) should un-reveal columns.
+          table[REVEAL_FLAG] = false;
           apply(table);
         });
         ro.observe(wrap);
@@ -208,7 +177,6 @@
   }
 
   let _winTimer = null;
-  let _lastVW = window.innerWidth || document.documentElement.clientWidth;
   window.addEventListener('resize', function () {
     clearTimeout(_winTimer);
     _winTimer = setTimeout(() => {
@@ -1239,10 +1207,6 @@
 
   async function loadPackets() {
     try {
-      // Show a skeleton while the table body refreshes (subsequent loads —
-      // on first load the table is built only after the fetch resolves).
-      const _loadingBody = document.getElementById('pktBody');
-      if (_loadingBody) _loadingBody.innerHTML = PageState.skeleton({ rows: 8, cols: _getColCount(), table: true });
       const selectedWindow = Number(document.getElementById('fTimeWindow')?.value);
       const windowMin = Number.isFinite(selectedWindow) ? selectedWindow : savedTimeWindowMin;
       const params = buildPacketsParams({
@@ -1339,7 +1303,7 @@
     } catch (e) {
       console.error('Failed to load packets:', e);
       const tbody = document.getElementById('pktBody');
-      if (tbody) tbody.innerHTML = PageState.row(_getColCount(), PageState.errorText('Failed to load packets. Please try again.'));
+      if (tbody) tbody.innerHTML = '<tr><td colspan="' + _getColCount() + '" class="text-center" style="padding:24px;color:var(--error,#ef4444)"><div role="alert" aria-live="polite">Failed to load packets. Please try again.</div></td></tr>';
     } finally {
       // Always signal data-loaded — even on error — so E2E tests can proceed.
       var pktContainer = document.getElementById('pktLeft') || document.getElementById('pktBody');
@@ -1367,7 +1331,7 @@
           <button class="btn-icon" data-action="pkt-byop" title="Bring Your Own Packet" aria-label="Bring Your Own Packet - paste raw packet hex for analysis" aria-haspopup="dialog">📦 BYOP</button>
         </div>
       </div>
-      <div class="filter-group" style="flex:1;margin-bottom:8px;position:relative">
+      <div class="filter-group pkt-filter-expr" style="flex:1;margin-bottom:8px;position:relative">
         <input type="text" id="packetFilterInput" class="packet-filter-input"
           placeholder='Filter: type == Advert && snr > 5 · payload.name contains "Gilroy"'
           aria-label="Packet filter expression"
@@ -1442,18 +1406,13 @@
       </div>
       <div class="table-fluid-wrap"><table class="data-table" id="pktTable">
         <thead><tr>
-          <th scope="col" data-priority="1"></th><th scope="col" class="col-region" data-sort-key="region" data-priority="3">Region</th><th scope="col" class="col-time" data-sort-key="time" data-type="date" data-priority="1">Time</th><th scope="col" class="col-hash" data-sort-key="hash" data-priority="1">Hash</th><th scope="col" class="col-size" data-sort-key="size" data-type="numeric" data-priority="4">Size</th>
+          <th scope="col" class="col-expand" data-priority="1"></th><th scope="col" class="col-region" data-sort-key="region" data-priority="3">Region</th><th scope="col" class="col-time" data-sort-key="time" data-type="date" data-priority="1">Time</th><th scope="col" class="col-hash" data-sort-key="hash" data-priority="3">Hash</th><th scope="col" class="col-size" data-sort-key="size" data-type="numeric" data-priority="4">Size</th>
           <th scope="col" class="col-hashsize" data-sort-key="hb" data-type="numeric" data-priority="5">HB</th>
-          <th scope="col" class="col-type" data-sort-key="type" data-priority="1">Type</th><th scope="col" class="col-observer" data-sort-key="observer" data-priority="1">Observer</th><th scope="col" class="col-path" data-sort-key="path" data-priority="2">Path</th><th scope="col" class="col-rpt" data-sort-key="rpt" data-type="numeric" data-priority="4">Rpt</th><th scope="col" class="col-details" data-priority="2">Details</th>
+          <th scope="col" class="col-type" data-sort-key="type" data-priority="1">Type</th><th scope="col" class="col-observer" data-sort-key="observer" data-priority="3">Observer</th><th scope="col" class="col-path" data-sort-key="path" data-priority="5">Path</th><th scope="col" class="col-rpt" data-sort-key="rpt" data-type="numeric" data-priority="3">Rpt</th><th scope="col" class="col-details" data-priority="1">Details</th>
         </tr></thead>
         <tbody id="pktBody"></tbody>
       </table></div>
     `;
-
-    // Seed the freshly-built table body with a loading skeleton; renderTableRows()
-    // (called below) replaces it with real rows once data is ready.
-    var _pktBodySkel = document.getElementById('pktBody');
-    if (_pktBodySkel) _pktBodySkel.innerHTML = PageState.skeleton({ rows: 8, cols: _getColCount(), table: true });
 
     // Init shared RegionFilter component
     RegionFilter.init(document.getElementById('packetsRegionFilter'), { dropdown: true });
@@ -1980,7 +1939,14 @@
           }
         }
         else if (action === 'select-hash') pktSelectHash(value);
-        else if (action === 'toggle-select') { pktToggleGroup(value); pktSelectHash(value); }
+        else if (action === 'toggle-select') {
+          // #1486: pktToggleGroup() already opens the detail panel on EXPAND
+          // (via selectPacket()), and must NOT open it on COLLAPSE. The
+          // previously-unconditional pktSelectHash() trailing call was both
+          // redundant on expand AND reopened the panel the operator had just
+          // closed when they clicked the chevron to collapse — drop it.
+          pktToggleGroup(value);
+        }
       };
       pktBody.addEventListener('click', handler);
       pktBody.addEventListener('keydown', handler);
@@ -2050,7 +2016,8 @@
     const groupTypeName = payloadTypeName(p.payload_type);
     const groupTypeClass = payloadTypeColor(p.payload_type);
     const groupSize = p.raw_hex ? Math.floor(p.raw_hex.length / 2) : 0;
-    const groupHashBytes = ((parseInt(p.raw_hex?.slice(2, 4), 16) || 0) >> 6) + 1;
+    const _grpPlOff = getPathLenOffset(p.route_type);
+    const groupHashBytes = ((parseInt(p.raw_hex?.slice(_grpPlOff * 2, _grpPlOff * 2 + 2), 16) || 0) >> 6) + 1;
     const isSingle = p.count <= 1;
     // Channel color highlighting (#271)
     const _grpDecoded = getParsedDecoded(p) || {};
@@ -2058,7 +2025,7 @@
     const _grpHashStripe = _hashStripeStyle(p.hash);
     const _grpStyle = _grpHashStripe + _grpChanStyle;
     let html = `<tr class="${isSingle ? '' : 'group-header'} ${isExpanded ? 'expanded' : ''}" data-hash="${p.hash}" data-action="${isSingle ? 'select-hash' : 'toggle-select'}" data-value="${p.hash}" data-entry-idx="${entryIdx}" tabindex="0" role="row"${_grpStyle ? ' style="' + _grpStyle + '"' : ''}>
-          <td style="width:28px;text-align:center;cursor:pointer">${isSingle ? '' : (isExpanded ? '▼' : '▶')}</td>
+          <td class="col-expand" style="text-align:center;cursor:pointer">${isSingle ? '' : (isExpanded ? '▼' : '▶')}</td>
           <td class="col-region">${groupRegion ? `<span class="badge-region">${groupRegion}</span>` : '—'}</td>
           <td class="col-time">${renderTimestampCell(p.latest)}</td>
           <td class="mono col-hash" data-filter-field="hash" data-filter-value="${escapeHtml(p.hash || '')}">${truncate(p.hash || '—', 8)}</td>
@@ -2079,13 +2046,16 @@
         const typeName = payloadTypeName(c.payload_type);
         const typeClass = payloadTypeColor(c.payload_type);
         const size = c.raw_hex ? Math.floor(c.raw_hex.length / 2) : 0;
-        const childHashBytes = ((parseInt(c.raw_hex?.slice(2, 4), 16) || 0) >> 6) + 1;
-        const childRegion = c.observer_id ? (observerMap.get(c.observer_id)?.iata || '') : '';
         const childPath = getParsedPath(c);
+        const _cPlOff = getPathLenOffset(p.route_type);
+        const childHashBytes = c.raw_hex
+          ? (((parseInt(c.raw_hex.slice(_cPlOff * 2, _cPlOff * 2 + 2), 16) || 0) >> 6) + 1)
+          : (childPath.length > 0 ? childPath[0].length / 2 : 0);
+        const childRegion = c.observer_id ? (observerMap.get(c.observer_id)?.iata || '') : '';
         const childPathStr = renderPath(childPath, c.observer_id);
         const _childHashStripe = _hashStripeStyle(c.hash || p.hash);
         html += `<tr class="group-child" data-id="${c.id}" data-hash="${c.hash || ''}" data-action="select-observation" data-value="${c.id}" data-parent-hash="${p.hash}" data-entry-idx="${entryIdx}" tabindex="0" role="row"${_childHashStripe ? ' style="' + _childHashStripe + '"' : ''}>
-              <td></td><td class="col-region">${childRegion ? `<span class="badge-region">${childRegion}</span>` : '—'}</td>
+              <td class="col-expand"></td><td class="col-region">${childRegion ? `<span class="badge-region">${childRegion}</span>` : '—'}</td>
               <td class="col-time">${renderTimestampCell(c.timestamp)}</td>
               <td class="mono col-hash" data-filter-field="hash" data-filter-value="${escapeHtml(c.hash || '')}">${truncate(c.hash || '', 8)}</td>
               <td class="col-size" data-filter-field="size" data-filter-value="${size || ''}">${size}B</td>
@@ -2111,13 +2081,14 @@
     // Channel color highlighting (#271)
     const _chanStyle = window.ChannelColors ? window.ChannelColors.getRowStyle(decoded.type || typeName, decoded.channel) : '';
     const size = p.raw_hex ? Math.floor(p.raw_hex.length / 2) : 0;
-    const hashBytes = ((parseInt(p.raw_hex?.slice(2, 4), 16) || 0) >> 6) + 1;
+    const _flatPlOff = getPathLenOffset(p.route_type);
+    const hashBytes = ((parseInt(p.raw_hex?.slice(_flatPlOff * 2, _flatPlOff * 2 + 2), 16) || 0) >> 6) + 1;
     const pathStr = renderPath(pathHops, p.observer_id);
     const detail = getDetailPreview(decoded);
     const _flatHashStripe = _hashStripeStyle(p.hash);
     const _flatStyle = _flatHashStripe + _chanStyle;
     return `<tr data-id="${p.id}" data-hash="${p.hash || ''}" data-action="select-hash" data-value="${p.hash || p.id}" data-entry-idx="${entryIdx}" tabindex="0" role="row" class="${selectedId === p.id ? 'selected' : ''}"${_flatStyle ? ' style="' + _flatStyle + '"' : ''}>
-        <td></td><td class="col-region">${region ? `<span class="badge-region">${region}</span>` : '—'}</td>
+        <td class="col-expand"></td><td class="col-region">${region ? `<span class="badge-region">${region}</span>` : '—'}</td>
         <td class="col-time">${renderTimestampCell(p.timestamp)}</td>
         <td class="mono col-hash" data-filter-field="hash" data-filter-value="${escapeHtml(p.hash || '')}">${truncate(p.hash || String(p.id), 8)}</td>
         <td class="col-size" data-filter-field="size" data-filter-value="${size || ''}">${size}B</td>
@@ -2487,11 +2458,11 @@
       case 'size': accessor = function(p) { return p.packet_size || 0; }; break;
       case 'hb': accessor = function(p) { return p.hash_byte_count != null ? p.hash_byte_count : (p.hash_size || 0); }; break;
       case 'rpt': accessor = function(p) {
-        try { return getParsedPath(p).length; } catch(e) { return 0; }
+        try { var pj = typeof p.path_json === 'string' ? JSON.parse(p.path_json) : p.path_json; return Array.isArray(pj) ? pj.length : 0; } catch(e) { return 0; }
       }; break;
       case 'region': accessor = function(p) { return (regionMap && regionMap[p.observer_id]) || ''; }; break;
       case 'path': accessor = function(p) {
-        try { return getParsedPath(p).join(','); } catch(e) { return ''; }
+        try { var pj = typeof p.path_json === 'string' ? JSON.parse(p.path_json) : p.path_json; return Array.isArray(pj) ? pj.join(',') : ''; } catch(e) { return ''; }
       }; break;
       default: return; // unsortable column
     }
@@ -2597,9 +2568,7 @@
       _lastVisibleEnd = -1;
       detachVScrollListener();
       const colCount = _getColCount();
-      tbody.innerHTML = PageState.row(colCount, PageState.empty({
-        title: filters.myNodes ? 'No packets from your claimed/favorited nodes' : 'No packets found'
-      }));
+      tbody.innerHTML = '<tr><td colspan="' + colCount + '" class="text-center text-muted" style="padding:24px">' + (filters.myNodes ? 'No packets from your claimed/favorited nodes' : 'No packets found') + '</td></tr>';
       // Restore scroll position after DOM rebuild (#431)
       if (scrollContainer) scrollContainer.scrollTop = savedScrollTop;
       return;
@@ -2705,7 +2674,7 @@
           renderTableRows();
         }
       });
-      panel.innerHTML = PageState.loading('Loading…');
+      panel.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading…</div>';
     } else if (isMobileNow) {
       // Use mobile bottom sheet
       let sheet = document.getElementById('mobileDetailSheet');
@@ -2723,14 +2692,14 @@
         });
       }
       panel = sheet.querySelector('.mobile-sheet-content');
-      panel.innerHTML = PageState.loading('Loading…');
+      panel.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading…</div>';
       sheet.classList.add('open');
     } else {
       panel = document.getElementById('pktRight');
       panel.classList.remove('empty');
       var layout = panel.closest('.split-layout');
       if (layout) layout.classList.remove('detail-collapsed');
-      panel.innerHTML = '<div class="panel-resize-handle" id="pktResizeHandle"></div>' + PANEL_CLOSE_HTML + PageState.loading('Loading…');
+      panel.innerHTML = '<div class="panel-resize-handle" id="pktResizeHandle"></div>' + PANEL_CLOSE_HTML + '<div class="text-center text-muted" style="padding:40px">Loading…</div>';
       initPanelResize();
     }
 
@@ -2749,7 +2718,7 @@
       await renderDetail(content, data, selectedObservationId);
       if (!isMobileNow && !useSlideOver) initPanelResize();
     } catch (e) {
-      panel.innerHTML = PageState.errorText('Error: ' + e.message);
+      panel.innerHTML = `<div class="text-muted">Error: ${e.message}</div>`;
     }
   }
 
@@ -2794,7 +2763,7 @@
       if (!isNaN(plByte)) rawHopCount = plByte & 0x3F;
     }
     if (rawHopCount != null && pathHops.length !== rawHopCount) {
-      console.warn(`[Cornmeister.nl] Hop count inconsistency for packet ${pkt.hash}: path_json has ${pathHops.length} hops but raw_hex path_len has ${rawHopCount}. UI shows path_json.`);
+      console.warn(`[CoreScope] Hop count inconsistency for packet ${pkt.hash}: path_json has ${pathHops.length} hops but raw_hex path_len has ${rawHopCount}. UI shows path_json.`);
     }
 
     // Resolve sender GPS — from packet directly, or from known node in DB
@@ -2963,22 +2932,37 @@
       rawCustomRow = `<dt>Raw Custom</dt><dd class="raw-custom-detail">Length: <code>${escapeHtml(rl)}</code> · First byte tag: <code>${escapeHtml(ft)}</code></dd>`;
     }
 
+    // #1458 P0-A — semantic identity header (type badge + decoded summary +
+    // src→dst). Replaces the prior byte-count title that buried packet
+    // identity behind a byte counter (#1458 P0-A).
+    const semanticSummary = getDetailPreview(decoded);
+    const srcLabel = decoded.sender || decoded.name || (decoded.srcHash ? decoded.srcHash.slice(0,8) : null) || (decoded.pubKey ? decoded.pubKey.slice(0,8) + '…' : null);
+    const dstLabel = decoded.recipient || (decoded.destHash ? decoded.destHash.slice(0,8) : null);
+    const srcDstHtml = (srcLabel || dstLabel)
+      ? `<div class="detail-srcdst">${escapeHtml(srcLabel || '?')} <span class="arrow">→</span> ${escapeHtml(dstLabel || (decoded.channel ? '#' + decoded.channel : '?'))}</div>`
+      : '';
+
     panel.innerHTML = `
       ${anomalyBanner}
-      <div class="detail-title">${hasRawHex ? `Packet Byte Breakdown (${size} bytes)` : typeName + ' Packet'}</div>
+      <div class="detail-title">
+        <span class="badge badge-${payloadTypeColor(pkt.payload_type)}">${typeName}</span>
+        ${semanticSummary ? `<span class="detail-summary">${semanticSummary}</span>` : ''}
+        ${displayHopCount > 0 ? `<span class="badge badge-info">${displayHopCount} hop${displayHopCount !== 1 ? 's' : ''}</span>` : ''}
+      </div>
+      ${srcDstHtml}
       <div class="detail-hash">${pkt.hash || 'Packet #' + pkt.id}${obsIndicator}</div>
       ${messageHtml}
       <dl class="detail-meta">
+        <dt>Payload Type</dt><dd><span class="badge badge-${payloadTypeColor(pkt.payload_type)}">${typeName}</span></dd>
+        <dt>Path</dt><dd>${displayHopCount > 0 ? `<span class="badge badge-info">${displayHopCount} hop${displayHopCount !== 1 ? 's' : ''}</span> ` + renderPath(pathHops, effectivePkt.observer_id) : '— (direct)'}</dd>
+        <dt>Timestamp</dt><dd>${renderTimestampCell(effectivePkt.timestamp)}</dd>
         <dt>Observer</dt><dd>${obsNameOnly(effectivePkt.observer_id)}${obsIataBadge(effectivePkt)}</dd>
         ${locationHtml ? `<dt>Location</dt><dd>${locationHtml}</dd>` : ''}
         <dt>SNR / RSSI</dt><dd>${snr != null ? snr + ' dB' : '—'} / ${rssi != null ? rssi + ' dBm' : '—'}</dd>
         <dt>Route Type</dt><dd>${routeTypeName(pkt.route_type)}</dd>
         ${pkt.scope_name != null ? `<dt>Scope</dt><dd>${pkt.scope_name !== '' ? escapeHtml(pkt.scope_name) : '<span style="color:var(--text-muted)">unknown scope</span>'}</dd>` : ''}
-        <dt>Payload Type</dt><dd><span class="badge badge-${payloadTypeColor(pkt.payload_type)}">${typeName}</span></dd>
         ${hashSize ? `<dt>Hash Size</dt><dd>${hashSize} byte${hashSize !== 1 ? 's' : ''}</dd>` : ''}
-        <dt>Timestamp</dt><dd>${renderTimestampCell(effectivePkt.timestamp)}</dd>
         <dt>Propagation</dt><dd>${propagationHtml}</dd>
-        <dt>Path</dt><dd>${displayHopCount > 0 ? `<span class="badge badge-info">${displayHopCount} hop${displayHopCount !== 1 ? 's' : ''}</span> ` + renderPath(pathHops, effectivePkt.observer_id) : '— (direct)'}</dd>
         ${transportCodesRow}
         ${rawCustomRow}
         ${effectivePkt.direction ? `<dt>Direction</dt><dd>${escapeHtml(effectivePkt.direction)}</dd>` : ''}
@@ -2990,10 +2974,13 @@
         <button class="replay-live-btn" title="Replay this packet on the live map">▶ Replay</button>
       </div>
 
-      ${hasRawHex ? `<div class="hex-legend">${buildHexLegend(ranges)}</div>
-      <div class="hex-dump">${createColoredHexDump(effectivePkt.raw_hex || pkt.raw_hex, ranges)}</div>` : ''}
+      ${(hasRawHex || Object.keys(decoded).length) ? `<details class="detail-technical"${(typeof window !== 'undefined' && window.innerWidth > 480) ? ' open' : ''}>
+        <summary>Show raw bytes</summary>
+        ${hasRawHex ? `<div class="hex-legend">${buildHexLegend(ranges)}</div>
+        <div class="hex-dump">${createColoredHexDump(effectivePkt.raw_hex || pkt.raw_hex, ranges)}</div>` : ''}
 
-      ${hasRawHex ? buildFieldTable(effectivePkt.raw_hex ? effectivePkt : pkt, decoded, pathHops, ranges) : buildDecodedTable(decoded)}
+        ${hasRawHex ? buildFieldTable(effectivePkt.raw_hex ? effectivePkt : pkt, decoded, pathHops, ranges) : buildDecodedTable(decoded)}
+      </details>` : ''}
 
       ${observations.length > 1 ? `
       <div class="detail-observations" style="margin-top:16px">
@@ -3119,11 +3106,44 @@
           else if (decoded.srcHash) origin.pubkey = decoded.srcHash;
           if (decoded.adName || decoded.name) origin.name = decoded.adName || decoded.name;
           if (senderLat != null && senderLon != null) { origin.lat = senderLat; origin.lon = senderLon; }
-          sessionStorage.setItem('map-route-hops', JSON.stringify({
-            origin: origin,
-            hops: resolvedKeys
-          }));
-          window.location.hash = '#/map?route=1';
+          // #1418 Phase D: also include the recipient (destHash) so the route
+          // displays as: sender → [intermediate hops] → recipient. Without
+          // this the destination node is invisible — operator only sees the
+          // last intermediate repeater.
+          const destination = {};
+          if (decoded.destHash) destination.pubkey = decoded.destHash;
+          // #1418 Phase C: include ALL observations as alternate paths so the
+          // route view can render union-of-edges with stroke-width weighting.
+          // Each observation contributes its own path_json array.
+          const allPaths = (observations || []).map(o => {
+            let path = [];
+            try { path = JSON.parse(o.path_json || '[]'); } catch (_) {}
+            return { path: path, observer: o.observer_name, observer_id: o.observer_id, snr: o.snr, rssi: o.rssi };
+          }).filter(p => p.path && p.path.length > 0);
+          // #1418/#1419: navigate via deep-link URL only. The map page's
+          // loadRouteFromDeepLink() re-fetches the packet from the API and
+          // builds the full payload (incl. packetContext) consistently.
+          // SessionStorage was unreliable — the deep-link path includes
+          // packetContext but the sessionStorage payload didn't, leading
+          // to missing chip + facts when entered from the packets page.
+          const obsId = currentObs ? currentObs.id : (observations[0] && observations[0].id);
+          const pkHash = pkt.hash || pkt.packet_hash;
+          const obsPart = obsId ? '&obs=' + encodeURIComponent(obsId) : '';
+          // Tufte audit fix: close ALL mobile packet panels so operator lands
+          // on the route view, not behind a still-visible detail sheet.
+          // Three different panels exist depending on viewport + flow:
+          //   - #pktRight (desktop split-pane)
+          //   - .slide-over-panel (mid-width SlideOver)
+          //   - #mobileDetailSheet (small-mobile bottom sheet)
+          if (window.innerWidth <= 767) {
+            try { closeDetailPanel(); } catch (_) {}
+            try { if (window.SlideOver && window.SlideOver.close) window.SlideOver.close(); } catch (_) {}
+            try {
+              const sheet = document.getElementById('mobileDetailSheet');
+              if (sheet) sheet.classList.remove('open');
+            } catch (_) {}
+          }
+          window.location.hash = '#/map?packet=' + encodeURIComponent(pkHash) + obsPart;
         } catch {
           window.location.hash = '#/map';
         }
@@ -3565,11 +3585,11 @@
   registerPage('packet-detail', {
     init: async (app, routeParam) => {
       const param = routeParam;
-      app.innerHTML = `<div style="max-width:800px;margin:0 auto;padding:20px">${PageState.loading('Loading packet…')}</div>`;
+      app.innerHTML = `<div style="max-width:800px;margin:0 auto;padding:20px"><div class="text-center text-muted" style="padding:40px">Loading packet…</div></div>`;
       try {
         await loadObservers();
         const data = await api(`/packets/${param}`);
-        if (!data?.packet) { app.innerHTML = `<div style="max-width:800px;margin:0 auto;padding:40px;text-align:center">${PageState.empty({ title: 'Packet not found', hint: `Packet ${param} doesn't exist.` })}<a href="#/packets">← Back to packets</a></div>`; return; }
+        if (!data?.packet) { app.innerHTML = `<div style="max-width:800px;margin:0 auto;padding:40px;text-align:center"><h2>Packet not found</h2><p>Packet ${param} doesn't exist.</p><a href="#/packets">← Back to packets</a></div>`; return; }
         const hops = [];
         try { hops.push(...getParsedPath(data.packet)); } catch {}
         const newHops = hops.filter(h => !(h in hopNameCache));
@@ -3583,7 +3603,7 @@
         app.innerHTML = '';
         app.appendChild(container);
       } catch (e) {
-        app.innerHTML = `<div style="max-width:800px;margin:0 auto;padding:40px;text-align:center">${PageState.errorText(e.message)}<a href="#/packets">← Back to packets</a></div>`;
+        app.innerHTML = `<div style="max-width:800px;margin:0 auto;padding:40px;text-align:center"><h2>Error</h2><p>${e.message}</p><a href="#/packets">← Back to packets</a></div>`;
       }
     },
     destroy: () => {}

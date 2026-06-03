@@ -152,6 +152,26 @@ type Server struct {
 	nodesListCache  perKeyByteCache
 	channelsCache   perKeyByteCache
 	bulkHealthCache perKeyByteCache
+
+	// Cached default (no-filter) /api/observers response, served from an
+	// atomic-pointer snapshot. Refilled via singleflight on TTL boundary
+	// to prevent thundering-herd SQL stampedes. Issue #1481 P0-3 +
+	// #1483 follow-up (singleflight + monotonic time).
+	observersCacheV2 observersCacheField
+
+	// Cached default-shape /api/analytics/neighbor-graph response,
+	// recomputed every 5 min in a background goroutine. Issue #1481 P0-1.
+	neighborGraphCache neighborGraphCacheField
+
+	// Counter for rebuild-panic events on the neighbor-graph cache
+	// background recomputer. Surfaced via /api/stats. #1483 follow-up.
+	neighborGraphCacheRebuildFailures uint64
+
+	// Test injection: when non-nil, replaces the real
+	// computeNeighborGraphResponse pipeline so tests can assert the
+	// bypass branch was exercised without standing up a full DB/store.
+	// Production code MUST leave this nil. #1483 follow-up.
+	computeNeighborGraphResponseFn func(minCount int, minScore float64, region, role string) NeighborGraphResponse
 }
 
 // perKeyByteCache is the multi-key version of singleKeyByteCache — separate
@@ -1018,13 +1038,23 @@ func (s *Server) buildThemeResponse() ThemeResponse {
 	}
 	home := mergeMap(defaultHome, s.cfg.Home, theme.Home)
 
+	// #1488 — marker stroke overlay. Defaults mirror the :root values in
+	// public/style.css so a fresh visitor with no config + no override
+	// still gets the same painted outline as the static CSS fallback.
+	markerStroke := mergeMap(map[string]interface{}{
+		"color":   "rgba(255,255,255,0.85)",
+		"width":   1,
+		"opacity": 1,
+	}, s.cfg.MarkerStroke, theme.MarkerStroke)
+
 	return ThemeResponse{
-		Branding:   branding,
-		Theme:      themeColors,
-		ThemeDark:  themeDark,
-		NodeColors: nodeColors,
-		TypeColors: typeColors,
-		Home:       home,
+		Branding:     branding,
+		Theme:        themeColors,
+		ThemeDark:    themeDark,
+		NodeColors:   nodeColors,
+		TypeColors:   typeColors,
+		Home:         home,
+		MarkerStroke: markerStroke,
 	}
 }
 
@@ -2179,7 +2209,11 @@ func (s *Server) buildNodesResponse(r *http.Request) ([]byte, error) {
 					node["relay_active"] = info.RelayActive
 					node["relay_count_1h"] = info.RelayCount1h
 					node["relay_count_24h"] = info.RelayCount24h
-					node["usefulness_score"] = lookupUsefulnessScore(usefulMap, pk)
+					us := lookupUsefulnessScore(usefulMap, pk)
+					// usefulness_score retained for API compat; new
+					// consumers should read traffic_share_score (#1456).
+					node["usefulness_score"] = us
+					node["traffic_share_score"] = us
 					node["bridge_score"] = lookupUsefulnessScore(bridgeMap, pk)
 				}
 			}
@@ -2339,7 +2373,11 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 			node["relay_window_hours"] = info.WindowHours
 			node["relay_count_1h"] = info.RelayCount1h
 			node["relay_count_24h"] = info.RelayCount24h
-			node["usefulness_score"] = s.store.GetRepeaterUsefulnessScore(pubkey)
+			us := s.store.GetRepeaterUsefulnessScore(pubkey)
+			// usefulness_score retained for API compat; new
+			// consumers should read traffic_share_score (#1456).
+			node["usefulness_score"] = us
+			node["traffic_share_score"] = us
 			node["bridge_score"] = s.store.GetBridgeScore(pubkey)
 		}
 	}
@@ -2673,7 +2711,15 @@ func (s *Server) handleNodePaths(w http.ResponseWriter, r *http.Request) {
 			// legacy containsTarget heuristics (preserves #1197 behavior
 			// and the #929 prefix-collision exclusion test).
 			containsTarget = confirmedByFullKey[tx.ID] || confirmedBySQL[tx.ID]
+			// #1352: Snapshot of containsTarget BEFORE per-hop loop.
+			// Captures only SQL/full-key pre-confirmation, independent of
+			// the biased resolver. Must not be reassigned inside the loop.
+			preconfirmed := containsTarget
 			for i, hop := range hops {
+				lowerHop := strings.ToLower(hop)
+				// #1352 guard: treat prefix as "unique/safe" when the
+				// candidate set has exactly 1 member (no sibling collision).
+				uniquePrefix := len(pm.m[lowerHop]) <= 1
 				resolved := resolveHop(hop)
 				entry := PathHopResp{Prefix: hop, Name: hop}
 				if resolved != nil {
@@ -2685,13 +2731,20 @@ func (s *Server) handleNodePaths(w http.ResponseWriter, r *http.Request) {
 					}
 					sigParts[i] = resolved.PublicKey
 					if strings.ToLower(resolved.PublicKey) == lowerPK {
-						containsTarget = true
+						// #1352: only attribute when unambiguous OR
+						// already pre-confirmed via SQL/full-key index.
+						if preconfirmed || uniquePrefix {
+							containsTarget = true
+						}
 					}
 				} else {
 					sigParts[i] = hop
-					// Unresolvable hop: keep conservative if prefix could be the target.
-					if strings.HasPrefix(lowerPK, strings.ToLower(hop)) {
-						containsTarget = true
+					// Unresolvable hop: keep conservative if prefix could be the target
+					// AND there's no sibling collision (#1352).
+					if strings.HasPrefix(lowerPK, lowerHop) {
+						if preconfirmed || uniquePrefix {
+							containsTarget = true
+						}
 					}
 				}
 				resolvedHops[i] = entry
@@ -2735,16 +2788,18 @@ func (s *Server) handleNodePaths(w http.ResponseWriter, r *http.Request) {
 			SampleHash: agg.SampleHash,
 		})
 	}
+	// Issue #1145: sort paths by LastSeen descending (newest-first),
+	// with Count as tiebreaker (higher first). Nil LastSeen sorts last.
 	sort.Slice(paths, func(i, j int) bool {
-		if paths[i].Count == paths[j].Count {
-			li := ""
-			lj := ""
-			if paths[i].LastSeen != nil {
-				li = fmt.Sprintf("%v", paths[i].LastSeen)
-			}
-			if paths[j].LastSeen != nil {
-				lj = fmt.Sprintf("%v", paths[j].LastSeen)
-			}
+		li := ""
+		lj := ""
+		if paths[i].LastSeen != nil {
+			li = fmt.Sprintf("%v", paths[i].LastSeen)
+		}
+		if paths[j].LastSeen != nil {
+			lj = fmt.Sprintf("%v", paths[j].LastSeen)
+		}
+		if li != lj {
 			return li > lj
 		}
 		return paths[i].Count > paths[j].Count
@@ -3314,61 +3369,119 @@ const observersListFreshFloor = 3 * time.Second
 const observersListCacheHeader = "private, max-age=5, stale-while-revalidate=15"
 
 func (s *Server) handleObservers(w http.ResponseWriter, r *http.Request) {
-	s.observersListCache.serve(w, r, observersListCacheTTL, "handleObservers GetObservers", serveOpts{CacheControl: observersListCacheHeader, FreshFloor: observersListFreshFloor}, func() ([]byte, error) {
-		observers, err := s.db.GetObservers()
-		if err != nil {
-			return nil, err
+	// #1481 P0-3 + #1483: serve from 30s atomic-pointer cache for the
+	// default (no-filter) query shape. Refill is collapsed via
+	// singleflight so concurrent TTL-boundary requests do not stampede
+	// the 1.9M-row observations table.
+	isDefault := r.URL.RawQuery == ""
+	if isDefault {
+		if e, ok := s.loadObserversCache(); ok && !s.observersCacheExpired(e.at) {
+			w.Header().Set("X-Cache-Age-Seconds", cacheAgeSecondsHeader(time.Since(e.at)))
+			writeJSON(w, e.resp)
+			return
 		}
+	}
 
-		// Batch lookup: 1h packet counts only — 24h/7d are served by /api/observers/stats.
-		// observations.timestamp is INTEGER (Unix epoch) — use integer cutoff.
-		pktCounts := s.db.GetObserverPacketCounts(time.Now().Add(-1 * time.Hour).Unix())
-
-		// Batch lookup: node locations only for observer IDs (not all nodes)
-		observerIDs := make([]string, len(observers))
-		for i, o := range observers {
-			observerIDs[i] = o.ID
-		}
-		nodeLocations := s.db.GetNodeLocationsByKeys(observerIDs)
-
-		// Batch lookup: MQTT source/broker names per observer (one query) so the
-		// UI can filter the list by ingestor/source.
-		obsSources := s.db.GetAllObserverSourceNames()
-
-		result := make([]ObserverResp, 0, len(observers))
-		for _, o := range observers {
-			// Defense in depth: skip observers that are in the blacklist
-			if s.cfg != nil && s.cfg.IsObserverBlacklisted(o.ID) {
-				continue
+	if isDefault {
+		v, err, _ := s.observersCacheV2.sf.Do(observersCacheFlightKey, func() (interface{}, error) {
+			// Double-check inside the singleflight: another winner
+			// may have just stored a fresh entry.
+			if e, ok := s.loadObserversCache(); ok && !s.observersCacheExpired(e.at) {
+				return e, nil
 			}
-			plh := pktCounts[o.ID]
-			var lat, lon, nodeRole interface{}
-			if nodeLoc, ok := nodeLocations[strings.ToLower(o.ID)]; ok {
-				lat = nodeLoc["lat"]
-				lon = nodeLoc["lon"]
-				nodeRole = nodeLoc["role"]
+			resp, herr := s.buildObserversDefaultResponse()
+			if herr != nil {
+				return nil, herr
 			}
-
-			result = append(result, ObserverResp{
-				ID: o.ID, Name: o.Name, IATA: o.IATA,
-				LastSeen: o.LastSeen, FirstSeen: o.FirstSeen,
-				PacketCount: o.PacketCount,
-				Model:       o.Model, Firmware: o.Firmware,
-				ClientVersion: o.ClientVersion, Radio: o.Radio,
-				BatteryMv: o.BatteryMv, UptimeSecs: o.UptimeSecs,
-				NoiseFloor:      o.NoiseFloor,
-				LastPacketAt:    o.LastPacketAt,
-				PacketsLastHour: plh,
-				Lat:             lat, Lon: lon, NodeRole: nodeRole,
-				Repeat:  o.Repeat,
-				Sources: obsSources[o.ID],
-			})
-		}
-		return json.Marshal(ObserverListResponse{
-			Observers:  result,
-			ServerTime: time.Now().UTC().Format(time.RFC3339),
+			s.observersCacheV2.fillCount.Add(1)
+			entry := &observersCacheEntry{resp: resp, at: time.Now()}
+			s.observersCacheV2.ptr.Store(entry)
+			return entry, nil
 		})
-	})
+		if err != nil {
+			writeError(w, 500, err.Error())
+			return
+		}
+		entry := v.(*observersCacheEntry)
+		w.Header().Set("X-Cache-Age-Seconds", cacheAgeSecondsHeader(time.Since(entry.at)))
+		writeJSON(w, entry.resp)
+		return
+	}
+
+	// Non-default queries bypass the cache entirely (filters not yet wired).
+	resp, err := s.buildObserversDefaultResponse()
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, resp)
+}
+
+// buildObserversDefaultResponse runs the underlying SQL pipeline for
+// the default-shape /api/observers payload. Extracted so the cache
+// fill and the non-default handler path share the same build.
+func (s *Server) buildObserversDefaultResponse() (ObserverListResponse, error) {
+	observers, err := s.db.GetObservers()
+	if err != nil {
+		return ObserverListResponse{}, err
+	}
+
+	// Batch lookup: 1h packet counts only — 24h/7d are served by /api/observers/stats.
+	// observations.timestamp is INTEGER (Unix epoch) — use integer cutoff.
+	oneHourAgo := time.Now().Add(-1 * time.Hour).Unix()
+	pktCounts := s.db.GetObserverPacketCounts(oneHourAgo)
+
+	// Batch lookup: node locations only for observer IDs (not all nodes)
+	observerIDs := make([]string, len(observers))
+	for i, o := range observers {
+		observerIDs[i] = o.ID
+	}
+	nodeLocations := s.db.GetNodeLocationsByKeys(observerIDs)
+
+	// Batch lookup: MQTT source/broker names per observer (one query) so the
+	// UI can filter the list by ingestor/source.
+	obsSources := s.db.GetAllObserverSourceNames()
+
+	nowTime := time.Now().UTC()
+	result := make([]ObserverResp, 0, len(observers))
+	for i := range observers {
+		o := &observers[i]
+		// Defense in depth: skip observers that are in the blacklist
+		if s.cfg != nil && s.cfg.IsObserverBlacklisted(o.ID) {
+			continue
+		}
+		plh := 0
+		if c, ok := pktCounts[o.ID]; ok {
+			plh = c
+		}
+		var lat, lon, nodeRole interface{}
+		if nodeLoc, ok := nodeLocations[strings.ToLower(o.ID)]; ok {
+			lat = nodeLoc["lat"]
+			lon = nodeLoc["lon"]
+			nodeRole = nodeLoc["role"]
+		}
+
+		resp := ObserverResp{
+			ID: o.ID, Name: o.Name, IATA: o.IATA,
+			LastSeen: o.LastSeen, FirstSeen: o.FirstSeen,
+			PacketCount:     o.PacketCount,
+			Model:           o.Model, Firmware: o.Firmware,
+			ClientVersion:   o.ClientVersion, Radio: o.Radio,
+			BatteryMv:       o.BatteryMv, UptimeSecs: o.UptimeSecs,
+			NoiseFloor:      o.NoiseFloor,
+			LastPacketAt:    o.LastPacketAt,
+			PacketsLastHour: plh,
+			Lat:             lat, Lon: lon, NodeRole: nodeRole,
+			Repeat:          o.Repeat,
+			Sources:         obsSources[o.ID],
+		}
+		applyObserverNaiveClock(&resp, o, nowTime)
+		result = append(result, resp)
+	}
+	return ObserverListResponse{
+		Observers:  result,
+		ServerTime: time.Now().UTC().Format(time.RFC3339),
+	}, nil
 }
 
 // observersStatsCacheTTL caps how often /api/observers/stats re-scans the DB.
@@ -3427,7 +3540,7 @@ func (s *Server) handleObserverDetail(w http.ResponseWriter, r *http.Request) {
 
 	ingestSources, _ := s.db.GetObserverSources(id)
 
-	writeJSON(w, ObserverResp{
+	resp := ObserverResp{
 		ID: obs.ID, Name: obs.Name, IATA: obs.IATA,
 		LastSeen: obs.LastSeen, FirstSeen: obs.FirstSeen,
 		PacketCount: obs.PacketCount,
@@ -3439,7 +3552,9 @@ func (s *Server) handleObserverDetail(w http.ResponseWriter, r *http.Request) {
 		PacketsLastHour: plh,
 		Repeat:          obs.Repeat,
 		IngestSources:   ingestSources,
-	})
+	}
+	applyObserverNaiveClock(&resp, obs, time.Now().UTC())
+	writeJSON(w, resp)
 }
 
 func (s *Server) handleObserverAnalytics(w http.ResponseWriter, r *http.Request) {

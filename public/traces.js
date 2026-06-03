@@ -51,9 +51,10 @@
     const hash = input.value.trim();
     if (!hash) return;
     currentHash = hash;
+    history.replaceState(null, '', `#/tools/trace/${encodeURIComponent(hash)}`);
 
     const results = document.getElementById('traceResults');
-    results.innerHTML = PageState.loading('Tracing…');
+    results.innerHTML = '<div class="text-center text-muted" style="padding:40px">Tracing…</div>';
 
     try {
       const [traceResp, pktResp] = await Promise.all([
@@ -65,11 +66,7 @@
       const packets = pktResp.packets || [];
 
       if (traceData.length === 0 && packets.length === 0) {
-        results.innerHTML = PageState.empty({
-          icon: '📡',
-          title: 'No observations found',
-          hint: 'Adjust your filters and try again'
-        });
+        results.innerHTML = '<div class="trace-empty">No observations found for this packet hash.</div>';
         return;
       }
 
@@ -105,7 +102,7 @@
 
       renderResults(results, allPaths, allPathsRaw, decoded);
     } catch (e) {
-      PageState.error(results, e, doTrace);
+      results.innerHTML = `<div class="trace-empty" style="color:#ef4444">Error: ${e.message}</div>`;
     }
   }
 

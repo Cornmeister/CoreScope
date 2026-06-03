@@ -177,6 +177,9 @@
   --z-modal-backdrop: 9000;
   --z-modal: 9100;
   --z-tooltip: 9200;
+  --accent-bg: rgba(59, 130, 246, 0.12);
+  --accent-border: rgba(59, 130, 246, 0.25);
+  --shadow: rgba(0,0,0,0.3);
 }
 
 /* DARK THEME VARIABLES — single source of truth (deduplicated).
@@ -2743,6 +2746,9 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
 .perf-card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 12px 20px; min-width: 120px; text-align: center; }
 .perf-num { font-size: 24px; font-weight: 800; color: var(--text); font-variant-numeric: tabular-nums; }
 .perf-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+.perf-num--small { font-size: 0.85em; }
+.perf-num--small a { color: var(--text-muted); text-decoration: none; }
+.perf-num--small a:hover { color: var(--text); }
 .perf-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .perf-table th { text-align: left; padding: 6px 10px; border-bottom: 2px solid var(--border); color: var(--text-muted); font-size: 11px; text-transform: uppercase; }
 .perf-table td { padding: 5px 10px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
@@ -3581,32 +3587,183 @@ th.sort-active { color: var(--accent, #60a5fa); }
 .tools-card h3 { margin: 0 0 4px 0; font-size: 16px; }
 .tools-card p { margin: 0; font-size: 13px; color: var(--text-muted); }
 
-/* ── Map marker clustering (issue #1036) ── */
+/* ── Map marker clustering (issue #1036, a11y refit issue #1356) ──
+ *
+ * #1356 WCAG 2.2 AA refit — Tufte structural framing + audit minimal patch.
+ *
+ * Carriers (NON-color) of meaning, per WCAG 1.4.1:
+ *   - V1 cluster bubbles: size (40/48/56px) + numeral + border-style ramp
+ *     (1.5px solid / 2.5px solid / 2px double). Fill is a single neutral.
+ *   - V2 role pills: capital-letter prefix (R/C/M/S/O). Wong (2011) palette
+ *     hue is secondary. Dark text (#1a1a1a) on ALL five pills (audit override
+ *     so only ONE text-color rule is needed and every pill passes 4.5:1).
+ *   - V3 multi-byte hash labels: unicode glyph prefix (✓/?/✗) + neutral fill
+ *     + 3px colored left-border using the audit's high-luminance accent set
+ *     (NOT Tol "vibrant" — those failed 3:1 vs the neutral fill).
+ *
+ * Constants are --mc-* namespaced. The reserved --info / --warning / --accent
+ * system vars are NOT touched (per issue scope + AGENTS.md).
+ */
+:root {
+  /* V1 — cluster bubble */
+  --mc-cluster-fill:   rgba(33, 41, 54, 0.88);
+  --mc-cluster-text:   #ffffff;
+  --mc-cluster-border: #666666; /* audit: white border = 1.05:1 vs Carto-light; #666 = 4.83:1 */
+
+  /* V2 — role pills (Wong 2011 colorblind-safe palette) */
+  --mc-role-repeater:  #D55E00; /* vermillion        */
+  --mc-role-companion: #56B4E9; /* sky blue          */
+  --mc-role-room:      #009E73; /* bluish-green      */
+  --mc-role-sensor:    #F0E442; /* yellow            */
+  --mc-role-observer:  #CC79A7; /* reddish-purple    */
+
+  /* #1488 — marker stroke (outline around the role shape on map + live) */
+  --mc-marker-stroke-color:   #fff;
+  --mc-marker-stroke-width:   2;
+  --mc-marker-stroke-opacity: 1;
+
+  /* #1407 — per-role text colors paired with each --mc-role-X bg */
+  --mc-role-repeater-text:  #1a1a1a;
+  --mc-role-companion-text: #1a1a1a;
+  --mc-role-room-text:      #1a1a1a;
+  --mc-role-sensor-text:    #1a1a1a;
+  --mc-role-observer-text:  #1a1a1a;
+
+  /* V3 — multi-byte hash labels (neutral fill + high-luminance accent stripes) */
+  --mc-mb-fill:        rgba(33, 41, 54, 0.92);
+  --mc-mb-text:        #ffffff;
+  --mc-mb-confirmed:   #56F0A0; /* audit override of Tol vibrant for fill contrast */
+  --mc-mb-suspected:   #FFD966;
+  --mc-mb-unknown:     #FF8888;
+}
+
+/* #1361 — Colorblind preset overrides */
+body[data-cb-preset="deut"] {
+  --mc-role-repeater:  #FE6100;
+  --mc-role-companion: #648FFF;
+  --mc-role-room:      #785EF0;
+  --mc-role-sensor:    #FFB000;
+  --mc-role-observer:  #DC267F;
+  --mc-role-repeater-text:  #1a1a1a;
+  --mc-role-companion-text: #1a1a1a;
+  --mc-role-room-text:      #ffffff;
+  --mc-role-sensor-text:    #1a1a1a;
+  --mc-role-observer-text:  #ffffff;
+  --mc-mb-confirmed:   #648FFF;
+  --mc-mb-suspected:   #FFB000;
+  --mc-mb-unknown:     #DC267F;
+}
+body[data-cb-preset="prot"] {
+  --mc-role-repeater:  #FFB000;
+  --mc-role-companion: #648FFF;
+  --mc-role-room:      #785EF0;
+  --mc-role-sensor:    #FE6100;
+  --mc-role-observer:  #DC267F;
+  --mc-role-repeater-text:  #1a1a1a;
+  --mc-role-companion-text: #1a1a1a;
+  --mc-role-room-text:      #ffffff;
+  --mc-role-sensor-text:    #1a1a1a;
+  --mc-role-observer-text:  #ffffff;
+  --mc-mb-confirmed:   #648FFF;
+  --mc-mb-suspected:   #FFB000;
+  --mc-mb-unknown:     #DC267F;
+}
+body[data-cb-preset="trit"] {
+  --mc-role-repeater:  #CC6677;
+  --mc-role-companion: #117733;
+  --mc-role-room:      #882255;
+  --mc-role-sensor:    #DDCC77;
+  --mc-role-observer:  #AA4499;
+  --mc-role-repeater-text:  #1a1a1a;  /* 5.73:1 */
+  --mc-role-companion-text: #ffffff;  /* 5.66:1 */
+  --mc-role-room-text:      #ffffff;  /* 8.71:1 */
+  --mc-role-sensor-text:    #1a1a1a;  /* 12.98:1 */
+  --mc-role-observer-text:  #ffffff;  /* 5.25:1 */
+  --mc-mb-confirmed:   #117733;
+  --mc-mb-suspected:   #DDCC77;
+  --mc-mb-unknown:     #CC6677;
+}
+body[data-cb-preset="achromat"] {
+  --mc-role-repeater:  #333333;
+  --mc-role-companion: #595959;
+  --mc-role-room:      #808080;
+  --mc-role-sensor:    #b3b3b3;
+  --mc-role-observer:  #e6e6e6;
+  --mc-role-repeater-text:  #ffffff;  /* 12.63:1 */
+  --mc-role-companion-text: #ffffff;  /* 7.00:1 */
+  --mc-role-room-text:      #000000;  /* 5.32:1 */
+  --mc-role-sensor-text:    #1a1a1a;  /* 8.30:1 */
+  --mc-role-observer-text:  #1a1a1a;  /* 13.94:1 */
+  --mc-mb-confirmed:   #b3b3b3;
+  --mc-mb-suspected:   #808080;
+  --mc-mb-unknown:     #595959;
+}
+
 .mc-cluster-wrap { background: transparent !important; border: 0 !important; }
 .mc-cluster {
   width: 48px; height: 48px; border-radius: 50%;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   font-family: var(--font, system-ui, sans-serif);
-  color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.5);
-  border: 2px solid rgba(255,255,255,0.85);
-  box-shadow: 0 2px 6px rgba(0,0,0,0.35);
+  background: var(--mc-cluster-fill);
+  color: var(--mc-cluster-text); text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+  border: 2px solid var(--mc-cluster-border);
+  /* Dark halo + soft shadow — audit fix so the border edge is visible vs Carto-light */
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.5), 0 1px 2px rgba(0,0,0,0.35);
   cursor: pointer;
   transition: transform 120ms ease;
 }
 .mc-cluster:hover { transform: scale(1.06); }
-.mc-cluster.mc-sm { background: var(--info, #2563eb); width: 40px; height: 40px; }
-.mc-cluster.mc-md { background: var(--warning, #d97706); width: 48px; height: 48px; }
-.mc-cluster.mc-lg { background: var(--accent, #dc2626); width: 56px; height: 56px; }
-.mc-cluster .mc-count { font-size: 14px; font-weight: 700; line-height: 1; }
-.mc-cluster.mc-lg .mc-count { font-size: 16px; }
+/* Border-style ramp is the redundant non-color carrier of the count bucket. */
+.mc-cluster.mc-sm { width: 40px; height: 40px; border-width: 1.5px; border-style: solid; }
+.mc-cluster.mc-md { width: 48px; height: 48px; border-width: 2.5px; border-style: solid; }
+.mc-cluster.mc-lg { width: 56px; height: 56px; border-width: 2px;   border-style: double; }
+.mc-cluster .mc-count { font-size: 0.875rem; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+.mc-cluster.mc-lg .mc-count { font-size: 1rem; }
 .mc-cluster .mc-pills {
   display: flex; gap: 2px; margin-top: 3px;
 }
 .mc-cluster .mc-pill {
-  display: inline-block; min-width: 12px; padding: 0 3px;
-  border-radius: 6px; font-size: 9px; font-weight: 600; line-height: 12px;
-  color: #fff; text-align: center; text-shadow: none;
-  border: 1px solid rgba(255,255,255,0.4);
+  display: inline-block; min-width: 12px; padding: 1px 3px;
+  border-radius: 3px;
+  overflow: hidden; text-overflow: ellipsis;
+  font: 700 0.625rem/1.1 ui-monospace, "SF Mono", Consolas, monospace;
+  letter-spacing: 0;
+  color: var(--mc-pill-text, #1a1a1a); text-align: center; text-shadow: none;
+  border: 1px solid rgba(0,0,0,0.25);
+}
+/* #1407 — per-role pill text color */
+.mc-cluster .mc-pill.role-repeater  { color: var(--mc-role-repeater-text,  #1a1a1a); }
+.mc-cluster .mc-pill.role-companion { color: var(--mc-role-companion-text, #1a1a1a); }
+.mc-cluster .mc-pill.role-room      { color: var(--mc-role-room-text,      #1a1a1a); }
+.mc-cluster .mc-pill.role-sensor    { color: var(--mc-role-sensor-text,    #1a1a1a); }
+.mc-cluster .mc-pill.role-observer  { color: var(--mc-role-observer-text,  #1a1a1a); }
+
+/* V3 — multi-byte hash labels: neutral fill + colored 3px left border */
+.mc-mb-label {
+  background: var(--mc-mb-fill);
+  color: var(--mc-mb-text);
+  font: 600 0.75rem/1.2 ui-monospace, "SF Mono", Consolas, monospace;
+  letter-spacing: 0.02em;
+  padding: 2px 5px 2px 4px;
+  border-left: 3px solid transparent;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.5), 0 1px 2px rgba(0,0,0,0.35);
+  white-space: nowrap;
+  text-align: center;
+  line-height: 1.2;
+}
+.mc-mb-label.status-confirmed { border-left-color: var(--mc-mb-confirmed); }
+.mc-mb-label.status-suspected { border-left-color: var(--mc-mb-suspected); }
+.mc-mb-label.status-unknown   { border-left-color: var(--mc-mb-unknown);   }
+
+/* Forced-colors / Windows High Contrast — degrade gracefully */
+@media (forced-colors: active) {
+  .mc-cluster, .mc-pill, .mc-mb-label {
+    forced-color-adjust: auto;
+    background: Canvas;
+    color: CanvasText;
+    border-color: CanvasText;
+  }
 }
 
 /* === #1034 PR1: Channel Add modal + sectioned sidebar === */
@@ -4079,3 +4236,181 @@ body { touch-action: pan-y; }
 .hc-tl-snr { font-size: 0.75rem; color: var(--text-muted, #6b7280); min-width: 50px; text-align: right; }
 .hc-error { color: #dc2626; padding: 1rem; }
 .hc-loading { color: var(--text-muted, #6b7280); padding: 1rem; }
+
+/* ─── #1374 packet-route map view ───────────────────────────────────
+   Role-aware shape markers + sequence-number badges + directional
+   arrows + collapsible legend. WCAG SC 1.3.1 / 1.4.3 / 1.4.11 AA.
+   ----------------------------------------------------------------- */
+:root {
+  --mc-route-badge-bg: #f8fafc;
+  --mc-route-badge-fg: #0f172a;
+  --mc-route-badge-border: #1a1a1a;
+  --mc-route-label-bg: #f8fafc;
+  --mc-route-label-fg: #0f172a;
+  --mc-route-label-border: #475569;
+  --mc-route-legend-bg: rgba(248, 250, 252, 0.96);
+  --mc-route-legend-fg: #0f172a;
+  --mc-route-legend-border: #475569;
+}
+[data-theme="dark"] {
+  --mc-route-legend-bg: rgba(15, 23, 42, 0.94);
+  --mc-route-legend-fg: #f1f5f9;
+  --mc-route-legend-border: #94a3b8;
+}
+
+.mc-route-marker-icon { background: transparent !important; border: none !important; }
+.mc-route-marker {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+}
+.mc-route-marker:focus {
+  outline: 3px solid #06b6d4;
+  outline-offset: 2px;
+  border-radius: 50%;
+}
+.mc-route-marker.ch-unresolved {
+  opacity: 0.65;
+  filter: grayscale(0.8);
+}
+.mc-route-seq-badge {
+  position: absolute;
+  bottom: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  background: var(--mc-route-badge-bg);
+  color: var(--mc-route-badge-fg);
+  border: 1.5px solid var(--mc-route-badge-border);
+  border-radius: 8px;
+  font: 700 10px/14px system-ui, sans-serif;
+  text-align: center;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+.mc-route-label-icon { background: transparent !important; border: none !important; }
+.mc-route-label {
+  display: inline-block;
+  padding: 1px 6px;
+  background: var(--mc-route-label-bg);
+  color: var(--mc-route-label-fg);
+  border: 1px solid var(--mc-route-label-border);
+  border-radius: 3px;
+  font: 600 11px/14px system-ui, sans-serif;
+  white-space: nowrap;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+.mc-route-edge { fill: none; }
+.mc-route-legend {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 700;
+  max-width: 240px;
+  background: var(--mc-route-legend-bg);
+  color: var(--mc-route-legend-fg);
+  border: 1px solid var(--mc-route-legend-border);
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  font: 12px/1.4 system-ui, sans-serif;
+}
+.mc-route-legend-toggle {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  color: inherit;
+  border: 0;
+  border-bottom: 1px solid var(--mc-route-legend-border);
+  font: 700 12px/1.2 system-ui, sans-serif;
+  text-align: left;
+  cursor: pointer;
+}
+.mc-route-legend-toggle:focus { outline: 2px solid #06b6d4; outline-offset: 1px; }
+.mc-route-legend-toggle[aria-expanded="false"] + .mc-route-legend-body { display: none; }
+.mc-route-legend-body { padding: 8px 10px; }
+.mc-route-legend-list { list-style: none; padding: 0; margin: 4px 0; }
+.mc-route-legend-entry { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+.mc-route-legend-swatch svg { display: block; }
+.mc-route-legend-glyph {
+  display: inline-block;
+  width: 14px;
+  text-align: center;
+  font-weight: 700;
+  color: var(--mc-route-legend-fg);
+}
+.mc-route-legend-gradient {
+  display: inline-block;
+  width: 32px;
+  height: 8px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, hsl(152,70%,50%), hsl(18,70%,58%));
+  border: 1px solid var(--mc-route-legend-border);
+}
+.mc-route-legend-section {
+  margin-top: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--mc-route-legend-fg);
+  opacity: 0.75;
+}
+.mc-route-resolved-badge {
+  display: inline-block;
+  padding: 2px 6px;
+  margin-bottom: 4px;
+  background: #fef3c7;
+  color: #78350f;
+  border: 1px solid #92400e;
+  border-radius: 3px;
+  font: 700 11px/14px system-ui, sans-serif;
+}
+.mc-route-context-label {
+  position: absolute;
+  top: 12px;
+  left: 60px;
+  z-index: 700;
+  padding: 4px 8px;
+  background: var(--mc-route-legend-bg);
+  color: var(--mc-route-legend-fg);
+  border: 1px solid var(--mc-route-legend-border);
+  border-radius: 4px;
+  font: 600 11px/1.3 system-ui, sans-serif;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+}
+.mc-route-popup .mc-route-popup-title {
+  font: 700 13px/1.3 system-ui, sans-serif;
+  margin-bottom: 4px;
+  color: var(--text, #0f172a);
+}
+.mc-route-popup .mc-route-popup-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font: 11px/1.4 system-ui, sans-serif;
+  color: var(--text-muted, #475569);
+}
+.mc-route-popup .mc-route-popup-row b,
+.mc-route-popup .mc-route-popup-row code { color: var(--text, #0f172a); }
+.mc-route-popup-link { color: var(--accent, #0ea5e9); font-size: 11px; text-decoration: underline; }
+
+@media (prefers-reduced-motion: reduce) {
+  .mc-route-marker,
+  .mc-route-edge { transition: none !important; animation: none !important; }
+}
+@media (forced-colors: active) {
+  .mc-route-marker svg circle,
+  .mc-route-marker svg rect,
+  .mc-route-marker svg polygon { stroke: CanvasText !important; }
+  .mc-route-seq-badge,
+  .mc-route-label,
+  .mc-route-legend,
+  .mc-route-context-label {
+    background: Canvas !important;
+    color: CanvasText !important;
+    border-color: CanvasText !important;
+  }
+  .mc-route-edge { stroke: CanvasText !important; }
+}

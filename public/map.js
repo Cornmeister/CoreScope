@@ -19,32 +19,77 @@
   let affinityData = null;
   let userHasMoved = false;
   let controlsCollapsed = false;
-  let _mapThemeObs = null;  // theme MutationObserver — hoisted so destroy() can disconnect it
 
-  // Safe escape — falls back to identity if app.js hasn't loaded yet
-  const safeEsc = (typeof esc === 'function') ? esc : function (s) { return s; };
+  // Safe escape — falls back to identity if app.js hasn't loaded yet.
+  // Note: `esc` is not a true global; some IIFEs define it locally. Reference
+  // through globalThis so the optional lookup is safe under `no-undef`.
+  const safeEsc = (typeof globalThis.esc === 'function') ? globalThis.esc : function (s) { return s; };
 
   // Roles loaded from shared roles.js (ROLE_STYLE, ROLE_LABELS, ROLE_COLORS globals)
 
-  // Multi-byte support overlay colors
-  var MB_COLORS = { confirmed: '#27ae60', suspected: '#f39c12', unknown: '#e74c3c' };
+  // ── #1356 a11y constants — letter prefix + glyph + neutral fill carriers ──
+  // ROLE_LETTERS gives each role a single capital-letter primary carrier
+  // (legible at 10px monospace, survives full grayscale).
+  var ROLE_LETTERS = {
+    repeater:  'R',
+    companion: 'C',
+    room:      'M',
+    sensor:    'S',
+    observer:  'O',
+  };
+  // MB_GLYPHS prefix the hash text with a non-color status carrier.
+  var MB_GLYPHS = {
+    confirmed: '\u2713', // ✓
+    suspected: '?',
+    unknown:   '\u2717', // ✗
+  };
+  // Per-status CSS class (drives the colored 3px left-border in style.css).
+  var MB_STATUS_CLASS = {
+    confirmed: 'status-confirmed',
+    suspected: 'status-suspected',
+    unknown:   'status-unknown',
+  };
+  // #1356 V3 marker-dot tint set — high-luminance accents that mirror the
+  // CSS `--mc-mb-confirmed/suspected/unknown` left-border stripe palette so the
+  // marker-dot and label-stripe surfaces stay visually consistent. Module
+  // scope (not loop-local) to avoid per-iteration object allocation.
+  var MB_MARKER_TINT = { confirmed: '#56F0A0', suspected: '#FFD966', unknown: '#FF8888' };
 
   function makeMarkerIcon(role, isStale, isAlsoObserver, colorOverride) {
     const s = ROLE_STYLE[role] || ROLE_STYLE.companion;
-    const fillColor = colorOverride || s.color;
+    // #1438: default fill resolves through the live CSS var so existing
+    // mounted SVG markers recolor when cb-preset switches or the
+    // operator picks a per-role override. colorOverride (MultiByte
+    // status tint) wins when provided.
+    const fillColor = colorOverride || ('var(--mc-role-' + (role || 'companion') + ')');
+    // #1488 — marker stroke through CSS vars so operators can dial
+    // colour / width / opacity via the customizer (Colors → Marker Stroke).
+    const strokeAttr = ' stroke="var(--mc-marker-stroke-color)" stroke-width="var(--mc-marker-stroke-width)" stroke-opacity="var(--mc-marker-stroke-opacity)"';
     const size = s.radius * 2 + 4;
     const c = size / 2;
     let path;
     switch (s.shape) {
       case 'diamond':
-        path = `<polygon points="${c},2 ${size-2},${c} ${c},${size-2} 2,${c}" fill="${fillColor}" stroke="#fff" stroke-width="2"/>`;
+        path = `<polygon points="${c},2 ${size-2},${c} ${c},${size-2} 2,${c}" fill="${fillColor}"${strokeAttr}/>`;
         break;
       case 'square':
-        path = `<rect x="3" y="3" width="${size-6}" height="${size-6}" fill="${fillColor}" stroke="#fff" stroke-width="2"/>`;
+        path = `<rect x="3" y="3" width="${size-6}" height="${size-6}" fill="${fillColor}"${strokeAttr}/>`;
         break;
       case 'triangle':
-        path = `<polygon points="${c},2 ${size-2},${size-2} 2,${size-2}" fill="${fillColor}" stroke="#fff" stroke-width="2"/>`;
+        path = `<polygon points="${c},2 ${size-2},${size-2} 2,${size-2}" fill="${fillColor}"${strokeAttr}/>`;
         break;
+      case 'hexagon': {
+        // #1293 — pointy-top hexagon for room servers
+        const hr = c - 1.5;
+        let hpts = '';
+        for (let hi = 0; hi < 6; hi++) {
+          const ha = (hi * 60 - 90) * Math.PI / 180;
+          hpts += (c + hr * Math.cos(ha)).toFixed(2) + ',' +
+                  (c + hr * Math.sin(ha)).toFixed(2) + ' ';
+        }
+        path = `<polygon points="${hpts.trim()}" fill="${fillColor}"${strokeAttr}/>`;
+        break;
+      }
       case 'star': {
         // 5-pointed star
         const cx = c, cy = c, outer = c - 1, inner = outer * 0.4;
@@ -55,11 +100,11 @@
           pts += `${cx + outer * Math.cos(aOuter)},${cy + outer * Math.sin(aOuter)} `;
           pts += `${cx + inner * Math.cos(aInner)},${cy + inner * Math.sin(aInner)} `;
         }
-        path = `<polygon points="${pts.trim()}" fill="${fillColor}" stroke="#fff" stroke-width="1.5"/>`;
+        path = `<polygon points="${pts.trim()}" fill="${fillColor}"${strokeAttr}/>`;
         break;
       }
       default: // circle
-        path = `<circle cx="${c}" cy="${c}" r="${c-2}" fill="${fillColor}" stroke="#fff" stroke-width="2"/>`;
+        path = `<circle cx="${c}" cy="${c}" r="${c-2}" fill="${fillColor}"${strokeAttr}/>`;
     }
     // If this node is also an observer, add a small star overlay
     let obsOverlay = '';
@@ -74,7 +119,7 @@
         starPts += `${scx + so * Math.cos(aO)},${scy + so * Math.sin(aO)} `;
         starPts += `${scx + si * Math.cos(aI)},${scy + si * Math.sin(aI)} `;
       }
-      obsOverlay = `<g transform="translate(${sx},${sy})"><polygon points="${starPts.trim()}" fill="${ROLE_COLORS.observer || '#f1c40f'}" stroke="#fff" stroke-width="0.8"/></g>`;
+      obsOverlay = `<g transform="translate(${sx},${sy})"><polygon points="${starPts.trim()}" fill="var(--mc-role-observer)" stroke="var(--mc-marker-stroke-color)" stroke-width="0.8" stroke-opacity="var(--mc-marker-stroke-opacity)"/></g>`;
     }
     const svg = `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg">${path}${obsOverlay}</svg>`;
     return L.divIcon({
@@ -86,16 +131,26 @@
     });
   }
 
-  function makeRepeaterLabelIcon(node, isStale, isAlsoObserver, colorOverride) {
-    var s = ROLE_STYLE['repeater'] || ROLE_STYLE.companion;
+  function makeRepeaterLabelIcon(node, isStale, isAlsoObserver, mbStatus) {
     var hs = node.hash_size || 1;
     // Show the short mesh hash ID (first N bytes of pubkey, uppercased)
     var shortHash = node.public_key ? node.public_key.slice(0, hs * 2).toUpperCase() : '??';
-    var bgColor = colorOverride || s.color;
-    // If this repeater is also an observer, show a star indicator inside the label
-    var obsIndicator = isAlsoObserver ? ' <span style="color:' + (ROLE_COLORS.observer || '#f1c40f') + ';font-size:13px;line-height:1;" title="Also an observer">★</span>' : '';
-    var html = '<div style="background:' + bgColor + ';color:#fff;font-weight:bold;font-size:11px;padding:2px 5px;border-radius:3px;border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,0.4);text-align:center;line-height:1.2;white-space:nowrap;">' +
-      shortHash + obsIndicator + '</div>';
+    // #1356 V3: glyph is the primary non-color status carrier, hash is the data,
+    // status color is a thin left-border (CSS class drives the hue).
+    var status = mbStatus || null;
+    var glyph = status ? (MB_GLYPHS[status] || MB_GLYPHS.unknown) : '';
+    var statusClass = status ? (' ' + (MB_STATUS_CLASS[status] || MB_STATUS_CLASS.unknown)) : '';
+    var ariaStatus = status ? ('multi-byte ' + status + ', hash ' + shortHash)
+                            : ('repeater hash ' + shortHash);
+    // Observer indicator stays a star — it is an orthogonal signal, not a status color.
+    var obsIndicator = isAlsoObserver
+      ? ' <span aria-hidden="true" style="color:' + (ROLE_COLORS.observer || '#f1c40f') + ';font-size:13px;line-height:1;" title="Also an observer">★</span>'
+      : '';
+    // Glyph + thin-space (U+2009) + hash. Visible content is aria-hidden so AT
+    // reads the aria-label only (avoids "check mark 3 E" literal announcements).
+    var visible = (glyph ? glyph + '\u2009' : '') + shortHash;
+    var html = '<div class="mc-mb-label' + statusClass + '" role="img" aria-label="' + ariaStatus + '">' +
+      '<span aria-hidden="true">' + visible + '</span>' + obsIndicator + '</div>';
     return L.divIcon({
       html: html,
       className: 'meshcore-marker meshcore-label-marker' + (isStale ? ' marker-stale' : ''),
@@ -109,7 +164,6 @@
     container.innerHTML = `
       <div id="map-wrap" style="position:relative;width:100%;height:100%;display:flex;">
         <div id="leaflet-map" style="flex:1 1 0%;height:100%;"></div>
-        <div id="mapLoadError" style="display:none;position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:1000;"></div>
         <div class="map-side-pane" id="mapSidePane">
           <div class="pane-toggle" id="mapPaneToggle" title="Path Inspector">◀</div>
           <div class="pane-content">
@@ -178,7 +232,6 @@
             <legend class="mc-label">Quick Jump</legend>
             <div class="mc-jumps" id="mcJumps" role="group" aria-label="Jump to region"></div>
           </fieldset>
-
         </div>
       </div>`;
 
@@ -186,7 +239,7 @@
     let defaultCenter = [37.6, -122.1];
     let defaultZoom = 9;
     try {
-      const mapCfg = await api('/config/map', { ttl: 3600000 });
+      const mapCfg = await (await fetch('/api/config/map')).json();
       if (Array.isArray(mapCfg.center) && mapCfg.center.length === 2) defaultCenter = mapCfg.center;
       if (typeof mapCfg.zoom === 'number') defaultZoom = mapCfg.zoom;
     } catch {}
@@ -210,17 +263,60 @@
 
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark' ||
       (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-    const tileLayer = L.tileLayer(isDark ? TILE_DARK : TILE_LIGHT, {
-      attribution: '© OpenStreetMap © CartoDB',
+    // #1420 — multi-provider dark-tile picker. Light mode unchanged.
+    let _darkRefLayer = null;  // Esri-only: labels overlay
+    function _resolveTileUrl(dark) {
+      if (!dark) return { url: TILE_LIGHT, attribution: '© OpenStreetMap © CartoDB', refUrl: null };
+      const reg = window.MC_TILE_PROVIDERS || {};
+      const id  = (typeof window.MC_getDarkTileProvider === 'function') ? window.MC_getDarkTileProvider() : 'carto-dark';
+      const p   = reg[id] || reg['carto-dark'] || {};
+      return {
+        url: p.url || p.baseUrl || TILE_DARK,
+        attribution: p.attribution || '© OpenStreetMap © CartoDB',
+        refUrl: p.refUrl || null
+      };
+    }
+    function _syncDarkTiles(dark) {
+      const r = _resolveTileUrl(dark);
+      tileLayer.setUrl(r.url);
+      if (tileLayer.options) tileLayer.options.attribution = r.attribution;
+      // Esri reference (labels) overlay: add when needed, remove otherwise.
+      if (dark && r.refUrl) {
+        if (!_darkRefLayer) {
+          _darkRefLayer = L.tileLayer(r.refUrl, { maxZoom: 19, attribution: r.attribution }).addTo(map);
+        } else {
+          _darkRefLayer.setUrl(r.refUrl);
+        }
+      } else if (_darkRefLayer) {
+        map.removeLayer(_darkRefLayer);
+        _darkRefLayer = null;
+      }
+      if (typeof window.MC_applyTileFilter === 'function') window.MC_applyTileFilter();
+      if (map.attributionControl) {
+        try { map.attributionControl._update && map.attributionControl._update(); } catch (_) {}
+      }
+    }
+    const _initTile = _resolveTileUrl(isDark);
+    const tileLayer = L.tileLayer(_initTile.url, {
+      attribution: _initTile.attribution,
       maxZoom: 19,
     }).addTo(map);
-    if (_mapThemeObs) _mapThemeObs.disconnect();
-    _mapThemeObs = new MutationObserver(function () {
+    if (isDark && _initTile.refUrl) {
+      _darkRefLayer = L.tileLayer(_initTile.refUrl, { maxZoom: 19, attribution: _initTile.attribution }).addTo(map);
+    }
+    if (typeof window.MC_applyTileFilter === 'function') window.MC_applyTileFilter();
+    const _mapThemeObs = new MutationObserver(function () {
       const dark = document.documentElement.getAttribute('data-theme') === 'dark' ||
         (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-      tileLayer.setUrl(dark ? TILE_DARK : TILE_LIGHT);
+      _syncDarkTiles(dark);
     });
     _mapThemeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    // #1420 — re-render when the user picks a different dark provider in the customizer.
+    window.addEventListener('mc-tile-provider-changed', function () {
+      const dark = document.documentElement.getAttribute('data-theme') === 'dark' ||
+        (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      _syncDarkTiles(dark);
+    });
 
     // Save position on move
     map.on('moveend', () => {
@@ -247,6 +343,15 @@
     clusterGroup = createClusterGroup();
     if (filters.clustering && clusterGroup) clusterGroup.addTo(map);
     routeLayer = L.layerGroup().addTo(map);
+    // Exposed for the #1374 route renderer (window.MeshRoute) and its E2E tests.
+    if (typeof window !== 'undefined') {
+      window.__mc_map = map;
+      window.__mc_routeLayer = routeLayer;
+      // Expose nodes array for route-view's path-picker isolation
+      // (needs to resolve hop prefixes that aren't in the canonical path).
+      Object.defineProperty(window, '__mc_nodes', { get: function () { return nodes; }, configurable: true });
+      window.deconflictLabels = deconflictLabels;
+    }
 
     // Fix map size on SPA load
     setTimeout(() => map.invalidateSize(), 100);
@@ -265,6 +370,48 @@
       controlsPanel.classList.toggle('collapsed', controlsCollapsed);
       toggleBtn.setAttribute('aria-expanded', String(!controlsCollapsed));
     });
+
+    // #1329: Map controls accordion. Make each section's legend a button-
+    // style toggle with aria-expanded. On mobile (≤640px) only one section
+    // is open at a time so the panel never needs internal scrolling. On
+    // desktop the .mc-collapsed class has no visual effect (CSS only hides
+    // section bodies inside the mobile media query) so all controls stay
+    // visible — but single-open behaviour is still tracked for state
+    // consistency. See test-issue-1329-map-controls-accordion-e2e.js.
+    (function initMapControlsAccordion() {
+      const isMobile = window.innerWidth <= 640;
+      const sections = Array.from(controlsPanel.querySelectorAll('fieldset.mc-section'));
+      sections.forEach((fs, idx) => {
+        const legend = fs.querySelector('legend.mc-label');
+        if (!legend) return;
+        // Initial state: on mobile only the first section is open; on
+        // desktop all sections are open.
+        const open = !isMobile || idx === 0;
+        legend.setAttribute('role', 'button');
+        legend.setAttribute('tabindex', '0');
+        legend.setAttribute('aria-expanded', String(open));
+        fs.classList.toggle('mc-collapsed', !open);
+        const setOpen = (target, openNow) => {
+          target.setAttribute('aria-expanded', String(openNow));
+          const parent = target.closest('fieldset.mc-section');
+          if (parent) parent.classList.toggle('mc-collapsed', !openNow);
+        };
+        const onActivate = (e) => {
+          e.preventDefault();
+          const currentlyOpen = legend.getAttribute('aria-expanded') === 'true';
+          // Single-open: close every other section first.
+          sections.forEach(other => {
+            const otherLegend = other.querySelector('legend.mc-label');
+            if (otherLegend && otherLegend !== legend) setOpen(otherLegend, false);
+          });
+          setOpen(legend, !currentlyOpen);
+        };
+        legend.addEventListener('click', onActivate);
+        legend.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') onActivate(e);
+        });
+      });
+    })();
 
     // Bind controls
     var clustersEl = document.getElementById('mcClusters');
@@ -409,18 +556,29 @@
         sessionStorage.removeItem('map-route-hops');
         try {
           const parsed = JSON.parse(routeHopsJson);
-          // Support new format {origin, hops} and legacy plain array
           if (Array.isArray(parsed)) {
             drawPacketRoute(parsed, null);
+          } else if (parsed.paths && parsed.paths.length > 0) {
+            drawPacketRouteMulti(parsed.paths, parsed.origin || null, {
+              packetHash: parsed.packetHash,
+              canonicalPath: parsed.hops || null,
+              destination: parsed.destination || null
+            });
           } else {
-            drawPacketRoute(parsed.hops || [], parsed.origin || null);
+            drawPacketRoute(parsed.hops || [], parsed.origin || null, { destination: parsed.destination || null });
           }
         } catch {}
+      } else {
+        // #1418/#1419: deep-link via URL params — #/map?packet=<hash>&obs=<id>
+        // (or just packet=<hash> for first observation). Fetch from API, build
+        // the same payload as the sessionStorage flow, dispatch to renderer.
+        // This makes routes shareable / bookmarkable without sessionStorage state.
+        loadRouteFromDeepLink();
       }
     });
   }
 
-  function drawPacketRoute(hopKeys, origin) {
+  async function drawPacketRoute(hopKeys, origin, opts) {
     // Defensive: origin must be an object with pubkey/lat/lon/name. A bare
     // string slips through both branches at lines below and silently no-ops
     // the originator marker (caused PR #950's bug). Coerce string → object
@@ -428,6 +586,22 @@
     if (typeof origin === 'string') {
       console.warn('drawPacketRoute: origin should be an object {pubkey,lat,lon,name}, got string. Coercing.');
       origin = { pubkey: origin };
+    }
+    opts = opts || {};
+    // #1422: use the backend's /api/resolve-hops for proper disambiguation
+    // (unique_prefix vs multi-byte vs gps_preference vs affinity scoring).
+    // Falls back to naive nodes.filter() scan if the API is unreachable.
+    let serverResolved = null;
+    try {
+      const hopList = (hopKeys || []).join(',');
+      const apiUrl = '/api/resolve-hops?hops=' + encodeURIComponent(hopList);
+      const resp = await fetch(apiUrl, { cache: 'no-cache' });
+      if (resp.ok) {
+        const json = await resp.json();
+        serverResolved = json && json.resolved ? json.resolved : null;
+      }
+    } catch (e) {
+      console.warn('resolve-hops API call failed, falling back to local nodes scan', e);
     }
     // Hide default markers so only the route is visible
     if (markerLayer) map.removeLayer(markerLayer);
@@ -447,26 +621,58 @@
         if (markerLayer) map.addLayer(markerLayer);
         if (clusterGroup) map.addLayer(clusterGroup);
         map.removeControl(closeBtn);
+        var container = map.getContainer();
+        var legend = container.querySelector('.mc-route-legend');
+        if (legend) legend.remove();
+        var ctx = container.querySelector('.mc-route-context-label');
+        if (ctx) ctx.remove();
       });
       return div;
     };
     closeBtn.addTo(map);
 
-    // Resolve hop short hashes to node positions with geographic disambiguation
+    // Resolve hop short hashes to node positions with geographic disambiguation.
+    // Unresolvable hops (no matching node) become {resolved:false} sentinels
+    // so the modern renderer (#1374) can render dashed-gray placeholders + a
+    // "X of N hops resolved" badge instead of silently dropping them.
+    //
+    // #1418/#1422: PREFER serverResolved from /api/resolve-hops which does
+    //   - unique_prefix matching (uses multi-byte adverts to disambiguate 1-byte hops)
+    //   - gps_preference (skips nodes with lat=0 sentinel)
+    //   - affinity scoring (neighbor-graph aware)
+    // Fall back to a naive local nodes.filter() scan when the API failed or
+    // the hop wasn't in the server response. When a node MATCHES by
+    // prefix/pubkey but has no GPS coords, we still want its name/role/pubkey
+    // for the sidebar — flag it as {resolved:false, gpsless:true} so the
+    // renderer can label it "📍 no GPS" instead of "unresolved prefix".
     const raw = hopKeys.map(hop => {
-      const hopLower = hop.toLowerCase();
-      const candidates = nodes.filter(n => {
-        const pk = n.public_key.toLowerCase();
-        return (pk === hopLower || pk.startsWith(hopLower) || hopLower.startsWith(pk)) &&
-          n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0);
-      });
-      if (candidates.length === 1) {
-        const c = candidates[0];
-        return { lat: c.lat, lon: c.lon, name: c.name || hop.slice(0,8), pubkey: c.public_key, role: c.role, resolved: true };
-      } else if (candidates.length > 1) {
-        return { name: hop.slice(0,8), resolved: false, candidates };
+      const hopLower = String(hop).toLowerCase();
+      // Try server resolution first
+      const srv = serverResolved && (serverResolved[hop] || serverResolved[hopLower] || serverResolved[hop.toUpperCase()]);
+      if (srv && srv.pubkey) {
+        const c = srv.candidates && srv.candidates[0];
+        if (c && c.lat != null && c.lon != null && !(c.lat === 0 && c.lon === 0)) {
+          return { lat: c.lat, lon: c.lon, name: srv.name || c.name || hop.slice(0,8), pubkey: srv.pubkey, role: c.role, resolved: true };
+        }
+        // Server resolved but node has no usable GPS
+        return { name: srv.name || hop.slice(0,8), pubkey: srv.pubkey, role: (c && c.role) || null, resolved: false, gpsless: true };
       }
-      return null;
+      // Fallback: naive local scan (kept for resilience when API is down).
+      const allMatches = nodes.filter(n => {
+        const pk = n.public_key.toLowerCase();
+        return (pk === hopLower || pk.startsWith(hopLower) || hopLower.startsWith(pk));
+      });
+      const withGps = allMatches.filter(n => n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0));
+      if (withGps.length === 1) {
+        const c = withGps[0];
+        return { lat: c.lat, lon: c.lon, name: c.name || hop.slice(0,8), pubkey: c.public_key, role: c.role, resolved: true };
+      } else if (withGps.length > 1) {
+        return { name: hop.slice(0,8), pubkey: hop, resolved: false, candidates: withGps };
+      } else if (allMatches.length >= 1) {
+        const c = allMatches[0];
+        return { name: c.name || hop.slice(0,8), pubkey: c.public_key, role: c.role, resolved: false, gpsless: true };
+      }
+      return { name: String(hop).slice(0, 8), pubkey: hop, resolved: false };
     });
 
     // Disambiguate: pick candidate closest to center of already-resolved hops
@@ -487,92 +693,507 @@
       }
     }
 
-    const positions = raw.filter(h => h && h.resolved);
+    const positions = raw.filter(h => h != null);
 
     // Resolve and prepend origin node
     if (origin) {
       let originPos = null;
-      if (origin.lat != null && origin.lon != null) {
-        originPos = { lat: origin.lat, lon: origin.lon, name: origin.name || 'Sender', pubkey: origin.pubkey, isOrigin: true };
+      const originHasRealGps = (lat, lon) => lat != null && lon != null && !(lat === 0 && lon === 0);
+      if (originHasRealGps(origin.lat, origin.lon)) {
+        originPos = { lat: origin.lat, lon: origin.lon, name: origin.name || 'Sender', pubkey: origin.pubkey, role: origin.role || 'companion', resolved: true, isOrigin: true, _fromPayload: true };
       } else if (origin.pubkey) {
         const pk = origin.pubkey.toLowerCase();
         const match = nodes.find(n => n.public_key.toLowerCase() === pk || n.public_key.toLowerCase().startsWith(pk));
-        if (match && match.lat != null && match.lon != null) {
-          originPos = { lat: match.lat, lon: match.lon, name: origin.name || match.name || 'Sender', pubkey: match.public_key, role: match.role, isOrigin: true };
+        if (match) {
+          if (originHasRealGps(match.lat, match.lon)) {
+            originPos = { lat: match.lat, lon: match.lon, name: origin.name || match.name || 'Sender', pubkey: match.public_key, role: match.role || 'companion', resolved: true, isOrigin: true, _fromPayload: true };
+          } else {
+            originPos = { name: origin.name || match.name || 'Sender', pubkey: match.public_key, role: match.role || 'companion', resolved: false, gpsless: true, isOrigin: true, _fromPayload: true };
+          }
         }
       }
       if (originPos) positions.unshift(originPos);
     }
 
-    if (positions.length < 1) return;
-
-    const coords = positions.map(p => [p.lat, p.lon]);
-
-    if (positions.length >= 2) {
-      L.polyline(coords, {
-        color: '#f59e0b', weight: 3, opacity: 0.8, dashArray: '8 4'
-      }).addTo(routeLayer);
+    // #1418 Phase D: append destination (recipient from decoded.destHash) so
+    // the route view shows: sender → [intermediate hops] → recipient.
+    // GPS-sanity: a lat=0,lon=0 sentinel or null coords means "no real GPS"
+    // — show the node in the sidebar as gpsless rather than drawing it at
+    // (0,0) which would force fitBounds to span the visible route → Africa.
+    // _fromPayload: true so the renderer can visually mark these as "from
+    // payload" (different source-of-truth than path hops).
+    if (opts.destination && opts.destination.pubkey) {
+      const dpk = opts.destination.pubkey.toLowerCase();
+      const dmatch = nodes.find(n => n.public_key.toLowerCase() === dpk || n.public_key.toLowerCase().startsWith(dpk));
+      if (dmatch) {
+        const hasGps = dmatch.lat != null && dmatch.lon != null && !(dmatch.lat === 0 && dmatch.lon === 0);
+        if (hasGps) {
+          positions.push({ lat: dmatch.lat, lon: dmatch.lon, name: opts.destination.name || dmatch.name || 'Recipient', pubkey: dmatch.public_key, role: dmatch.role || 'companion', resolved: true, _fromPayload: true });
+        } else {
+          positions.push({ name: opts.destination.name || dmatch.name || 'Recipient', pubkey: dmatch.public_key, role: dmatch.role || 'companion', resolved: false, gpsless: true, _fromPayload: true });
+        }
+      }
     }
 
-    // Add numbered markers at each hop
-    var labelItems = [];
-    positions.forEach((p, i) => {
-      const isOrigin = i === 0 && p.isOrigin;
-      const isLast = i === positions.length - 1 && positions.length > 1;
-      const color = isOrigin ? '#06b6d4' : isLast ? (getComputedStyle(document.documentElement).getPropertyValue('--status-red').trim() || '#ef4444') : i === 0 ? (getComputedStyle(document.documentElement).getPropertyValue('--status-green').trim() || '#22c55e') : '#f59e0b';
-      const radius = isOrigin ? 14 : 10;
-      const label = isOrigin ? 'Sender' : isLast ? 'Last Hop' : `Hop ${isOrigin ? i : i}`;
+    if (positions.length < 1) return;
+    // Mark final hop as destination so the renderer applies the dest glyph.
+    positions[positions.length - 1].isDest = true;
 
-      if (isOrigin) {
-        L.circleMarker([p.lat, p.lon], {
-          radius: radius + 4, fillColor: 'transparent', fillOpacity: 0, color: '#06b6d4', weight: 2, opacity: 0.6
-        }).addTo(routeLayer);
-      }
+    // Hand off to sequence-primary sequence-primary renderer (#1418), falling
+    // back to the legacy role-aware MeshRoute (#1374), then to the minimal
+    // polyline (should never run in production).
+    if (window.MeshRouteView && typeof window.MeshRouteView.render === 'function') {
+      window.MeshRouteView.render(map, routeLayer, positions, {
+        timestamp: opts.timestamp || Date.now(),
+        packetHash: opts.packetHash || null,
+        observationId: opts.observationId || null,
+        packetContext: opts.packetContext || null
+      });
+      return;
+    }
+    if (window.MeshRoute && typeof window.MeshRoute.render === 'function') {
+      window.MeshRoute.render(map, routeLayer, positions, {
+        timestamp: opts.timestamp || Date.now()
+      });
+      return;
+    }
 
-      const marker = L.circleMarker([p.lat, p.lon], {
-        radius: radius, fillColor: color,
-        fillOpacity: 0.9, color: '#fff', weight: 2
-      }).addTo(routeLayer);
-
-      const popupHtml = `<div style="font-size:12px;min-width:160px">
-        <div style="font-weight:700;margin-bottom:4px">${label}: ${safeEsc(p.name)}</div>
-        <div style="color:#9ca3af;font-size:11px;margin-bottom:4px">${p.role || 'unknown'}</div>
-        <div style="font-family:monospace;font-size:10px;color:#6b7280;margin-bottom:6px;word-break:break-all">${safeEsc(p.pubkey || '')}</div>
-        <div style="font-size:11px;color:#9ca3af">${p.lat.toFixed(4)}, ${p.lon.toFixed(4)}</div>
-        ${p.pubkey ? `<div style="margin-top:6px"><a href="#/nodes/${p.pubkey}" style="color:var(--accent);font-size:11px">View Node →</a></div>` : ''}
-      </div>`;
-      marker.bindPopup(popupHtml, { className: 'route-popup' });
-
-      labelItems.push({ latLng: L.latLng(p.lat, p.lon), isLabel: true, text: `${i + 1}. ${p.name}` });
-    });
-
-    // Deconflict labels so overlapping hop names spread out
-    deconflictLabels(labelItems, map);
-    labelItems.forEach(function (m) {
-      var pos = m.adjustedLatLng || m.latLng;
-      var icon = L.divIcon({ className: 'route-tooltip', html: m.text, iconSize: [null, null], iconAnchor: [0, 0] });
-      L.marker(pos, { icon: icon, interactive: false }).addTo(routeLayer);
-      if (m.offset > 2) {
-        L.polyline([m.latLng, pos], { weight: 1, color: '#475569', opacity: 0.5, dashArray: '3 3' }).addTo(routeLayer);
-      }
-    });
-
-    // Fit map to route
+    // ── Legacy fallback (kept tiny — should never run in production) ─────
+    const coords = positions.filter(p => p.lat != null).map(p => [p.lat, p.lon]);
     if (coords.length >= 2) {
+      L.polyline(coords, { color: '#f59e0b', weight: 3, opacity: 0.8, dashArray: '8 4' }).addTo(routeLayer);
       map.fitBounds(L.latLngBounds(coords).pad(0.3));
-    } else {
+    } else if (coords.length === 1) {
       map.setView(coords[0], 13);
     }
   }
 
+  // #1418 Phase C — multi-path renderer. Accepts an array of paths (each =
+  // {path: [hopKeys], observer, snr, rssi}), aggregates into canonical hops +
+  // per-edge observer-count (for stroke-width weighting), and dispatches to
+  // the sequence renderer with multi-path metadata. Falls back to single-path
+  // drawPacketRoute when only one observation is provided.
+  //
+  // opts.canonicalPath (optional): use this exact hop sequence as the canonical
+  // spine — i.e. the observation the operator selected. Without it, longest-path
+  // wins, which can show a totally different route than the user clicked.
+  async function drawPacketRouteMulti(paths, origin, opts) {
+    opts = opts || {};
+    if (typeof origin === 'string') origin = { pubkey: origin };
+    if (!Array.isArray(paths) || paths.length === 0) return;
+    if (paths.length === 1) {
+      return drawPacketRoute(paths[0].path || [], origin, opts);
+    }
+
+    // Pick canonical: prefer caller-supplied (operator's chosen observation),
+    // else fall back to longest path as the spine.
+    var canonicalPath;
+    if (opts.canonicalPath && Array.isArray(opts.canonicalPath) && opts.canonicalPath.length) {
+      canonicalPath = opts.canonicalPath;
+    } else {
+      const sortedByLen = paths.slice().sort((a, b) => (b.path || []).length - (a.path || []).length);
+      canonicalPath = sortedByLen[0].path || [];
+    }
+    const totalObservers = paths.length;
+
+    // Count hop & edge occurrences across all paths.
+    const hopCounts = {};
+    const edgeCounts = {};
+    paths.forEach(p => {
+      const hops = p.path || [];
+      hops.forEach(h => { hopCounts[h] = (hopCounts[h] || 0) + 1; });
+      for (let i = 0; i < hops.length - 1; i++) {
+        const key = hops[i] + '\u2192' + hops[i + 1];
+        edgeCounts[key] = (edgeCounts[key] || 0) + 1;
+      }
+    });
+
+    // Resolve canonical hops via /api/resolve-hops + naive fallback.
+    let serverResolved = null;
+    try {
+      const apiUrl = '/api/resolve-hops?hops=' + encodeURIComponent(canonicalPath.join(','));
+      const resp = await fetch(apiUrl, { cache: 'no-cache' });
+      if (resp.ok) {
+        const json = await resp.json();
+        serverResolved = json && json.resolved ? json.resolved : null;
+      }
+    } catch (e) {}
+
+    const raw = canonicalPath.map(hop => {
+      const hopLower = String(hop).toLowerCase();
+      const srv = serverResolved && (serverResolved[hop] || serverResolved[hopLower] || serverResolved[hop.toUpperCase()]);
+      // hopCounts is keyed on the SHORT prefix from observation paths (e.g. "37"),
+      // but canonicalPath may carry full pubkeys when the operator's selected
+      // observation went through the resolver. Compute hop coverage by checking
+      // EVERY path[]: a hop in canonicalPath is "covered" by a path if the path
+      // contains an entry that is either an exact match OR a prefix of the hop's
+      // full pubkey.
+      let coverage = 0;
+      const hopFullKey = (srv && srv.pubkey) ? srv.pubkey.toLowerCase() : hopLower;
+      paths.forEach(pth => {
+        const phops = (pth.path || []).map(h => String(h).toLowerCase());
+        const matches = phops.some(ph => ph === hopFullKey || hopFullKey.startsWith(ph) || ph.startsWith(hopFullKey));
+        if (matches) coverage++;
+      });
+      const obsInfo = { observerCount: coverage || (hopCounts[hop] || 1), observerTotal: totalObservers };
+      if (srv && srv.pubkey) {
+        const c = srv.candidates && srv.candidates[0];
+        if (c && c.lat != null && c.lon != null && !(c.lat === 0 && c.lon === 0)) {
+          return Object.assign({ lat: c.lat, lon: c.lon, name: srv.name || c.name || hop.slice(0,8), pubkey: srv.pubkey, role: c.role, resolved: true }, obsInfo);
+        }
+        return Object.assign({ name: srv.name || hop.slice(0,8), pubkey: srv.pubkey, role: (c && c.role) || null, resolved: false, gpsless: true }, obsInfo);
+      }
+      const allMatches = nodes.filter(n => {
+        const pk = n.public_key.toLowerCase();
+        return (pk === hopLower || pk.startsWith(hopLower) || hopLower.startsWith(pk));
+      });
+      const withGps = allMatches.filter(n => n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0));
+      if (withGps.length >= 1) {
+        const c = withGps[0];
+        return Object.assign({ lat: c.lat, lon: c.lon, name: c.name || hop.slice(0,8), pubkey: c.public_key, role: c.role, resolved: true }, obsInfo);
+      }
+      if (allMatches.length >= 1) {
+        const c = allMatches[0];
+        return Object.assign({ name: c.name || hop.slice(0,8), pubkey: c.public_key, role: c.role, resolved: false, gpsless: true }, obsInfo);
+      }
+      return Object.assign({ name: String(hop).slice(0,8), pubkey: hop, resolved: false }, obsInfo);
+    });
+
+    if (raw.length < 1) return;
+    if (origin && origin.pubkey) {
+      const op = nodes.find(n => n.public_key.toLowerCase() === origin.pubkey.toLowerCase() ||
+                                  n.public_key.toLowerCase().startsWith(origin.pubkey.toLowerCase()));
+      if (op) {
+        const hasGps = op.lat != null && op.lon != null && !(op.lat === 0 && op.lon === 0);
+        if (hasGps) {
+          raw.unshift({ lat: op.lat, lon: op.lon, name: origin.name || op.name || 'Sender', pubkey: op.public_key, role: op.role || 'companion', resolved: true, isOrigin: true, observerCount: totalObservers, observerTotal: totalObservers });
+        } else {
+          raw.unshift({ name: origin.name || op.name || 'Sender', pubkey: op.public_key, role: op.role || 'companion', resolved: false, gpsless: true, isOrigin: true, observerCount: totalObservers, observerTotal: totalObservers });
+        }
+      } else if (origin.name) {
+        raw.unshift({ name: origin.name, pubkey: origin.pubkey, role: 'companion', resolved: false, isOrigin: true, observerCount: totalObservers, observerTotal: totalObservers });
+      }
+    }
+    // #1418 Phase D: append destination (recipient from decoded.destHash) so
+    // the route view shows: sender → [intermediate hops] → recipient.
+    // GPS-sanity: a lat=0,lon=0 sentinel or null coords means "no real GPS"
+    // — show the node in the sidebar as gpsless rather than drawing it at
+    // (0,0) which would force fitBounds to span SF→Africa.
+    if (opts.destination && opts.destination.pubkey) {
+      const dp = nodes.find(n => n.public_key.toLowerCase() === opts.destination.pubkey.toLowerCase() ||
+                                  n.public_key.toLowerCase().startsWith(opts.destination.pubkey.toLowerCase()));
+      if (dp) {
+        const hasGps = dp.lat != null && dp.lon != null && !(dp.lat === 0 && dp.lon === 0);
+        if (hasGps) {
+          raw.push({ lat: dp.lat, lon: dp.lon, name: opts.destination.name || dp.name || 'Recipient', pubkey: dp.public_key, role: dp.role || 'companion', resolved: true, observerCount: totalObservers, observerTotal: totalObservers });
+        } else {
+          raw.push({ name: opts.destination.name || dp.name || 'Recipient', pubkey: dp.public_key, role: dp.role || 'companion', resolved: false, gpsless: true, observerCount: totalObservers, observerTotal: totalObservers });
+        }
+      }
+    }
+    raw[raw.length - 1].isDest = true;
+    if (raw[0]) raw[0].isOrigin = true;
+
+    if (routeLayer) routeLayer.clearLayers();
+
+    if (window.MeshRouteView && typeof window.MeshRouteView.render === 'function') {
+      window.MeshRouteView.render(map, routeLayer, raw, {
+        timestamp: opts.timestamp || Date.now(),
+        multiPath: true,
+        totalObservers: totalObservers,
+        edgeCounts: edgeCounts,
+        packetHash: opts.packetHash || null,
+        observationId: opts.observationId || null,
+        allPaths: paths,
+        packetContext: opts.packetContext || null
+      });
+    }
+  }
+  window.drawPacketRouteMulti = drawPacketRouteMulti;
+
+  // #1418/#1419: deep-link loader. Reads URL params
+  //   #/map?packet=<hash>&obs=<observation_id>
+  // fetches the packet+observations from /api/packets/<hash>, picks the
+  // selected observation as canonical, and dispatches the same payload that
+  // the packets-page 'View on map' button would have set in sessionStorage.
+  // Without an obs param, the first observation is used.
+  async function loadRouteFromDeepLink() {
+    try {
+      const hash = location.hash || '';
+      const qs = hash.split('?')[1];
+      if (!qs) return;
+      const params = new URLSearchParams(qs);
+      const packetHash = params.get('packet');
+      const obsId = params.get('obs');
+      if (!packetHash) return;
+      // Wait for nodes to load (drawPacketRoute / Multi rely on `nodes` array
+      // for the local-fallback resolver).
+      if (!nodes || !nodes.length) {
+        await new Promise(r => setTimeout(r, 600));
+      }
+      const resp = await fetch('/api/packets/' + encodeURIComponent(packetHash));
+      if (!resp.ok) {
+        console.warn('[deep-link] /api/packets/' + packetHash + ' returned ' + resp.status);
+        return;
+      }
+      const data = await resp.json();
+      const pkt = data.packet || data;
+      const observations = data.observations || pkt.observations || [];
+      if (!observations.length) return;
+      // Pick the user-chosen observation by id, fall back to first
+      let chosen = null;
+      if (obsId) chosen = observations.find(o => String(o.id) === String(obsId));
+      if (!chosen) chosen = observations[0];
+      // Parse decoded for src/dst.
+      // Try observation first, fall back to packet-level decoded_json (GRP_TXT
+      // / TRACE packets often have channel + content at the packet level, not
+      // per-observation).
+      let decoded = {};
+      try {
+        const obsDec = JSON.parse(chosen.decoded_json || '{}');
+        const pktDec = JSON.parse(pkt.decoded_json || '{}');
+        decoded = Object.keys(obsDec).length ? obsDec : pktDec;
+        // If observation has some fields but missing channel/text, merge from packet.
+        if (decoded === obsDec && pktDec.channel) {
+          decoded = Object.assign({}, pktDec, obsDec);
+        }
+      } catch (_) {}
+      const origin = {};
+      if (decoded.pubKey) origin.pubkey = decoded.pubKey;
+      else if (decoded.srcHash) origin.pubkey = decoded.srcHash;
+      if (decoded.adName || decoded.name) origin.name = decoded.adName || decoded.name;
+      const destination = decoded.destHash ? { pubkey: decoded.destHash } : null;
+      // Resolve the chosen observation's hops (canonical path).
+      // Priority: 1) server-side `resolved_path` (authoritative, eyeball-
+      // validated against packet detail), 2) client-side HopResolver (used
+      // by packets.js — does observer-IATA-aware geographic disambiguation),
+      // 3) raw prefixes (worst case, leaves naive lookup to drawPacketRoute).
+      let chosenPath = [];
+      let rawHops = [];
+      try { rawHops = JSON.parse(chosen.path_json || '[]'); } catch (_) {}
+      let resolvedHops = null;
+      try {
+        if (chosen.resolved_path) {
+          resolvedHops = typeof chosen.resolved_path === 'string' ? JSON.parse(chosen.resolved_path) : chosen.resolved_path;
+        }
+      } catch (_) {}
+      if (Array.isArray(resolvedHops) && resolvedHops.length === rawHops.length) {
+        chosenPath = rawHops.map((h, i) => resolvedHops[i] || h);
+      } else if (window.HopResolver && typeof window.HopResolver.resolve === 'function' && rawHops.length) {
+        // Use the SAME resolver the packets page uses, so route view and
+        // packet detail agree on hop identities.
+        try {
+          // Sender + observer hints help disambiguation
+          const senderLat = decoded.lat || decoded.latitude || null;
+          const senderLon = decoded.lon || decoded.longitude || null;
+          let obsLat = null, obsLon = null;
+          // Try to find observer's coords for geographic affinity scoring
+          if (chosen.observer_id && Array.isArray(nodes)) {
+            const obs = nodes.find(n => (n.public_key || '').toLowerCase() === String(chosen.observer_id).toLowerCase());
+            if (obs && obs.lat != null && obs.lon != null) { obsLat = obs.lat; obsLon = obs.lon; }
+          }
+          // HopResolver.init may already have been done by packets.js; if not,
+          // do a minimal init from window data we have.
+          if (!window.HopResolver.ready || !window.HopResolver.ready()) {
+            try {
+              window.HopResolver.init(nodes || [], { observers: [], iataCoords: {} });
+            } catch (_) {}
+          }
+          const resolveResult = window.HopResolver.resolve(rawHops, senderLat, senderLon, obsLat, obsLon, chosen.observer_id);
+          chosenPath = rawHops.map(h => {
+            const r = resolveResult ? resolveResult[h] : null;
+            return r && r.pubkey ? r.pubkey : h;
+          });
+        } catch (_) {
+          chosenPath = rawHops;
+        }
+      } else {
+        chosenPath = rawHops;
+      }
+      // All observation paths for multi-path stroke weighting
+      const allPaths = observations.map(o => {
+        let p = [];
+        try { p = JSON.parse(o.path_json || '[]'); } catch (_) {}
+        return { path: p, observer: o.observer_name, observer_id: o.observer_id, snr: o.snr, rssi: o.rssi };
+      }).filter(p => p.path && p.path.length > 0);
+      // #1418 Phase Y: derive packet context for the sidebar fact-list.
+      // type comes from decoded.type or pkt.payload_type. Resolve src/dst
+      // names from the nodes table when possible.
+      function resolveNameByHash(h) {
+        if (!h || !nodes || !nodes.length) return null;
+        const hL = String(h).toLowerCase();
+        const m = nodes.find(n => n.public_key.toLowerCase().startsWith(hL));
+        return m ? m.name : null;
+      }
+      // Map payload_type byte → string. Source: cmd/ingestor/decoder.go.
+      // 0=REQ, 1=RESPONSE, 2=TXT_MSG, 3=ACK, 4=ADVERT, 5=GRP_TXT,
+      // 6=GRP_DATA, 7=ANON_REQ, 8=PATH, 9=TRACE, 10=MULTIPART,
+      // 11=CONTROL, 12=RAW_CUSTOM.
+      const PAYLOAD_TYPE_MAP = {
+        0: 'REQ', 1: 'RESPONSE', 2: 'TXT_MSG', 3: 'ACK', 4: 'ADVERT',
+        5: 'GRP_TXT', 6: 'GRP_DATA', 7: 'ANON_REQ', 8: 'PATH',
+        9: 'TRACE', 10: 'MULTIPART', 11: 'CONTROL', 12: 'RAW_CUSTOM'
+      };
+      const inferredType = decoded.type || PAYLOAD_TYPE_MAP[pkt.payload_type] || 'OTHER';
+      // Try to peek at raw_hex bytes to extract src/destHash when decoded is empty.
+      // TXT_MSG/REQ/RESPONSE/ANON_REQ all have the same wire layout:
+      //   byte0=route+type, byte1=path_len, then path bytes, then destHash + srcHash + encrypted body.
+      // ANON_REQ doesn't have a srcHash byte (sender is anonymous), only destHash.
+      let inferredSrc = decoded.srcHash || null;
+      let inferredDst = decoded.destHash || null;
+      const TYPES_WITH_DST_SRC = [1, 2, 7, 8]; // RESPONSE=1, TXT_MSG=2, ANON_REQ=7, PATH=8 — all carry hashes
+      if ((!inferredSrc || !inferredDst) && chosen.raw_hex && TYPES_WITH_DST_SRC.indexOf(pkt.payload_type) >= 0) {
+        try {
+          const hex = chosen.raw_hex;
+          // MeshCore wire max for path length is 64 hops. Cap defensively:
+          // a crafted ingest packet with pathLen=200 would slice random body
+          // bytes into the srcHash/destHash UI fields. Guard before use.
+          const pathLen = parseInt(hex.slice(2, 4), 16);
+          if (!Number.isFinite(pathLen) || pathLen < 0 || pathLen > 64) {
+            throw new Error('pathLen out of range: ' + pathLen);
+          }
+          const destOff = 4 + pathLen * 2;
+          if (hex.length >= destOff + 2) {
+            inferredDst = inferredDst || hex.slice(destOff, destOff + 2).toUpperCase();
+            // ANON_REQ has no srcHash
+            if (pkt.payload_type !== 7 && hex.length >= destOff + 4) {
+              inferredSrc = inferredSrc || hex.slice(destOff + 2, destOff + 4).toUpperCase();
+            }
+          }
+        } catch (_) {}
+      }
+      // GRP_TXT: channel_hash byte sits right after path bytes in raw_hex.
+      // Layout: byte0=route+type, byte1=path_len, path bytes, channel_hash, encrypted body.
+      let inferredChannelHash = decoded.channelHashHex || null;
+      if (!inferredChannelHash && chosen.raw_hex && pkt.payload_type === 5) {
+        try {
+          const hex = chosen.raw_hex;
+          const pathLen = parseInt(hex.slice(2, 4), 16);
+          if (!Number.isFinite(pathLen) || pathLen < 0 || pathLen > 64) {
+            throw new Error('pathLen out of range: ' + pathLen);
+          }
+          const chOff = 4 + pathLen * 2;
+          if (hex.length >= chOff + 2) {
+            inferredChannelHash = hex.slice(chOff, chOff + 2).toUpperCase();
+          }
+        } catch (_) {}
+      }
+      const pktCtx = {
+        type: inferredType,
+        decoded: Object.assign({}, decoded, { srcHash: inferredSrc, destHash: inferredDst, channelHashHex: inferredChannelHash || decoded.channelHashHex }),
+        payloadType: pkt.payload_type || null,
+        srcResolvedName: inferredSrc ? resolveNameByHash(inferredSrc) : null,
+        destResolvedName: inferredDst ? resolveNameByHash(inferredDst) : null,
+        observedHops: chosenPath.length,
+        observationCount: observations.length
+      };
+      // GRP_TXT: try to resolve the channel name from /api/channels.
+      if (inferredType === 'GRP_TXT' && inferredChannelHash) {
+        try {
+          const chResp = await fetch('/api/channels?includeEncrypted=true');
+          if (chResp.ok) {
+            const chData = await chResp.json();
+            const chList = chData.channels || [];
+            const wantUp = inferredChannelHash.toUpperCase();
+            // Match by:
+            //   1) hash field starts with target (full hex hash)
+            //   2) hash == "enc_<HEX>" (no-key fallback channels)
+            //   3) name contains "0x<HEX>" (encrypted placeholder)
+            //   4) for keyed channels: compute SHA256(name)[0] === target byte
+            //      (browser SubtleCrypto — async)
+            let match = chList.find(c => {
+              const ch = String(c.hash || '').toUpperCase();
+              const nm = String(c.name || '').toUpperCase();
+              return ch.startsWith(wantUp) ||
+                     ch === 'ENC_' + wantUp ||
+                     nm.includes('0X' + wantUp);
+            });
+            // If not matched and we have SubtleCrypto, try SHA256 lookup
+            if (!match && window.crypto && window.crypto.subtle) {
+              for (const c of chList) {
+                if (c.encrypted) continue; // skip the enc_ placeholders
+                const name = c.name || '';
+                if (!name) continue;
+                try {
+                  const buf = new TextEncoder().encode(name);
+                  const hashBuf = await window.crypto.subtle.digest('SHA-256', buf);
+                  const arr = new Uint8Array(hashBuf);
+                  const byteHex = arr[0].toString(16).padStart(2, '0').toUpperCase();
+                  if (byteHex === wantUp) { match = c; break; }
+                } catch (_) {}
+              }
+            }
+            if (match) {
+              const isEnc = !!match.encrypted || /^enc_/i.test(match.hash || '');
+              pktCtx.channelName = isEnc ? ('Encrypted (0x' + inferredChannelHash + ')') : (match.name || '#' + inferredChannelHash);
+              pktCtx.channelEncrypted = isEnc;
+              if (match.lastMessage && match.lastMessage !== 'Encrypted — click to decrypt') {
+                pktCtx.channelLastMessage = match.lastMessage;
+              }
+            }
+          }
+        } catch (_) {}
+        if (!pktCtx.channelName) {
+          pktCtx.channelName = 'channel 0x' + inferredChannelHash;
+        }
+        // Fetch decrypted text for this specific packet (only if not encrypted-only)
+        if (!pktCtx.channelEncrypted) {
+          try {
+            const cleanName = (pktCtx.channelName || '').replace(/^#/, '');
+            const msgResp = await fetch('/api/channels/' + encodeURIComponent(cleanName) + '/messages?limit=10');
+            if (msgResp.ok) {
+              const msgs = await msgResp.json();
+              const m = (msgs.messages || []).find(mm => mm.packet_hash === packetHash || mm.hash === packetHash);
+              if (m && (m.text || m.plainText)) pktCtx.decryptedText = m.text || m.plainText;
+            }
+          } catch (_) {}
+        }
+      }
+      if (allPaths.length === 0) {
+        // Polish review (doshi #1423): operator clicked a ?packet=<hash> URL
+        // but every observation had an empty path. Previously this bailed
+        // silently (map stayed where it was, no message). Surface a console
+        // breadcrumb + a brief toast so the operator knows why nothing
+        // rendered.
+        console.warn('[deep-link] packet ' + packetHash + ' has no observed route data (all observations had empty path)');
+        try {
+          var toast = document.createElement('div');
+          toast.className = 'mc-rt-toast';
+          toast.setAttribute('role', 'status');
+          toast.setAttribute('aria-live', 'polite');
+          toast.style.cssText = 'position:fixed;top:80px;left:50%;transform:translateX(-50%);' +
+            'background:var(--mc-bg-secondary,#1a1a1a);color:var(--mc-text-primary,#e5e5e5);' +
+            'padding:10px 16px;border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,0.4);' +
+            'z-index:10000;font:13px/1.4 system-ui,sans-serif;max-width:80vw;text-align:center;';
+          toast.textContent = 'Packet has no observed route data.';
+          document.body.appendChild(toast);
+          setTimeout(function () { try { toast.remove(); } catch (_) {} }, 4000);
+        } catch (e) { console.warn('[deep-link] toast failed:', e); }
+        return;
+      }
+      if (allPaths.length === 1) {
+        drawPacketRoute(chosenPath, origin, { destination: destination, packetHash: packetHash, observationId: obsId, packetContext: pktCtx });
+      } else {
+        drawPacketRouteMulti(allPaths, origin, {
+          packetHash: packetHash,
+          observationId: obsId,
+          canonicalPath: chosenPath,
+          destination: destination,
+          packetContext: pktCtx
+        });
+      }
+    } catch (e) {
+      console.warn('[deep-link] route load failed', e);
+    }
+  }
+
   async function loadNodes() {
-    var loadErrEl = document.getElementById('mapLoadError');
     try {
       // Load regions from config + observed IATAs
       try { REGION_NAMES = await api('/config/regions', { ttl: 3600 }); } catch {}
 
       const aqs = AreaFilter.areaQueryString();
-      const data = await api(`/nodes?limit=10000&fields=map&lastHeard=${filters.lastHeard}${aqs}`, { ttl: CLIENT_TTL.nodeList });
+      const data = await api(`/nodes?limit=10000&lastHeard=${filters.lastHeard}${aqs}`, { ttl: CLIENT_TTL.nodeList });
       nodes = data.nodes || [];
 
       // Load observers for jump buttons + map markers
@@ -633,17 +1254,8 @@
 
       // Don't fitBounds on initial load — respect the Bay Area default or saved view
       // Only fitBounds on subsequent data refreshes if user hasn't manually panned
-
-      // Clear any error overlay from a previous failed load.
-      if (loadErrEl) { loadErrEl.style.display = 'none'; loadErrEl.innerHTML = ''; }
     } catch (e) {
       console.error('Map load error:', e);
-      // Surface a visible, retryable error — loadNodes() re-fetches and re-renders
-      // without re-running init() (which would re-create the Leaflet map).
-      if (loadErrEl) {
-        loadErrEl.style.display = '';
-        PageState.error(loadErrEl, e, loadNodes);
-      }
     } finally {
       // Always signal data-loaded — even on error — so E2E tests can proceed.
       // Otherwise an api() failure leaves the test waiting forever.
@@ -907,12 +1519,18 @@
       const pk = (node.public_key || '').toLowerCase();
       const isAlsoObserver = _observerByPubkey.has(pk);
       const useLabel = node.role === 'repeater' && filters.hashLabels;
-      // Multi-byte overlay: color repeaters by multi_byte_status
+      // #1356 V3: multi-byte status is no longer encoded by label fill color.
+      // Pass the raw status string to the label icon (it picks glyph + CSS class);
+      // marker-dot tinting (for non-label rendering) keeps a colorblind-safe hex.
+      var mbStatus = null;
       var mbColor = null;
       if (filters.multiByteOverlay && node.role === 'repeater') {
-        mbColor = MB_COLORS[node.multi_byte_status] || MB_COLORS.unknown;
+        mbStatus = node.multi_byte_status || 'unknown';
+        // Marker-dot tint (module-scope MB_MARKER_TINT) — high-luminance accent
+        // set kept in sync with --mc-mb-* CSS stripes so label + marker agree.
+        mbColor = MB_MARKER_TINT[mbStatus] || MB_MARKER_TINT.unknown;
       }
-      const icon = useLabel ? makeRepeaterLabelIcon(node, isStale, isAlsoObserver, mbColor) : makeMarkerIcon(node.role || 'companion', isStale, isAlsoObserver, mbColor);
+      const icon = useLabel ? makeRepeaterLabelIcon(node, isStale, isAlsoObserver, mbStatus) : makeMarkerIcon(node.role || 'companion', isStale, isAlsoObserver, mbColor);
       const latLng = L.latLng(node.lat, node.lon);
       allMarkers.push({ latLng, node, icon, isLabel: useLabel, popupFn: function() { return buildPopup(node); }, alt: (node.name || 'Unknown') + ' (' + (node.role || 'node') + (isAlsoObserver ? ' + observer' : '') + ')' });
     }
@@ -1148,9 +1766,9 @@
     var prefixes = raw.trim().split(/[\s,]+/).filter(function (s) { return s.length > 0; }).map(function (s) { return s.toLowerCase(); });
     var err = (window.PathInspector && window.PathInspector.validatePrefixes) ? window.PathInspector.validatePrefixes(prefixes) : null;
     if (!err && prefixes.length === 0) err = 'Enter at least one prefix.';
-    if (err) { errDiv.innerHTML = PageState.errorText(err); return; }
+    if (err) { errDiv.textContent = err; return; }
 
-    resultsDiv.innerHTML = PageState.loading('Loading paths…');
+    resultsDiv.innerHTML = '<p style="font-size:12px;">Loading...</p>';
     fetch('/api/paths/inspect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1162,12 +1780,12 @@
         return r.json();
       })
       .then(function (data) { renderMapPiResults(data, resultsDiv); })
-      .catch(function (e) { resultsDiv.innerHTML = ''; errDiv.innerHTML = PageState.errorText(e.message); });
+      .catch(function (e) { resultsDiv.innerHTML = ''; errDiv.textContent = e.message; });
   }
 
   function renderMapPiResults(data, div) {
     if (!data.candidates || data.candidates.length === 0) {
-      div.innerHTML = PageState.empty({ title: 'No candidates found' });
+      div.innerHTML = '<p style="font-size:12px;color:var(--text-muted);">No candidates found.</p>';
       return;
     }
     var html = '<table class="path-inspector-table" style="font-size:11px;width:100%;"><thead><tr><th>#</th><th>Score</th><th>Path</th><th></th></tr></thead><tbody>';
@@ -1220,15 +1838,8 @@
   }
 
   function destroy() {
-    if (typeof MapOverlays !== 'undefined') {
-      MapOverlays.destroyRouteHistory();
-      MapOverlays.destroyRadar();
-      MapOverlays.destroyWind();
-      MapOverlays.destroyMeshMapper();
-    }
     if (wsHandler) offWS(wsHandler);
     wsHandler = null;
-    if (_mapThemeObs) { _mapThemeObs.disconnect(); _mapThemeObs = null; }
     if (map) {
       map.remove();
       map = null;
@@ -1421,24 +2032,55 @@
     var total = (typeof cluster.getChildCount === 'function') ? cluster.getChildCount() : markers.length;
     var bucket = total >= 100 ? 'lg' : total >= 30 ? 'md' : 'sm';
     var roleOrder = ['repeater', 'companion', 'room', 'sensor', 'observer'];
+    // #1356 V2: pill background uses the --mc-role-* Wong palette (CSS var),
+    // pill text is the role letter (primary, monochrome-safe carrier).
+    // #1407: pill text COLOR now comes from --mc-role-X-text (set by
+    // cb-presets.js + style.css :root defaults), paired per-bg to clear
+    // WCAG 1.4.3 AA on every preset (achromat / trit needed the flip).
+    var ROLE_BG_VAR = {
+      repeater:  'var(--mc-role-repeater)',
+      companion: 'var(--mc-role-companion)',
+      room:      'var(--mc-role-room)',
+      sensor:    'var(--mc-role-sensor)',
+      observer:  'var(--mc-role-observer)',
+    };
+    var ROLE_TEXT_VAR = {
+      repeater:  'var(--mc-role-repeater-text, #1a1a1a)',
+      companion: 'var(--mc-role-companion-text, #1a1a1a)',
+      room:      'var(--mc-role-room-text, #1a1a1a)',
+      sensor:    'var(--mc-role-sensor-text, #1a1a1a)',
+      observer:  'var(--mc-role-observer-text, #1a1a1a)',
+    };
     var pillsHtml = '';
     var tooltipParts = [];
     var pillsShown = 0;
-    var palette = (typeof ROLE_COLORS !== 'undefined') ? ROLE_COLORS : {};
     for (var j = 0; j < roleOrder.length; j++) {
       var role = roleOrder[j];
       var n = counts[role] || 0;
       if (n <= 0) continue;
       tooltipParts.push(n + ' ' + role + (n === 1 ? '' : 's'));
       if (pillsShown < 4) {
-        var bg = palette[role] || '#6b7280';
-        pillsHtml += '<span class="mc-pill" style="background:' + bg + '">' + n + '</span>';
+        var bg = ROLE_BG_VAR[role] || 'var(--mc-role-companion)';
+        var fg = ROLE_TEXT_VAR[role] || 'var(--mc-role-companion-text, #1a1a1a)';
+        var letter = ROLE_LETTERS[role] || '?';
+        // #1360 follow-up: cap 4+ digit counts as "999+" to bound pill width.
+        // Defense-in-depth: .mc-pill CSS also enforces max-width + ellipsis.
+        if (n > 999) n = '999+';
+        pillsHtml += '<span class="mc-pill role-' + role + '" ' +
+                     'role="img" aria-label="' + n + ' ' + role + (n === 1 ? '' : 's') + '" ' +
+                     'style="background:' + bg + ';color:' + fg + '" ' +
+                     'title="' + n + ' ' + role + (n === 1 ? '' : 's') + '">' +
+                     letter + n + '</span>';
         pillsShown += 1;
       }
     }
-    var html = '<div class="mc-cluster mc-' + bucket + '">' +
-                 '<b class="mc-count">' + total + '</b>' +
-                 '<div class="mc-pills">' + pillsHtml + '</div>' +
+    // #1356 V1: cluster gets role="img" + an aria-label summarising the
+    // count and per-role breakdown so screen readers announce the data.
+    var ariaLabel = total + ' nodes — ' + tooltipParts.join(', ');
+    var html = '<div class="mc-cluster mc-' + bucket + '" ' +
+                 'role="img" aria-label="' + ariaLabel + '">' +
+                 '<b class="mc-count" aria-hidden="true">' + total + '</b>' +
+                 '<div class="mc-pills" aria-hidden="true">' + pillsHtml + '</div>' +
                '</div>';
     var icon = L.divIcon({
       html: html,
@@ -1448,7 +2090,7 @@
     // Stash a tooltip string for callers that want to bindTooltip (markercluster
     // does not natively pipe this through, but it's available via cluster icon
     // for E2E inspection).
-    icon._tooltip = total + ' nodes — ' + tooltipParts.join(', ');
+    icon._tooltip = ariaLabel;
     return icon;
   }
 

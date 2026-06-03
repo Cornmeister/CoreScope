@@ -85,7 +85,7 @@ const _apiCache = new Map();
 const _inflight = new Map();
 // Client-side TTLs (ms) — loaded from server config, with defaults
 const CLIENT_TTL = {
-  stats: 30000, nodeDetail: 240000, nodeHealth: 240000, nodeList: 90000,
+  stats: 10000, nodeDetail: 240000, nodeHealth: 240000, nodeList: 90000,
   bulkHealth: 300000, networkStatus: 300000, observers: 120000,
   channels: 15000, channelMessages: 10000, analyticsRF: 300000,
   analyticsTopology: 300000, analyticsChannels: 300000, analyticsHashSizes: 300000,
@@ -113,9 +113,7 @@ async function api(path, { ttl = 0, bust = false } = {}) {
   // Deduplicate in-flight requests
   if (_inflight.has(path)) return _inflight.get(path);
   const promise = (async () => {
-    // A bust is a forced/live refresh: skip the browser HTTP cache too (not just
-    // our JS cache) and signal the server it may serve near-live data.
-    const res = await fetch('/api' + path, bust ? { cache: 'no-store', headers: { 'X-Fresh': '1' } } : undefined);
+    const res = await fetch('/api' + path);
     if (!res.ok) throw new Error(`API ${res.status}: ${path}`);
     const data = await res.json();
     const ms = performance.now() - t0;
@@ -175,6 +173,21 @@ function timeAgo(iso) {
 
 function getHashParams() {
   return new URLSearchParams(location.hash.split('?')[1] || '');
+}
+
+// shouldEmbedRoute — issue #1369. Returns true when the SPA should render in
+// "embed" mode (chrome suppressed: no top-nav, no bottom-nav, no side drawer,
+// content full-bleed). Triggered by ?embed=1 in the hash query string.
+//
+// Allowlisted to /#/map and /#/channels — the two surfaces operators asked
+// for in the cross-domain embed scenario. Other pages have chrome assumptions
+// we are not committing to in embed mode (Tufte: ship narrow, expand later
+// only when there is a real ask).
+function shouldEmbedRoute(basePage, hashSearch) {
+  if (basePage !== 'map' && basePage !== 'channels') return false;
+  if (!hashSearch) return false;
+  var params = new URLSearchParams(hashSearch);
+  return params.get('embed') === '1';
 }
 
 function getDistanceUnit() {
@@ -347,34 +360,6 @@ function formatChartAxisLabel(d, shortForm) {
 function truncate(str, len) {
   if (!str) return '';
   return str.length > len ? str.slice(0, len) + '…' : str;
-}
-
-function formatEngineBadge(engine) {
-  if (!engine) return '';
-  return ` <span class="engine-badge">${engine}</span>`;
-}
-
-function formatVersionBadge(version, commit, engine, buildTime) {
-  if (!version && !commit && !engine) return '';
-  var buildAge = '';
-  if (buildTime && buildTime !== 'unknown') {
-    var age = timeAgo(buildTime);
-    if (age && age !== '—') buildAge = ' <span class="build-age">(' + age + ')</span>';
-  }
-  var port = (typeof location !== 'undefined' && location.port) || '';
-  var isProd = !port || port === '80' || port === '443';
-  var GH = 'https://github.com/Cornmeister/corescope';
-  var parts = [];
-  if (version && isProd) {
-    var vTag = version.charAt(0) === 'corn' ? version : 'corn' + version;
-    parts.push('<a href="' + GH + '" target="_blank" rel="noopener">' + vTag + '</a>');
-  }
-  if (commit && commit !== 'unknown') {
-    var short = commit.length > 7 ? commit.slice(0, 7) : commit;
-    parts.push('<a href="' + GH + '/commit/' + commit + '" target="_blank" rel="noopener">' + short + '</a>' + buildAge);
-  }
-  if (parts.length === 0) return '';
-  return ' <span class="version-badge">' + parts.join(' · ') + '</span>';
 }
 
 // --- Favorites ---
@@ -576,7 +561,6 @@ const Logo = (function () {
       if (connected) el.classList.remove('logo-disconnected');
       else el.classList.add('logo-disconnected');
     });
-    if (!connected) clearAll();
     // #1174 mesh-op review: mirror connected state onto the bottom-nav so
     // the 2px top-border indicator (see bottom-nav.css) goes red on
     // disconnect. Mesh-alive is otherwise invisible at ≤768 because
@@ -586,6 +570,7 @@ const Logo = (function () {
       if (connected) bn.classList.remove('disconnected');
       else bn.classList.add('disconnected');
     }
+    if (!connected) clearAll();
   }
   // Expose hook for E2E + customizer/devtools introspection.
   // Frozen so consumers can't replace .pulse / .setConnected from outside
@@ -617,32 +602,17 @@ const Logo = (function () {
   return api;
 })();
 
-function setLiveDot(color) {
-  const dot = document.getElementById('liveDot');
-  if (dot) dot.style.background = color;
-}
-
-function flashLiveDot() {
-  const dot = document.getElementById('liveDot');
-  if (!dot) return;
-  dot.style.background = '#fff';
-  clearTimeout(dot._flashTimer);
-  dot._flashTimer = setTimeout(() => { dot.style.background = 'var(--status-green)'; }, 120);
-}
-
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(`${proto}//${location.host}`);
-  ws.onopen = () => { Logo.setConnected(true); setLiveDot('var(--status-green)'); };
+  ws.onopen = () => Logo.setConnected(true);
   ws.onclose = () => {
     Logo.setConnected(false);
-    setLiveDot('var(--status-red)');
     setTimeout(connectWS, 3000);
   };
   ws.onerror = () => ws.close();
   ws.onmessage = (e) => {
     Logo.pulse(e);
-    flashLiveDot();
     try {
       const msg = JSON.parse(e.data);
       // Debounce cache invalidation — don't nuke on every packet
@@ -821,13 +791,10 @@ window.pullReconnect = pullReconnect;
 window.setupPullToReconnect = setupPullToReconnect;
 window.connectWS = connectWS;
 
-/* Global escapeHtml — self-contained. Must NOT delegate to window.escapeHtml:
-   this top-level declaration in a classic script IS window.escapeHtml, so a
-   delegating body would call itself and infinitely recurse. packet-helpers.js
-   defines an equivalent canonical escaper; both escape the same characters. */
+/* Global escapeHtml — used by multiple pages */
 function escapeHtml(s) {
   if (s == null) return '';
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 /* Global debounce */
@@ -861,149 +828,15 @@ const pages = {};
 
 function registerPage(name, mod) { pages[name] = mod; }
 
-// --- Lazy-loaded page bundles ---
-// Every route module except the default `home` page is loaded on first
-// navigation instead of eagerly from index.html. index.html ships only the
-// core bootstrap (router, nav, home, shared helpers) plus base Leaflet (home
-// renders mini-maps). The ~1.7 MB of route-specific JS (Chart, packets,
-// nodes, channels, analytics, live, …) is fetched per route on demand.
-//
-// Each list MUST be in execution order: dependencies first, the page module
-// (which calls registerPage) last. Shared deps (Leaflet plugins, Chart, the
-// crypto pair, filters) are listed in every bundle that needs them and are
-// deduped by src in _loadScriptOnce — already-loaded scripts (incl. the eager
-// core) are skipped, so a shared dep is fetched at most once per session.
-const lazyPageScripts = {
-  'live': [
-    'vendor/leaflet-1.9.4.js', 'vendor/leaflet.markercluster.js', 'vendor/leaflet-heat.js',
-    'packet-helpers.js', 'region-filter.js', 'area-filter.js', 'hop-resolver.js',
-    'channel-colors.js', 'channel-color-picker.js', 'map-overlays.js',
-    'geo-filter-overlay.js', 'drag-manager.js', 'live.js',
-  ],
-  'map': [
-    'vendor/leaflet-1.9.4.js', 'vendor/leaflet.markercluster.js', 'vendor/leaflet-heat.js',
-    'area-filter.js', 'map-overlays.js', 'geo-filter-overlay.js', 'map.js',
-  ],
-  'packets': [
-    'packet-helpers.js', 'region-filter.js', 'area-filter.js', 'hop-resolver.js',
-    'hop-display.js', 'table-sort.js', 'packet-filter.js', 'filter-ux.js',
-    'channel-colors.js', 'channel-color-picker.js', 'packets.js',
-  ],
-  'nodes': [
-    'vendor/leaflet-1.9.4.js', 'vendor/leaflet.markercluster.js', 'vendor/leaflet-heat.js',
-    'vendor/qrcode.js', 'region-filter.js', 'area-filter.js', 'hop-display.js',
-    'table-sort.js', 'nodes.js',
-  ],
-  'node-analytics': ['vendor/chart-4.umd.min.js', 'node-analytics.js'],
-  'channels': [
-    'vendor/qrcode.js', 'vendor/aes-ecb.js', 'vendor/sha256-hmac.js', 'region-filter.js',
-    'channel-decrypt.js', 'channel-qr.js', 'channel-colors.js', 'channel-color-picker.js',
-    'channels.js',
-  ],
-  'analytics': [
-    'vendor/leaflet-1.9.4.js', 'vendor/leaflet.markercluster.js', 'vendor/leaflet-heat.js',
-    'vendor/chart-4.umd.min.js', 'vendor/aes-ecb.js', 'vendor/sha256-hmac.js',
-    'region-filter.js', 'area-filter.js', 'hop-resolver.js', 'channel-decrypt.js',
-    'analytics.js',
-  ],
-  'observers': ['region-filter.js', 'observers.js'],
-  'observer-detail': ['vendor/chart-4.umd.min.js', 'observer-detail.js'],
-  'compare': ['compare.js'],
-  'traces': ['traces.js'],
-  'path-inspector': ['path-inspector.js'],
-  'los': [
-    'vendor/leaflet-1.9.4.js', 'vendor/leaflet.markercluster.js', 'vendor/leaflet-heat.js',
-    'vendor/chart-4.umd.min.js', 'los.js',
-  ],
-  'rf-coverage': [
-    'vendor/leaflet-1.9.4.js', 'vendor/leaflet.markercluster.js', 'vendor/leaflet-heat.js',
-    'rf-coverage.js',
-  ],
-  'mc-keygen': ['mc-keygen.js'],
-  'perf': ['vendor/chart-4.umd.min.js', 'perf.js'],
-  // packet/<id> standalone detail view is registered inside packets.js.
-  'packet-detail': [
-    'packet-helpers.js', 'region-filter.js', 'area-filter.js', 'hop-resolver.js',
-    'hop-display.js', 'table-sort.js', 'packet-filter.js', 'filter-ux.js',
-    'channel-colors.js', 'channel-color-picker.js', 'packets.js',
-  ],
-  'audio-lab': [
-    'audio.js',
-    'audio-v1-constellation.js',
-    'audio-v2-pulse.js',
-    'audio-v3-drone.js',
-    'audio-v4-chiptune.js',
-    'audio-v5-blaster.js',
-    'audio-v6-warzone.js',
-    'audio-v7-nggyu.js',
-    'audio-lab.js',
-  ],
-};
-
-// Tracks every script src already in the page so shared deps are fetched once.
-// Seeded from the eager core scripts present in the DOM at parse time (defer
-// scripts run after the full document is parsed, so all <script> tags exist).
-const _loadedScriptSrcs = (function () {
-  const set = new Set();
-  document.querySelectorAll('script[src]').forEach(function (s) {
-    const src = (s.getAttribute('src') || '').split('?')[0];
-    if (src) set.add(src);
-  });
-  return set;
-})();
-
-// Cache-bust token for lazy-loaded modules. The eager scripts in index.html are
-// loaded with ?v=__BUST__ (server-start timestamp), but lazy page modules were
-// fetched with no query — so after a deploy browsers served the stale cached
-// module for up to the 4h max-age. Reuse app.js's own ?v= so lazy modules bust
-// in lockstep with every deploy.
-const _BUST = (function () {
-  try {
-    var tag = document.querySelector('script[src*="app.js?v="]');
-    if (tag) { var m = tag.src.match(/[?&]v=([^&]+)/); if (m) return m[1]; }
-  } catch (e) {}
-  return '';
-})();
-
-function _loadScriptOnce(src) {
-  const key = src.split('?')[0];
-  if (_loadedScriptSrcs.has(key)) return Promise.resolve();
-  return new Promise(function (resolve) {
-    const s = document.createElement('script');
-    s.src = _BUST ? src + (src.indexOf('?') >= 0 ? '&' : '?') + 'v=' + _BUST : src;
-    s.async = false; // preserve insertion/execution order across the bundle
-    s.onload = function () { _loadedScriptSrcs.add(key); resolve(); };
-    s.onerror = function () { console.error('[lazy] failed to load', src); resolve(); };
-    document.head.appendChild(s);
-  });
-}
-
-const _lazyPageLoaded = new Set();
-function loadLazyPageScripts(name) {
-  if (_lazyPageLoaded.has(name)) return Promise.resolve();
-  const list = lazyPageScripts[name];
-  if (!list || !list.length) { _lazyPageLoaded.add(name); return Promise.resolve(); }
-  // Load sequentially so each dependency is ready (and has registered its
-  // global) before the next script — and the page module — executes.
-  let chain = Promise.resolve();
-  list.forEach(function (src) {
-    chain = chain.then(function () { return _loadScriptOnce(src); });
-  });
-  return chain.then(function () { _lazyPageLoaded.add(name); });
-}
-
-// Tools landing page — shows sub-menu with all tools.
+// Tools landing page — shows sub-menu with Trace and Path Inspector (spec §2.8, M1 fix).
 registerPage('tools-landing', {
   init: function (container) {
     container.innerHTML =
       '<div class="tools-landing">' +
-        '<h2>🛠️ CoreScope Tools</h2>' +
+        '<h2>Tools</h2>' +
         '<div class="tools-menu">' +
-          '<a href="#/tools/path-inspector" class="tools-card"><h3>🔍 Path Inspector</h3><p>Resolve hex prefix paths to candidate full-pubkey routes with confidence scoring.</p></a>' +
-          '<a href="#/tools/trace/" class="tools-card"><h3>📡 Trace Viewer</h3><p>View detailed packet traces by hash — see every observer, path, and signal reading.</p></a>' +
-          '<a href="#/tools/los" class="tools-card"><h3>🔭 LOS Analyzer</h3><p>Check line-of-sight between two points with terrain elevation and relay suggestions.</p></a>' +
-          '<a href="#/tools/rf-coverage" class="tools-card"><h3>📡 RF Coverage</h3><p>Compute terrain-aware LoRa coverage polygon from a transmitter position.</p></a>' +
-          '<a href="#/tools/mc-keygen" class="tools-card"><h3>🔑 MC-Keygen</h3><p>Generate and manage MeshCore keypairs for node identity.</p></a>' +
+          '<a href="#/tools/path-inspector" class="tools-card"><h3>🔍 Path Inspector</h3><p>Resolve prefix paths to candidate full-pubkey routes with confidence scoring.</p></a>' +
+          '<a href="#/tools/trace/" class="tools-card"><h3>📡 Trace Viewer</h3><p>View detailed packet traces by hash.</p></a>' +
         '</div>' +
       '</div>';
   },
@@ -1044,7 +877,7 @@ function navigate() {
     return;
   }
 
-  const hash = location.hash.replace('#/', '') || 'home';
+  const hash = location.hash.replace('#/', '') || 'packets';
   const route = hash.split('?')[0];
 
   // Handle parameterized routes: nodes/<pubkey> → nodes page + select
@@ -1071,7 +904,7 @@ function navigate() {
     basePage = 'observer-detail';
   }
 
-  // Tools sub-routing: tools/trace/<hash>, tools/path-inspector, tools/los, tools/rf-coverage, tools/mc-keygen
+  // Tools sub-routing (issue #944): tools/trace/<hash>, tools/path-inspector
   if (basePage === 'tools') {
     if (routeParam && routeParam.startsWith('trace/')) {
       basePage = 'traces';
@@ -1079,21 +912,9 @@ function navigate() {
     } else if (routeParam === 'path-inspector' || (routeParam && routeParam.startsWith('path-inspector'))) {
       basePage = 'path-inspector';
       routeParam = null;
-    } else if (routeParam === 'los') {
-      basePage = 'los';
-      routeParam = null;
-    } else if (routeParam === 'rf-coverage') {
-      basePage = 'rf-coverage';
-      routeParam = null;
-    } else if (routeParam === 'mc-keygen') {
-      basePage = 'mc-keygen';
-      routeParam = null;
     } else if (!routeParam) {
+      // Default tools landing shows menu with both entries.
       basePage = 'tools-landing';
-    } else {
-      // Unknown sub-route: fall back to tools landing
-      basePage = 'tools-landing';
-      routeParam = null;
     }
   }
   // Also support old #/traces (no sub-path) → traces page.
@@ -1103,7 +924,7 @@ function navigate() {
 
   // Update nav active state
   document.querySelectorAll('.nav-link[data-route]').forEach(el => {
-    el.classList.toggle('active', el.dataset.route === basePage || (el.dataset.route === 'tools' && (basePage === 'mc-keygen' || basePage === 'traces' || basePage === 'path-inspector' || basePage === 'tools-landing' || basePage === 'los' || basePage === 'rf-coverage')));
+    el.classList.toggle('active', el.dataset.route === basePage || (el.dataset.route === 'tools' && (basePage === 'traces' || basePage === 'path-inspector' || basePage === 'tools-landing')));
   });
   // Update "More" button to show active state if a low-priority page is selected
   var moreBtn = document.getElementById('navMoreBtn');
@@ -1111,17 +932,6 @@ function navigate() {
     var moreMenu = document.getElementById('navMoreMenu');
     var hasActiveMore = moreMenu && moreMenu.querySelector('.nav-link.active');
     moreBtn.classList.toggle('active', !!hasActiveMore);
-  }
-
-  // Lazy-loaded pages: fetch the bundle on first visit, then re-run navigate.
-  // We tear down the current page first so it stops running while we wait.
-  if (lazyPageScripts[basePage] && !pages[basePage]) {
-    if (currentPage && pages[currentPage]?.destroy) pages[currentPage].destroy();
-    currentPage = null;
-    const appEl = document.getElementById('app');
-    if (appEl) appEl.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">Loading…</div>';
-    loadLazyPageScripts(basePage).then(navigate);
-    return;
   }
 
   if (currentPage && pages[currentPage]?.destroy) {
@@ -1133,6 +943,14 @@ function navigate() {
   // Pages with fixed-height containers (maps, virtual-scroll, split-panels)
   const fixedPages = { packets: 1, nodes: 1, map: 1, live: 1, channels: 1, 'audio-lab': 1 };
   app.classList.toggle('app-fixed', basePage in fixedPages);
+
+  // Issue #1369: ?embed=1 chrome suppression for cross-domain iframe embeds.
+  // Toggles body.embed; CSS in style.css hides top-nav / bottom-nav / nav-drawer
+  // and zeroes body padding so /#/map and /#/channels render full-bleed.
+  try {
+    var hashSearch = (location.hash.split('?')[1] || '');
+    document.body.classList.toggle('embed', shouldEmbedRoute(basePage, hashSearch));
+  } catch (_) { /* DOM may be missing in some test contexts */ }
   if (pages[basePage]?.init) {
     const t0 = performance.now();
     pages[basePage].init(app, routeParam);
@@ -1176,10 +994,11 @@ window.addEventListener('DOMContentLoaded', () => {
 
   // --- Dark Mode ---
   const darkToggle = document.getElementById('darkModeToggle');
+  const darkCheckbox = document.getElementById('darkModeCheckbox');
   const savedTheme = localStorage.getItem('meshcore-theme');
   function applyTheme(theme) {
     document.documentElement.setAttribute('data-theme', theme);
-    darkToggle.textContent = theme === 'dark' ? '🌙' : '☀️';
+    if (darkCheckbox) darkCheckbox.checked = theme === 'dark';
     localStorage.setItem('meshcore-theme', theme);
     // Re-apply user theme CSS vars for the correct mode (light/dark)
     reapplyUserThemeVars(theme === 'dark');
@@ -1211,7 +1030,7 @@ window.addEventListener('DOMContentLoaded', () => {
         if (themeData[key]) root.setProperty(varMap[key], themeData[key]);
       }
       if (themeData.background) root.setProperty('--content-bg', themeData.contentBg || themeData.background);
-      if (themeData.surface1) root.setProperty('--card-bg', themeData.cardBg || themeData.surface1);
+      if (themeData.surface1) root.setProperty('--card-bg', themeData.cardBg || themeData.surface2 || themeData.surface1);
       // Nav gradient
       if (themeData.navBg) {
         var nav = document.querySelector('.top-nav');
@@ -1227,9 +1046,45 @@ window.addEventListener('DOMContentLoaded', () => {
   } else {
     applyTheme('light');
   }
-  darkToggle.addEventListener('click', () => {
-    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-    applyTheme(isDark ? 'light' : 'dark');
+  if (darkCheckbox) {
+    darkCheckbox.addEventListener('change', () => {
+      applyTheme(darkCheckbox.checked ? 'dark' : 'light');
+    });
+  } else {
+    // Fallback for button-style toggle (upstream compatibility)
+    darkToggle.addEventListener('click', () => {
+      const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+      applyTheme(isDark ? 'light' : 'dark');
+    });
+  }
+  // PR #893 follow-up: cross-tab sync — when another tab toggles theme,
+  // mirror it here without re-persisting (avoid loop). Matches the pattern
+  // used by the cb-presets storage listener below.
+  window.addEventListener('storage', function (ev) {
+    if (!ev || ev.key !== 'meshcore-theme' || !ev.newValue) return;
+    if (ev.newValue !== 'dark' && ev.newValue !== 'light') return;
+    document.documentElement.setAttribute('data-theme', ev.newValue);
+    if (darkCheckbox) darkCheckbox.checked = ev.newValue === 'dark';
+    try { reapplyUserThemeVars(ev.newValue === 'dark'); } catch (_) {}
+  });
+
+  // --- #1361 Colorblind preset bootstrap & cross-tab sync ---
+  // cb-presets.js auto-inits on module load, but body may not have existed
+  // yet (script loads in <head>); re-apply now that DOMContentLoaded fired
+  // so body[data-cb-preset] is set before first paint of map/cluster bubbles.
+  try {
+    if (window.MeshCorePresets && typeof window.MeshCorePresets.initFromStorage === 'function') {
+      window.MeshCorePresets.initFromStorage();
+    }
+  } catch (e) { console.error('[cb-preset] init failed:', e); }
+  // Cross-tab sync: storage event listener is also registered inside
+  // cb-presets.js, but we wire a redundant one here so any future refactor
+  // of the module still leaves the cross-tab guarantee intact.
+  window.addEventListener('storage', function (ev) {
+    if (!ev || ev.key !== 'meshcore-cb-preset') return;
+    if (window.MeshCorePresets && ev.newValue) {
+      window.MeshCorePresets.applyPreset(ev.newValue, { skipPersist: true });
+    }
   });
 
   // --- Hamburger Menu ---
@@ -1272,9 +1127,22 @@ window.addEventListener('DOMContentLoaded', () => {
     // only signal — if you ever need finer ordering, switch to a numeric
     // attribute (e.g. data-overflow-order="3") rather than re-shuffling
     // index in HTML.
-    const overflowQueue = allLinks.filter(a => a.dataset.priority !== 'high')
-                                  .reverse() // right-to-left
-                                  .concat(allLinks.filter(a => a.dataset.priority === 'high').reverse());
+    // #1391: ALSO exclude the currently-active link from the queue.
+    // The active pill has wider rendered width (background + padding),
+    // and acceptance for #1391 requires "Active-route pill MUST always
+    // be visible inline (never overflowed to More) at any viewport
+    // ≥768px." The queue is rebuilt on hashchange (applyNavPriority
+    // is wired to hashchange below), so the exclusion tracks the
+    // current route automatically.
+    function buildOverflowQueue() {
+      var isPinned = function(a) {
+        return a.dataset.priority === 'high' || a.classList.contains('active');
+      };
+      return allLinks.filter(a => !isPinned(a))
+                     .reverse() // right-to-left
+                     .concat(allLinks.filter(a => a.dataset.priority === 'high' && !a.classList.contains('active')).reverse());
+    }
+    var overflowQueue = buildOverflowQueue();
 
     function rebuildMoreMenu() {
       navMoreMenu.innerHTML = '';
@@ -1302,19 +1170,6 @@ window.addEventListener('DOMContentLoaded', () => {
       navMoreBtn.classList.toggle('active', !!hasActiveMore);
     }
 
-    function positionMoreMenu() {
-      if (!navMoreMenu.classList.contains('open')) return;
-      const btnRect = navMoreBtn.getBoundingClientRect();
-      const topRect = navTop.getBoundingClientRect();
-      const gutter = 8;
-      const menuW = Math.max(navMoreMenu.offsetWidth || 0, navMoreBtn.offsetWidth || 0, 160);
-      const left = Math.max(gutter, Math.min(btnRect.right - menuW, window.innerWidth - menuW - gutter));
-      navMoreMenu.style.left = left + 'px';
-      navMoreMenu.style.top = Math.max(topRect.bottom, btnRect.bottom) + 'px';
-      navMoreMenu.style.right = 'auto';
-      navMoreMenu.style.minWidth = Math.ceil(Math.max(navMoreBtn.offsetWidth, 160)) + 'px';
-    }
-
     // #1105 MINOR 1: cached intrinsic width of the More button. Captured
     // the first time `fits()` sees navMoreWrap rendered (display:flex).
     // Falls back to MORE_BTN_RESERVE_PX (a conservative initial guess
@@ -1330,9 +1185,34 @@ window.addEventListener('DOMContentLoaded', () => {
         return;
       }
       // Reset: show everything, then hide as needed.
-      navTop.classList.remove('nav-stats-collapsed');
       allLinks.forEach(a => a.classList.remove('is-overflow'));
       navMoreWrap.classList.remove('is-hidden');
+      // #1106: in the 768-1100px narrow-desktop band the CSS already
+      // hides .nav-stats and tightens .nav-link padding (see the
+      // "Nav narrow-desktop tightening" media query in style.css).
+      // The design intent of that band is "show exactly the 5 high-
+      // priority links + More". Pure measurement says everything fits
+      // (~981px needed in a 1080px viewport once nav-stats is gone),
+      // but the design contract — locked by test-nav-priority-1102-
+      // e2e.js #1105 MINOR 7 — is exact identity, not "fits". Force-
+      // collapse all non-high-priority links inside this band so the
+      // overflow menu is non-empty and the high-priority set is the
+      // only thing inline. Above 1100px the measurement loop below
+      // owns the decision (and at 2560px nothing overflows).
+      if (window.innerWidth <= 1100) {
+        allLinks.forEach(a => {
+          // #1391: never overflow the active-route pill, even in the
+          // narrow-desktop CSS branch — acceptance requires it stay
+          // inline at any viewport ≥768px. Without this guard, a
+          // non-high-priority active route (e.g. /#/perf) would be
+          // shoved into More alongside the rest.
+          if (a.dataset.priority !== 'high' && !a.classList.contains('active')) {
+            a.classList.add('is-overflow');
+          }
+        });
+        rebuildMoreMenu();
+        return;
+      }
       // Iteratively hide low-priority links until the link strip fits.
       // .top-nav has overflow:hidden and .nav-left has flex-shrink:1, so
       // an overflowing strip silently clips rather than pushing
@@ -1348,6 +1228,7 @@ window.addEventListener('DOMContentLoaded', () => {
       // navRightEl.scrollWidth measured here reflects the post-flip
       // intrinsic width — not stale pre-flip width.
       const navBrand   = document.querySelector('.nav-brand');
+      const SAFETY     = 32;
       // #1105 MINOR 1+2: read both gap values from CSS rather than a
       // shared `GUTTER = 24` constant. Today `.nav-left` (gap between
       // brand/links/more/right cells) and `.nav-links` (gap between
@@ -1356,17 +1237,6 @@ window.addEventListener('DOMContentLoaded', () => {
       // gap diverges in the future, the fit math must follow.
       const navLeftGap = parseFloat(getComputedStyle(navLeft).columnGap ||
                                     getComputedStyle(navLeft).gap || '0') || 0;
-      // #1055-revisit: .top-nav has `padding: 0 var(--gutter)` on both sides.
-      // The old formula used a fixed SAFETY=32 which is accurate at ~2560px but
-      // under-counts by ~8px at 1600px (--gutter=32px each side = 64px total vs
-      // 3×navLeftGap+32 ≈ 104px which may be less than 2×32+2×navLeftGap=112px).
-      // Compute the actual padding once per applyNavPriority call — getComputedStyle
-      // forces layout but is called only in the outer scope (not inside the loop).
-      const navTopPaddingL = parseFloat(getComputedStyle(navTop).paddingLeft)  || 0;
-      const navTopPaddingR = parseFloat(getComputedStyle(navTop).paddingRight) || 0;
-      const navPadding     = navTopPaddingL + navTopPaddingR;
-      const navTopGap = parseFloat(getComputedStyle(navTop).columnGap ||
-                                   getComputedStyle(navTop).gap || '0') || 0;
       // #1105 MINOR 1: compute the More-button reserve from its actual
       // rendered width on first measure, instead of a hard-coded 70px
       // fallback. Cached so we don't re-measure (offsetWidth is 0 when
@@ -1391,15 +1261,15 @@ window.addEventListener('DOMContentLoaded', () => {
         const moreW = liveMoreW > 0 ? liveMoreW
                     : (cachedMoreW > 0 ? cachedMoreW : MORE_BTN_RESERVE_PX);
         const rightW  = navRightEl.scrollWidth; // intrinsic, ignores clipping
-        // Layout: [navPadding/2] brand [gap] links [gap] more [top-nav gap] right [navPadding/2]
-        // .nav-left has exactly 2 internal gaps (brand→links, links→more); the 3rd
-        // navLeftGap previously used here was spurious. The top-nav flex gap is
-        // real space between nav-left and nav-right; reserving it prevents the
-        // right controls from being drawn over the More button when More exists.
-        const needed  = navPadding + brandW + navLeftGap + linkW + linksGap + navLeftGap + moreW + navTopGap + rightW;
+        const needed  = brandW + navLeftGap + linkW + linksGap + navLeftGap + moreW + navLeftGap + rightW + SAFETY;
         return needed <= window.innerWidth;
       }
       let i = 0;
+      // #1391: rebuild queue here so it reflects the CURRENT active
+      // link (hashchange wakes applyNavPriority, but the queue was
+      // captured at init-time; we need to re-evaluate which link is
+      // active on every run). Cheap — just filters allLinks twice.
+      overflowQueue = buildOverflowQueue();
       // #1311 floor: protect data-priority="high" links from being
       // dropped by the greedy fit loop. The bug was that on a non-high
       // active route (e.g. /#/perf, /#/audio-lab) at ~1101-1200px, the
@@ -1412,16 +1282,15 @@ window.addEventListener('DOMContentLoaded', () => {
       // still doesn't fit at that point, that's a layout issue (e.g.
       // shrink the active pill, drop nav-stats earlier) — never the
       // measurer's call to delete primary navigation.
+      //
+      // #1391: also break on .active — buildOverflowQueue already
+      // excludes the active link from the queue, but the break is a
+      // defensive belt for any future code that re-enqueues it.
       while (!fits() && i < overflowQueue.length) {
         if (overflowQueue[i].dataset.priority === 'high') break;
+        if (overflowQueue[i].classList.contains('active')) break;
         overflowQueue[i].classList.add('is-overflow');
         i++;
-      }
-      // If the pinned primary links still do not fit, collapse nav stats.
-      // The stats string is informational; primary navigation and utility
-      // buttons must never be overdrawn by version/build text.
-      if (!fits()) {
-        navTop.classList.add('nav-stats-collapsed');
       }
       // #1139 Bug B: floor the More menu at >=2 items. The greedy
       // fits() loop above is happy to stop after pushing exactly ONE
@@ -1438,7 +1307,7 @@ window.addEventListener('DOMContentLoaded', () => {
         // it just to satisfy the >=2 More-menu floor. A degenerate
         // 1-item dropdown is a smaller UX paper-cut than nuking a
         // primary nav link.
-        if (i < overflowQueue.length && overflowQueue[i].dataset.priority !== 'high') {
+        if (i < overflowQueue.length && overflowQueue[i].dataset.priority !== 'high' && !overflowQueue[i].classList.contains('active')) {
           overflowQueue[i].classList.add('is-overflow');
           i++;
         } else {
@@ -1465,13 +1334,6 @@ window.addEventListener('DOMContentLoaded', () => {
       if (rafId) cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(applyNavPriority);
     });
-    // Re-measure when nav-right grows (e.g. nav-stats populated after fetch).
-    if (window.ResizeObserver) {
-      new ResizeObserver(function() {
-        if (rafId) cancelAnimationFrame(rafId);
-        rafId = requestAnimationFrame(applyNavPriority);
-      }).observe(navRightEl);
-    }
     // Re-apply on route change too: the active link gets bigger padding
     // (background pill), so which links fit can shift between pages.
     window.addEventListener('hashchange', function() {
@@ -1479,19 +1341,30 @@ window.addEventListener('DOMContentLoaded', () => {
       requestAnimationFrame(applyNavPriority);
     });
 
+    // #1406: position the fixed dropdown relative to the More button on each open.
+    // Required because .nav-more-menu is position:fixed (so it escapes
+    // .nav-more-wrap's layout box and doesn't inflate the parent flex line).
+    function positionMoreMenu() {
+      var wr = navMoreWrap.getBoundingClientRect();
+      navMoreMenu.style.top = (wr.bottom + 4) + 'px';
+      navMoreMenu.style.right = (window.innerWidth - wr.right) + 'px';
+      navMoreMenu.style.left = 'auto';
+    }
     navMoreBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       const opening = !navMoreMenu.classList.contains('open');
+      if (opening) positionMoreMenu();
       navMoreMenu.classList.toggle('open');
       navMoreBtn.setAttribute('aria-expanded', String(opening));
       if (opening) {
-        positionMoreMenu();
         var firstLink = navMoreMenu.querySelector('.nav-link');
         if (firstLink) firstLink.focus();
       }
     });
-    window.addEventListener('scroll', positionMoreMenu, { passive: true });
-    window.addEventListener('resize', positionMoreMenu);
+    // Re-position on window resize while open.
+    window.addEventListener('resize', () => {
+      if (navMoreMenu.classList.contains('open')) positionMoreMenu();
+    });
   }
 
   document.addEventListener('keydown', (e) => {
@@ -1686,7 +1559,7 @@ window.addEventListener('DOMContentLoaded', () => {
       const stats = await api('/stats', { ttl: CLIENT_TTL.stats });
       const el = document.getElementById('navStats');
       if (el) {
-        el.innerHTML = `<span class="stat-val">${stats.totalPackets}</span> pkts · <span class="stat-val">${stats.totalNodes}</span> nodes · <span class="stat-val">${stats.onlineObservers}</span> obs${formatVersionBadge(stats.version, stats.commit, stats.engine, stats.buildTime)}`;
+        el.innerHTML = `<span class="stat-val">${stats.totalPackets}</span> pkts · <span class="stat-val">${stats.totalNodes}</span> nodes · <span class="stat-val">${stats.totalObservers}</span> obs`;
         el.querySelectorAll('.stat-val').forEach(s => s.classList.add('updated'));
         setTimeout(() => { el.querySelectorAll('.stat-val').forEach(s => s.classList.remove('updated')); }, 600);
         if (navPriorityFn) requestAnimationFrame(navPriorityFn);
@@ -1694,19 +1567,8 @@ window.addEventListener('DOMContentLoaded', () => {
     } catch {}
   }
   updateNavStats();
-  setInterval(updateNavStats, 30000);
-  // WS-driven refresh used to fire updateNavStats() on every packet-burst
-  // debounce — on a busy mesh that hit /api/stats 15+ times per minute.
-  // Throttle to at most once per 30s; the 30s setInterval above is the
-  // floor anyway, so this only adds an immediate refresh after a long
-  // quiet period.
-  let _navStatsLastWS = 0;
-  debouncedOnWS(function () {
-    const now = Date.now();
-    if (now - _navStatsLastWS < 30000) return;
-    _navStatsLastWS = now;
-    updateNavStats();
-  });
+  setInterval(updateNavStats, 15000);
+  debouncedOnWS(function () { updateNavStats(); });
 
   // --- Theme Customization ---
   // Fetch theme config and apply via customizer v2 pipeline
@@ -1729,14 +1591,9 @@ window.addEventListener('DOMContentLoaded', () => {
       // Fallback if customize-v2.js didn't load
       window.SITE_CONFIG = cfg;
     }
-    // Home reads SITE_CONFIG synchronously during init. On a hard refresh of
-    // #/home, the first render can beat this async config fetch; redraw once
-    // after config lands so refresh and SPA navigation use the same copy.
-    if (currentPage === 'home') navigate();
   }).catch(() => {
     window.SITE_CONFIG = { timestamps: { defaultMode: 'ago', timezone: 'local', formatPreset: 'iso', customFormat: '', allowCustomFormat: false } };
     if (window._customizerV2) window._customizerV2.init(window.SITE_CONFIG);
-    if (currentPage === 'home') navigate();
   });
 
   // Navigate immediately — don't gate data-fetching pages on cosmetic theme fetch

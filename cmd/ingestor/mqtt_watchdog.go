@@ -14,6 +14,12 @@ import (
 // shift, infrequent enough not to spam ops chat.
 const livenessHeartbeatInterval = time.Hour
 
+// forceReconnectThrottle is the minimum interval between consecutive
+// forced reconnects for the same source. One attempt per hour is generous
+// while still giving the half-open TCP detection meaningful recovery.
+// Issue #1335.
+const forceReconnectThrottle = time.Hour
+
 // LivenessKind enumerates the watchdog verdicts for a source. Edge-triggered
 // transitions use this to decide whether to emit (and what severity).
 type LivenessKind int
@@ -63,10 +69,21 @@ type SourceLivenessState struct {
 	StartedAt        int64 // atomic; unix seconds when the source was registered / last reconnected (transient-stall tracking)
 	LastAlertUnix    int64 // atomic; unix seconds of last emit (WARN or heartbeat); 0 means quiet
 	IsConnectedFn    func() bool
+	// ForceReconnectFn (#1335) is called by the watchdog when a source
+	// has been silent long enough to warrant an immediate forced
+	// reconnect (as opposed to relying on paho's built-in keepalive
+	// timeout, which can take minutes). Set by the caller that owns the
+	// paho client. May be nil if the caller does not support forced
+	// reconnect.
+	ForceReconnectFn func()
 	// AttemptCount is incremented on every TCP/TLS connection attempt. Used
 	// by ConnectionAttemptHandler to log attempt # independent of paho's
 	// internal reconnect-loop state. atomic.
 	AttemptCount int64
+	// LastForceReconnectUnix is the unix-seconds timestamp of the last
+	// forced reconnect attempt. Used to throttle repeated attempts.
+	// atomic. Issue #1335.
+	LastForceReconnectUnix int64
 }
 
 // MarkMessage records the time of a received MQTT message. Cheap; safe to
@@ -272,12 +289,23 @@ func processLivenessTransition(s *SourceLivenessState, kind LivenessKind, msg st
 			// First detection — fire WARN edge.
 			emit(msg)
 			atomic.StoreInt64(&s.LastAlertUnix, now.Unix())
+			// #1335: ONLY LivenessStalled (paho reports connected but no
+			// messages past threshold — classic half-open TCP) gets
+			// force-reconnected. LivenessNeverReceived is almost always
+			// an ACL deny / wrong channel hash — a new TCP socket won't
+			// fix it and would just churn the broker.
+			if kind == LivenessStalled {
+				maybeForceReconnect(s, now, emit)
+			}
 			return
 		}
 		// Already alerted; only re-emit on heartbeat interval to avoid log flood.
 		if now.Sub(time.Unix(lastAlert, 0)) >= livenessHeartbeatInterval {
 			emit(fmt.Sprintf("MQTT [%s] WATCHDOG heartbeat: still stalled — %s", s.Tag, msg))
 			atomic.StoreInt64(&s.LastAlertUnix, now.Unix())
+			if kind == LivenessStalled {
+				maybeForceReconnect(s, now, emit)
+			}
 		}
 	case LivenessOK:
 		if lastAlert != 0 {
@@ -292,5 +320,28 @@ func processLivenessTransition(s *SourceLivenessState, kind LivenessKind, msg st
 		// the source comes back stalled. Clearing the cooldown here
 		// would mean a flapping source spams the WARN every cycle.
 	}
+}
+
+// maybeForceReconnect invokes ForceReconnectFn IFF (a) one is wired and
+// (b) the per-source throttle window has elapsed. Issue #1335.
+func maybeForceReconnect(s *SourceLivenessState, now time.Time, emit func(...any)) {
+	if s.ForceReconnectFn == nil {
+		return
+	}
+	lastForce := atomic.LoadInt64(&s.LastForceReconnectUnix)
+	if lastForce != 0 && now.Sub(time.Unix(lastForce, 0)) < forceReconnectThrottle {
+		emit(fmt.Sprintf("MQTT [%s] WATCHDOG suppressing forced reconnect (last attempt %s ago, throttle %s)",
+			s.Tag, now.Sub(time.Unix(lastForce, 0)).Round(time.Second), forceReconnectThrottle))
+		return
+	}
+	atomic.StoreInt64(&s.LastForceReconnectUnix, now.Unix())
+	emit(fmt.Sprintf("MQTT [%s] WATCHDOG forcing reconnect (half-open TCP suspected — paho.IsConnected==true but no messages)", s.Tag))
+	// Run in a goroutine: ForceReconnectFn typically calls
+	// client.Disconnect(250) which blocks up to 250ms, then
+	// client.Connect() which can block on the connect timeout.
+	go func() {
+		s.ForceReconnectFn()
+		emit(fmt.Sprintf("MQTT [%s] WATCHDOG reconnect attempt issued", s.Tag))
+	}()
 }
 

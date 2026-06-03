@@ -579,7 +579,9 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		name, _ := msg["origin"].(string)
 		iata := parts[1]
 		meta := extractObserverMeta(msg)
-		if err := store.UpsertObserverAt(observerID, name, iata, meta, resolveRxTime(msg, tag)); err != nil {
+		// Issue #1465: observer.last_seen uses ingest time (server wall clock),
+		// never the envelope timestamp. Pass "" to let UpsertObserverAt use time.Now().
+		if err := store.UpsertObserverAt(observerID, name, iata, meta, ""); err != nil {
 			log.Printf("MQTT [%s] observer status error: %v", tag, err)
 		}
 		store.UpsertObserverSource(observerID, tag, brokerHostname(source.Broker), true) //nolint:errcheck
@@ -803,7 +805,8 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 			if mqttMsg.Region != "" {
 				effectiveRegion = mqttMsg.Region
 			}
-			if err := store.UpsertObserverAt(observerID, origin, effectiveRegion, nil, mqttMsg.Timestamp); err != nil {
+			// Issue #1465: observer.last_seen uses ingest time, not envelope rxTime.
+			if err := store.UpsertObserverAt(observerID, origin, effectiveRegion, nil, ""); err != nil {
 				log.Printf("MQTT [%s] observer upsert error: %v", tag, err)
 			}
 			store.UpsertObserverSource(observerID, tag, brokerHostname(source.Broker), false) //nolint:errcheck
@@ -851,6 +854,7 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		ingestNow := time.Now().UTC().Format(time.RFC3339)
 		rxTime := resolveRxTime(msg, tag)
 		hashInput := fmt.Sprintf("ch:%s:%s:%s", channelIdx, text, ingestNow)
+		_ = rxTime // rxTime reserved for obs.timestamp; first_seen uses ingestNow (#1370)
 		h := sha256.Sum256([]byte(hashInput))
 		hash := hex.EncodeToString(h[:])[:16]
 
@@ -890,7 +894,7 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		}
 
 		pktData := &PacketData{
-			Timestamp:    rxTime,
+			Timestamp:    ingestNow, // #1370: server ingest time, not envelope rxTime
 			ObserverID:   "companion",
 			ObserverName: "L1 Pro (BLE)",
 			SNR:          snr,
@@ -943,7 +947,7 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		decodedJSON, _ := json.Marshal(dm)
 
 		ingestNow := time.Now().UTC().Format(time.RFC3339)
-		rxTime := resolveRxTime(msg, tag)
+		_ = resolveRxTime(msg, tag) // reserved for obs.timestamp; first_seen uses ingestNow (#1370)
 		hashInput := fmt.Sprintf("dm:%s:%s", text, ingestNow)
 		h := sha256.Sum256([]byte(hashInput))
 		hash := hex.EncodeToString(h[:])[:16]
@@ -984,7 +988,7 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		}
 
 		pktData := &PacketData{
-			Timestamp:    rxTime,
+			Timestamp:    ingestNow, // #1370: server ingest time, not envelope rxTime
 			ObserverID:   "companion",
 			ObserverName: "L1 Pro (BLE)",
 			SNR:          snr,
@@ -1295,8 +1299,24 @@ func loadChannelKeys(cfg *Config, configPath string) map[string]string {
 	}
 
 	// 3. Explicit config keys (highest priority — overrides rainbow + derived)
+	// Normalize known channel display names (e.g. "public" → "Public") so the
+	// key stored in the keys map uses the canonical display name. Issue #777.
 	for k, v := range cfg.ChannelKeys {
-		keys[k] = v
+		normalized := normalizeChannelName(k)
+		if normalized != k {
+			log.Printf("[channels] Normalizing known channel key %q → %q for display", k, normalized)
+		}
+		// If the canonical form already exists (set by a higher-priority path
+		// or earlier in this map), keep it rather than overwriting.
+		if _, exists := keys[normalized]; !exists {
+			keys[normalized] = v
+		} else if normalized != k {
+			// Both "public" and "Public" in config — canonical form wins.
+			// Already set above; skip the duplicate.
+			log.Printf("[channels] Duplicate key for %q (normalized from %q): canonical form kept", normalized, k)
+		} else {
+			keys[k] = v
+		}
 	}
 
 	return keys

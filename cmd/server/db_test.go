@@ -52,7 +52,10 @@ func setupTestDB(t *testing.T) *DB {
 			noise_floor REAL,
 			inactive INTEGER DEFAULT 0,
 			last_packet_at TEXT DEFAULT NULL,
-			repeat TEXT DEFAULT NULL
+			repeat TEXT DEFAULT NULL,
+			clock_skew_seconds INTEGER DEFAULT NULL,
+			clock_skew_count_24h INTEGER DEFAULT 0,
+			clock_last_naive_at TEXT DEFAULT NULL
 		);
 
 		CREATE TABLE transmissions (
@@ -98,6 +101,9 @@ func setupTestDB(t *testing.T) *DB {
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_observer_metrics_timestamp ON observer_metrics(timestamp);
+
+		-- Composite index for efficient MAX(timestamp) correlated subquery in GetChannelMessages (#1225/#1368).
+		CREATE INDEX IF NOT EXISTS idx_observations_tx_observer_ts ON observations(transmission_id, observer_idx, timestamp);
 
 		-- Auto-populate from_pubkey for ADVERT rows so existing test fixtures
 		-- (which only set decoded_json) still attribute correctly under #1143's
@@ -1240,7 +1246,10 @@ func setupTestDBV2(t *testing.T) *DB {
 			first_seen TEXT,
 			packet_count INTEGER DEFAULT 0,
 			last_packet_at TEXT DEFAULT NULL,
-			repeat TEXT DEFAULT NULL
+			repeat TEXT DEFAULT NULL,
+			clock_skew_seconds INTEGER DEFAULT NULL,
+			clock_skew_count_24h INTEGER DEFAULT 0,
+			clock_last_naive_at TEXT DEFAULT NULL
 		);
 
 		CREATE TABLE transmissions (

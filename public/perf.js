@@ -22,6 +22,20 @@
  */
 'use strict';
 
+var GH = 'https://github.com/Cornmeister/corescope';
+
+function renderVersionCard(health) {
+  if (!health || (!health.version && !health.commit)) return '';
+  var ver = health.version && health.version !== 'unknown' ? health.version : null;
+  var sha = health.commit && health.commit !== 'unknown' ? health.commit : null;
+  if (!ver && !sha) return '';
+  var vTag = ver ? (ver.charAt(0) === 'v' ? ver : 'v' + ver) : null;
+  var parts = [];
+  if (vTag) parts.push('<a href="' + GH + '/releases/tag/' + vTag + '" target="_blank" rel="noopener">' + vTag + '</a>');
+  if (sha) parts.push('<a href="' + GH + '/commit/' + sha + '" target="_blank" rel="noopener">' + sha.slice(0, 7) + '</a>');
+  return '<div class="perf-card"><div class="perf-num perf-num--small">' + parts.join(' · ') + '</div><div class="perf-label">Version</div></div>';
+}
+
 (function () {
   let interval = null; // /api/perf poll (every 5 s — see setInterval below)
 
@@ -667,6 +681,7 @@
       (gr0 ? '<div class="perf-card"><div class="perf-num" style="color:' + cpuColor + '">' + (+gr0.cpuPercent).toFixed(1) + '%</div><div class="perf-label">CPU Usage</div></div>' : '') +
       (gr0 ? '<div class="perf-card"><div class="perf-num">' + (+gr0.totalSysMB).toFixed(0) + 'MB</div><div class="perf-label">Server RAM</div></div>' : '') +
       (server.sqlite ? '<div class="perf-card"><div class="perf-num">' + server.sqlite.dbSizeMB + 'MB</div><div class="perf-label">Dataset Size</div></div>' : '') +
+      renderVersionCard(health) +
       '</div>';
 
     // System health

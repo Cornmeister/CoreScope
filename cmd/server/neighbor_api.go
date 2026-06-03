@@ -239,6 +239,37 @@ func (s *Server) handleNeighborGraph(w http.ResponseWriter, r *http.Request) {
 	region := r.URL.Query().Get("region")
 	roleFilter := strings.ToLower(r.URL.Query().Get("role"))
 
+	// #1481 P0-1: serve the default-shape request from the atomic-pointer
+	// snapshot maintained by the background recomputer (5 min cadence).
+	// Default shape: minCount=5, minScore=0.1, no region, no role.
+	if minCount == 5 && minScore == 0.1 && region == "" && roleFilter == "" {
+		if raw, age, ok := s.loadNeighborGraphCacheBytes(); ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Cache-Age-Seconds", cacheAgeSecondsHeader(age))
+			w.Write(raw) //nolint:errcheck
+			return
+		}
+	}
+	// #1483: also serve the (minCount=1, minScore=0) shape from cache —
+	// that's what the analytics UI tab fetches so it can client-side
+	// slider over the full edge set.
+	if minCount == 1 && minScore == 0 && region == "" && roleFilter == "" {
+		if raw, age, ok := s.loadNeighborGraphCacheBytesUnfiltered(); ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Cache-Age-Seconds", cacheAgeSecondsHeader(age))
+			w.Write(raw) //nolint:errcheck
+			return
+		}
+	}
+	// Non-default queries (region filter, custom params) bypass the cache
+	// and compute on-demand via the dispatch function (supports test injection).
+	if region != "" || roleFilter != "" || minCount != 5 || minScore != 0.1 {
+		resp := s.computeNeighborGraphResponseDispatch(minCount, minScore, region, roleFilter)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp) //nolint:errcheck
+		return
+	}
+
 	graph := s.getNeighborGraph()
 	allEdges := graph.AllEdges()
 	now := time.Now()
@@ -366,6 +397,132 @@ func (s *Server) handleNeighborGraph(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+// computeNeighborGraphResponse builds the graph response for the given parameters.
+// Extracted from handleNeighborGraph so the neighbor-graph cache can reuse it
+// without an HTTP round-trip. Issue #1481 P0-1.
+func (s *Server) computeNeighborGraphResponse(minCount int, minScore float64, region, roleFilter string) NeighborGraphResponse {
+	graph := s.getNeighborGraph()
+	allEdges := graph.AllEdges()
+	now := time.Now()
+
+	var regionObs map[string]bool
+	if region != "" && s.store != nil {
+		regionObs = s.store.resolveRegionObservers(region)
+	}
+
+	nodeMap := s.buildNodeInfoMap()
+	nodeSet := make(map[string]bool)
+	var filteredEdges []GraphEdge
+	ambiguousCount := 0
+
+	for _, e := range allEdges {
+		score := e.Score(now)
+		if e.Count < minCount || score < minScore {
+			continue
+		}
+		if roleFilter != "" && nodeMap != nil {
+			aInfo, aOK := nodeMap[strings.ToLower(e.NodeA)]
+			bInfo, bOK := nodeMap[strings.ToLower(e.NodeB)]
+			aMatch := aOK && strings.EqualFold(aInfo.Role, roleFilter)
+			bMatch := bOK && strings.EqualFold(bInfo.Role, roleFilter)
+			if !aMatch && !bMatch {
+				continue
+			}
+		}
+		if regionObs != nil {
+			match := false
+			for obs := range e.Observers {
+				if regionObs[obs] {
+					match = true
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+		}
+		if s.cfg != nil && (s.cfg.IsBlacklisted(e.NodeA) || s.cfg.IsBlacklisted(e.NodeB)) {
+			continue
+		}
+		ge := GraphEdge{
+			Source:        e.NodeA,
+			Target:        e.NodeB,
+			Weight:        e.Count,
+			Score:         score,
+			Bidirectional: true,
+			Ambiguous:     e.Ambiguous,
+		}
+		if e.SNRCount > 0 {
+			avg := e.AvgSNR()
+			ge.AvgSNR = &avg
+		}
+		if e.Ambiguous {
+			ambiguousCount++
+			if e.NodeB == "" {
+				ge.Target = "prefix:" + e.Prefix
+			}
+		}
+		filteredEdges = append(filteredEdges, ge)
+		if e.NodeA != "" && !strings.HasPrefix(e.NodeA, "prefix:") {
+			nodeSet[e.NodeA] = true
+		}
+		if e.NodeB != "" && !strings.HasPrefix(e.NodeB, "prefix:") {
+			nodeSet[e.NodeB] = true
+		}
+	}
+
+	neighborCounts := make(map[string]int)
+	for _, ge := range filteredEdges {
+		neighborCounts[ge.Source]++
+		neighborCounts[ge.Target]++
+	}
+	var nodes []GraphNode
+	for pk := range nodeSet {
+		gn := GraphNode{Pubkey: pk, NeighborCount: neighborCounts[pk]}
+		if info, ok := nodeMap[strings.ToLower(pk)]; ok {
+			gn.Name = info.Name
+			gn.Role = info.Role
+		}
+		nodes = append(nodes, gn)
+	}
+	if filteredEdges == nil {
+		filteredEdges = []GraphEdge{}
+	}
+	if nodes == nil {
+		nodes = []GraphNode{}
+	}
+	avgCluster := 0.0
+	if len(nodes) > 0 {
+		avgCluster = float64(len(filteredEdges)*2) / float64(len(nodes))
+	}
+	return NeighborGraphResponse{
+		Nodes: nodes,
+		Edges: filteredEdges,
+		Stats: GraphStats{
+			TotalNodes:          len(nodes),
+			TotalEdges:          len(filteredEdges),
+			AmbiguousEdges:      ambiguousCount,
+			AvgClusterSize:      avgCluster,
+			RejectedEdgesGeoFar: atomic.LoadUint64(&graph.RejectedEdgesGeoFar),
+		},
+	}
+}
+
+// computeNeighborGraphResponseDispatch routes to the test-injected function
+// (when set) or the real implementation. Issue #1481 P0-1 + #1483.
+func (s *Server) computeNeighborGraphResponseDispatch(minCount int, minScore float64, region, roleFilter string) NeighborGraphResponse {
+	if s.computeNeighborGraphResponseFn != nil {
+		return s.computeNeighborGraphResponseFn(minCount, minScore, region, roleFilter)
+	}
+	return s.computeNeighborGraphResponse(minCount, minScore, region, roleFilter)
+}
+
+// buildDefaultNeighborGraphResponse builds the default-shape response
+// used by the neighbor-graph cache background recomputer. Issue #1481 P0-1.
+func (s *Server) buildDefaultNeighborGraphResponse() NeighborGraphResponse {
+	return s.computeNeighborGraphResponseDispatch(5, 0.1, "", "")
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────

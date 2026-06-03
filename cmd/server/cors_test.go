@@ -51,8 +51,9 @@ func TestCORS_AllowlistMatch(t *testing.T) {
 	if v := rr.Header().Get("Access-Control-Allow-Origin"); v != "https://good.example" {
 		t.Fatalf("expected origin echo, got %q", v)
 	}
-	if v := rr.Header().Get("Access-Control-Allow-Methods"); v != "GET, POST, OPTIONS" {
-		t.Fatalf("expected methods header, got %q", v)
+	// Embed contract (#1369): read-only surface — GET, HEAD, OPTIONS only.
+	if v := rr.Header().Get("Access-Control-Allow-Methods"); v != "GET, HEAD, OPTIONS" {
+		t.Fatalf("expected read-only methods header, got %q", v)
 	}
 	if v := rr.Header().Get("Access-Control-Allow-Headers"); v != "Content-Type, X-API-Key" {
 		t.Fatalf("expected headers header, got %q", v)

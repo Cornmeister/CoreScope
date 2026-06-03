@@ -29,23 +29,6 @@ function test(name, fn) {
   }
 }
 
-// --- Resilient DOM-element mock ---
-// Wraps a hand-rolled element mock in a Proxy so that accessing any DOM
-// method the mock does not define returns a harmless no-op function instead
-// of `undefined` (which would throw "x is not a function" and abort every
-// remaining test, since tests share a process with no per-test isolation).
-function proxyEl(base) {
-  return new Proxy(base, {
-    get(target, prop, receiver) {
-      if (prop in target) return Reflect.get(target, prop, receiver);
-      if (typeof prop === 'symbol') return undefined;
-      // Undefined property accessed (commonly as a method call) — return a
-      // no-op function. It is callable, and falsy enough for value checks.
-      return function () { return undefined; };
-    },
-  });
-}
-
 // --- Build a browser-like sandbox ---
 function makeSandbox() {
   const ctx = {
@@ -557,8 +540,8 @@ console.log('\n=== hop-resolver.js ===');
 
   test('resolve single unique prefix', () => {
     HR.init([
-      { public_key: 'abcdef1234567890', name: 'NodeA', lat: 37.3, lon: -122.0, role: 'repeater' },
-      { public_key: '123456abcdef0000', name: 'NodeB', lat: 37.4, lon: -122.1, role: 'repeater' },
+      { public_key: 'abcdef1234567890', name: 'NodeA', lat: 37.3, lon: -122.0 },
+      { public_key: '123456abcdef0000', name: 'NodeB', lat: 37.4, lon: -122.1 },
     ]);
     const result = HR.resolve(['ab'], null, null, null, null);
     assert.strictEqual(result['ab'].name, 'NodeA');
@@ -566,8 +549,8 @@ console.log('\n=== hop-resolver.js ===');
 
   test('resolve ambiguous prefix', () => {
     HR.init([
-      { public_key: 'abcdef1234567890', name: 'NodeA', lat: 37.3, lon: -122.0, role: 'repeater' },
-      { public_key: 'abcd001234567890', name: 'NodeC', lat: 38.0, lon: -121.0, role: 'repeater' },
+      { public_key: 'abcdef1234567890', name: 'NodeA', lat: 37.3, lon: -122.0 },
+      { public_key: 'abcd001234567890', name: 'NodeC', lat: 38.0, lon: -121.0 },
     ]);
     const result = HR.resolve(['ab'], null, null, null, null);
     assert.ok(result['ab'].ambiguous);
@@ -587,8 +570,8 @@ console.log('\n=== hop-resolver.js ===');
 
   test('geo disambiguation with origin anchor', () => {
     HR.init([
-      { public_key: 'abcdef1234567890', name: 'NearNode', lat: 37.31, lon: -122.01, role: 'repeater' },
-      { public_key: 'abcd001234567890', name: 'FarNode', lat: 50.0, lon: 10.0, role: 'repeater' },
+      { public_key: 'abcdef1234567890', name: 'NearNode', lat: 37.31, lon: -122.01 },
+      { public_key: 'abcd001234567890', name: 'FarNode', lat: 50.0, lon: 10.0 },
     ]);
     const result = HR.resolve(['ab'], 37.3, -122.0, null, null);
     // Should prefer the nearer node
@@ -598,8 +581,8 @@ console.log('\n=== hop-resolver.js ===');
   test('regional filtering with IATA', () => {
     HR.init(
       [
-        { public_key: 'abcdef1234567890', name: 'SFONode', lat: 37.6, lon: -122.4, role: 'repeater' },
-        { public_key: 'abcd001234567890', name: 'LHRNode', lat: 51.5, lon: -0.1, role: 'repeater' },
+        { public_key: 'abcdef1234567890', name: 'SFONode', lat: 37.6, lon: -122.4 },
+        { public_key: 'abcd001234567890', name: 'LHRNode', lat: 51.5, lon: -0.1 },
       ],
       {
         observers: [{ id: 'obs1', iata: 'SFO' }],
@@ -743,12 +726,12 @@ console.log('\n=== pickByAffinity neighbor-graph scoring (#874) ===');
 
   // Two nodes sharing prefix "ab", hundreds of km apart.
   // NodeSF is near San Francisco, NodeDEN is near Denver.
-  const nodeSF = { public_key: 'ab11111111111111', name: 'NodeSF', lat: 37.7, lon: -122.4, role: 'repeater' };
-  const nodeDEN = { public_key: 'ab22222222222222', name: 'NodeDEN', lat: 39.7, lon: -104.9, role: 'repeater' };
+  const nodeSF = { public_key: 'ab11111111111111', name: 'NodeSF', lat: 37.7, lon: -122.4 };
+  const nodeDEN = { public_key: 'ab22222222222222', name: 'NodeDEN', lat: 39.7, lon: -104.9 };
   // A known neighbor of NodeSF (in the graph)
-  const nodeNeighbor = { public_key: 'cc33333333333333', name: 'SFNeighbor', lat: 37.8, lon: -122.3, role: 'repeater' };
+  const nodeNeighbor = { public_key: 'cc33333333333333', name: 'SFNeighbor', lat: 37.8, lon: -122.3 };
   // Another known node near Denver
-  const nodeDenNeighbor = { public_key: 'dd44444444444444', name: 'DENNeighbor', lat: 39.8, lon: -105.0, role: 'repeater' };
+  const nodeDenNeighbor = { public_key: 'dd44444444444444', name: 'DENNeighbor', lat: 39.8, lon: -105.0 };
 
   test('#874: graph edge scoring picks correct regional candidate (SF)', () => {
     HR.init([nodeSF, nodeDEN, nodeNeighbor, nodeDenNeighbor]);
@@ -794,7 +777,7 @@ console.log('\n=== pickByAffinity neighbor-graph scoring (#874) ===');
   test('#874: centroid uses average of prev+next positions', () => {
     // Prev near SF, next near Denver → centroid is midpoint (~Nevada)
     // NodeDEN is closer to Nevada midpoint than NodeSF
-    const nodeMid = { public_key: 'ee55555555555555', name: 'MidNode', lat: 38.5, lon: -114.0, role: 'repeater' };
+    const nodeMid = { public_key: 'ee55555555555555', name: 'MidNode', lat: 38.5, lon: -114.0 };
     HR.init([nodeSF, nodeDEN, nodeNeighbor, nodeDenNeighbor, nodeMid]);
     HR.setAffinity({ edges: [] });
     // Path: SFNeighbor → [ab??] → DENNeighbor
@@ -1411,7 +1394,7 @@ console.log('\n=== nodes.js: WS handler runtime behavior ===');
     const domElements = {};
     function getEl(id) {
       if (!domElements[id]) {
-        domElements[id] = proxyEl({
+        domElements[id] = {
           id, innerHTML: '', textContent: '', value: '', scrollTop: 0,
           style: {}, dataset: {},
           classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
@@ -1419,7 +1402,7 @@ console.log('\n=== nodes.js: WS handler runtime behavior ===');
           querySelectorAll() { return []; },
           querySelector() { return null; },
           getAttribute() { return null; },
-        });
+        };
       }
       return domElements[id];
     }
@@ -1824,29 +1807,6 @@ console.log('\n=== compare.js: comparePacketSets ===');
   });
 }
 
-// ===== APP.JS: formatEngineBadge =====
-console.log('\n=== app.js: formatEngineBadge ===');
-{
-  const ctx = makeSandbox();
-  loadInCtx(ctx, 'public/roles.js');
-  loadInCtx(ctx, 'public/app.js');
-  const formatEngineBadge = ctx.formatEngineBadge;
-
-  test('returns empty string for null', () => assert.strictEqual(formatEngineBadge(null), ''));
-  test('returns empty string for undefined', () => assert.strictEqual(formatEngineBadge(undefined), ''));
-  test('returns empty string for empty string', () => assert.strictEqual(formatEngineBadge(''), ''));
-  test('returns badge span for "go"', () => {
-    const result = formatEngineBadge('go');
-    assert.ok(result.includes('engine-badge'), 'should contain engine-badge class');
-    assert.ok(result.includes('>go<'), 'should contain engine name');
-  });
-  test('returns badge span for "node"', () => {
-    const result = formatEngineBadge('node');
-    assert.ok(result.includes('engine-badge'), 'should contain engine-badge class');
-    assert.ok(result.includes('>node<'), 'should contain engine name');
-  });
-}
-
 // ===== APP.JS: computeBreakdownRanges =====
 console.log('\n=== app.js: computeBreakdownRanges ===');
 {
@@ -1992,158 +1952,6 @@ console.log('\n=== app.js: isTransportRoute + transportBadge ===');
     assert.ok(html.includes('TRANSPORT_FLOOD'), 'should contain route type name in title');
   });
   test('transportBadge(1) returns empty string', () => assert.strictEqual(transportBadge(1), ''));
-}
-
-// ===== APP.JS: formatVersionBadge =====
-console.log('\n=== app.js: formatVersionBadge ===');
-{
-  function makeBadgeSandbox(port) {
-    const ctx = makeSandbox();
-    ctx.location.port = port || '';
-    loadInCtx(ctx, 'public/roles.js');
-    loadInCtx(ctx, 'public/app.js');
-    return ctx;
-  }
-  const GH = 'https://github.com/Kpa-clawbot/corescope';
-
-  test('returns empty string when all args missing', () => {
-    const { formatVersionBadge } = makeBadgeSandbox('');
-    assert.strictEqual(formatVersionBadge(null, null, null), '');
-    assert.strictEqual(formatVersionBadge(undefined, undefined, undefined), '');
-    assert.strictEqual(formatVersionBadge('', '', ''), '');
-  });
-
-  // --- Prod tests (no port / port 80 / port 443) ---
-  test('prod: shows version + commit + engine with links', () => {
-    const { formatVersionBadge } = makeBadgeSandbox('');
-    const result = formatVersionBadge('2.6.0', 'abc1234def5678', 'node', null);
-    assert.ok(result.includes('version-badge'), 'should have version-badge class');
-    assert.ok(result.includes(`href="${GH}/releases/tag/v2.6.0"`), 'version links to release');
-    assert.ok(result.includes('>v2.6.0</a>'), 'version text has v prefix');
-    assert.ok(result.includes(`href="${GH}/commit/abc1234def5678"`), 'commit links to full hash');
-    assert.ok(result.includes('>abc1234</a>'), 'commit display is truncated to 7');
-    assert.ok(result.includes('engine-badge'), 'should show engine badge'); assert.ok(result.includes('>node<'), 'should show engine name');
-  });
-  test('prod port 80: shows version', () => {
-    const { formatVersionBadge } = makeBadgeSandbox('80');
-    const result = formatVersionBadge('2.6.0', null, 'node', null);
-    assert.ok(result.includes('>v2.6.0</a>'), 'port 80 is prod — shows version');
-  });
-  test('prod port 443: shows version', () => {
-    const { formatVersionBadge } = makeBadgeSandbox('443');
-    const result = formatVersionBadge('2.6.0', null, 'node', null);
-    assert.ok(result.includes('>v2.6.0</a>'), 'port 443 is prod — shows version');
-  });
-  test('prod: version already has v prefix', () => {
-    const { formatVersionBadge } = makeBadgeSandbox('');
-    const result = formatVersionBadge('v2.6.0', null, null, null);
-    assert.ok(result.includes('>v2.6.0</a>'), 'should not double the v prefix');
-    assert.ok(!result.includes('vv'), 'should not have vv');
-  });
-
-  // --- Staging tests (non-standard port) ---
-  test('staging: hides version, shows commit + engine', () => {
-    const { formatVersionBadge } = makeBadgeSandbox('3000');
-    const result = formatVersionBadge('2.6.0', 'abc1234def5678', 'go', null);
-    assert.ok(!result.includes('v2.6.0'), 'staging should NOT show version');
-    assert.ok(result.includes('>abc1234</a>'), 'should show commit hash');
-    assert.ok(result.includes(`href="${GH}/commit/abc1234def5678"`), 'commit is linked');
-    assert.ok(result.includes('engine-badge'), 'should show engine badge'); assert.ok(result.includes('>go<'), 'should show engine name');
-  });
-  test('staging port 81: hides version', () => {
-    const { formatVersionBadge } = makeBadgeSandbox('81');
-    const result = formatVersionBadge('2.6.0', 'abc1234', 'go', null);
-    assert.ok(!result.includes('v2.6.0'), 'port 81 is staging — no version');
-    assert.ok(result.includes('>abc1234</a>'), 'commit shown');
-  });
-
-  // --- Shared behavior ---
-  test('commit link uses full hash', () => {
-    const { formatVersionBadge } = makeBadgeSandbox('');
-    const result = formatVersionBadge(null, 'abc1234def567890123456789abcdef012345678', 'node', null);
-    assert.ok(result.includes(`href="${GH}/commit/abc1234def567890123456789abcdef012345678"`), 'link uses full hash');
-    assert.ok(result.includes('>abc1234</a>'), 'display is truncated to 7');
-  });
-  test('skips commit when "unknown"', () => {
-    const { formatVersionBadge } = makeBadgeSandbox('');
-    const result = formatVersionBadge('2.6.0', 'unknown', 'node', null);
-    assert.ok(result.includes('>v2.6.0</a>'), 'should show version');
-    assert.ok(!result.includes('unknown'), 'should not show unknown commit');
-    assert.ok(result.includes('engine-badge'), 'should show engine badge'); assert.ok(result.includes('>node<'), 'should show engine name');
-  });
-  test('skips commit when missing', () => {
-    const { formatVersionBadge } = makeBadgeSandbox('');
-    const result = formatVersionBadge('2.6.0', null, 'go', null);
-    assert.ok(result.includes('>v2.6.0</a>'), 'should show version');
-    assert.ok(result.includes('engine-badge'), 'should show engine badge'); assert.ok(result.includes('>go<'), 'should show engine name');
-  });
-  test('shows only engine when version/commit missing', () => {
-    const { formatVersionBadge } = makeBadgeSandbox('3000');
-    const result = formatVersionBadge(null, null, 'go', null);
-    assert.ok(result.includes('engine-badge'), 'should show engine badge'); assert.ok(result.includes('>go<'), 'should show engine name');
-    assert.ok(result.includes('version-badge'), 'should use version-badge class');
-  });
-  test('short commit not truncated in display', () => {
-    const { formatVersionBadge } = makeBadgeSandbox('');
-    const result = formatVersionBadge('1.0.0', 'abc1234', 'node', null);
-    assert.ok(result.includes('>abc1234</a>'), 'should show full short commit');
-  });
-  test('version only on prod', () => {
-    const { formatVersionBadge } = makeBadgeSandbox('');
-    const result = formatVersionBadge('2.6.0', null, null, null);
-    assert.ok(result.includes('>v2.6.0</a>'), 'should show version');
-    assert.ok(!result.includes('·'), 'should not have separator for single part');
-  });
-  test('staging: only engine when no commit', () => {
-    const { formatVersionBadge } = makeBadgeSandbox('8080');
-    const result = formatVersionBadge('2.6.0', null, 'go', null);
-    assert.ok(!result.includes('2.6.0'), 'no version on staging');
-    assert.ok(result.includes('engine-badge'), 'engine badge shown'); assert.ok(result.includes('>go<'), 'engine name shown');
-  });
-  test('shows build age next to commit when buildTime is valid', () => {
-    const { formatVersionBadge } = makeBadgeSandbox('');
-    const recent = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
-    const result = formatVersionBadge('2.6.0', 'abc1234def5678', 'go', recent);
-    assert.ok(result.includes('>abc1234</a>'), 'commit shown');
-    assert.ok(result.includes('build-age'), 'build age span shown');
-    assert.ok(result.includes('(3h ago)'), 'build age text shown');
-  });
-  test('does not show build age for unknown buildTime', () => {
-    const { formatVersionBadge } = makeBadgeSandbox('');
-    const result = formatVersionBadge('2.6.0', 'abc1234def5678', 'go', 'unknown');
-    assert.ok(!result.includes('build-age'), 'no build age for unknown buildTime');
-  });
-  test('does not show build age for null buildTime', () => {
-    const { formatVersionBadge } = makeBadgeSandbox('');
-    const result = formatVersionBadge('2.6.0', 'abc1234def5678', 'go', null);
-    assert.ok(!result.includes('build-age'), 'no build age for null buildTime');
-  });
-  test('does not show build age for undefined buildTime', () => {
-    const { formatVersionBadge } = makeBadgeSandbox('');
-    const result = formatVersionBadge('2.6.0', 'abc1234def5678', 'go');
-    assert.ok(!result.includes('build-age'), 'no build age for undefined buildTime');
-  });
-  test('does not show build age for invalid buildTime', () => {
-    const { formatVersionBadge } = makeBadgeSandbox('');
-    const result = formatVersionBadge('2.6.0', 'abc1234def5678', 'go', 'not-a-date');
-    assert.ok(!result.includes('build-age'), 'no build age for invalid buildTime');
-  });
-}
-
-// ===== CSS: version-badge link contrast (issue #139) =====
-console.log('\n=== style.css: version-badge link contrast ===');
-{
-  const cssContent = fs.readFileSync(__dirname + '/public/style.css', 'utf8');
-  test('version-badge a has explicit color', () => {
-    assert.ok(cssContent.includes('.version-badge a'), 'should have .version-badge a rule');
-    assert.ok(/\.version-badge a\s*\{[^}]*color:\s*var\(--nav-text-muted\)/.test(cssContent),
-      'link color should use var(--nav-text-muted)');
-  });
-  test('version-badge a has hover state', () => {
-    assert.ok(cssContent.includes('.version-badge a:hover'), 'should have .version-badge a:hover rule');
-    assert.ok(/\.version-badge a:hover\s*\{[^}]*color:\s*var\(--nav-text\)/.test(cssContent),
-      'hover color should use var(--nav-text)');
-  });
 }
 
 // ===== ANALYTICS.JS: Channel Sort =====
@@ -2529,7 +2337,7 @@ console.log('\n=== customize-v2.js: core behavior ===');
     const server = { theme: { accent: '#111111' }, home: null };
     const effective = v2.computeEffective(server, {});
     assert.ok(effective.home, 'home should not be null');
-    assert.ok(typeof effective.home.heroTitle === 'string' && effective.home.heroTitle.length > 0, 'heroTitle should be a non-empty string');
+    assert.strictEqual(effective.home.heroTitle, 'CoreScope');
     assert.ok(Array.isArray(effective.home.steps), 'steps should be an array');
     assert.ok(effective.home.steps.length > 0, 'steps should not be empty');
     assert.ok(Array.isArray(effective.home.footerLinks), 'footerLinks should be an array');
@@ -2606,7 +2414,6 @@ console.log('\n=== channels.js: shouldProcessWSMessageForRegion ===');
   ctx.atob = (s) => Buffer.from(String(s), 'base64').toString('utf8');
   ctx.crypto = { subtle: require('crypto').webcrypto.subtle }; ctx.TextEncoder = TextEncoder; ctx.TextDecoder = TextDecoder; ctx.Uint8Array = Uint8Array;
     loadInCtx(ctx, 'public/channel-decrypt.js');
-    loadInCtx(ctx, 'public/page-state.js');
     loadInCtx(ctx, 'public/channels.js');
   const shouldProcess = ctx.window._channelsShouldProcessWSMessageForRegion;
 
@@ -2651,7 +2458,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
     const dom = {};
     function makeEl(id) {
       if (dom[id]) return dom[id];
-      dom[id] = proxyEl({
+      dom[id] = {
         id,
         innerHTML: '',
         textContent: '',
@@ -2670,7 +2477,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
         setAttribute() {},
         removeAttribute() {},
         focus() {},
-      });
+      };
       return dom[id];
     }
 
@@ -2687,7 +2494,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
       innerHTML: '',
       querySelector(sel) {
         if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main') return makeEl(sel);
-        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } }, getBoundingClientRect() { return { width: 0 }; } };
+        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
         return makeEl(sel);
       },
       addEventListener() {},
@@ -2695,7 +2502,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
 
     ctx.document.getElementById = makeEl;
     ctx.document.querySelector = (sel) => {
-      if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } }, getBoundingClientRect() { return { width: 0 }; } };
+      if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
       return null;
     };
     ctx.document.querySelectorAll = () => [];
@@ -2731,9 +2538,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
 
     ctx.crypto = { subtle: require('crypto').webcrypto.subtle }; ctx.TextEncoder = TextEncoder; ctx.TextDecoder = TextDecoder; ctx.Uint8Array = Uint8Array;
     loadInCtx(ctx, 'public/channel-decrypt.js');
-    loadInCtx(ctx, 'public/page-state.js');
     loadInCtx(ctx, 'public/channels.js');
-    ctx.app = appEl;
     ctx._pageHandlers.init(appEl);
     return { ctx, dom };
   }
@@ -2777,7 +2582,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
     const dom = {};
     function makeEl(id) {
       if (dom[id]) return dom[id];
-      dom[id] = proxyEl({
+      dom[id] = {
         id,
         innerHTML: '',
         textContent: '',
@@ -2796,7 +2601,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
         setAttribute() {},
         removeAttribute() {},
         focus() {},
-      });
+      };
       return dom[id];
     }
     const headerText = { textContent: '' };
@@ -2811,7 +2616,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
       innerHTML: '',
       querySelector(sel) {
         if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main') return makeEl(sel);
-        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } }, getBoundingClientRect() { return { width: 0 }; } };
+        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
         return makeEl(sel);
       },
       addEventListener() {},
@@ -2820,7 +2625,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
     let resolver = null;
     ctx.document.getElementById = makeEl;
     ctx.document.querySelector = (sel) => {
-      if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } }, getBoundingClientRect() { return { width: 0 }; } };
+      if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
       return null;
     };
     ctx.document.querySelectorAll = () => [];
@@ -2854,9 +2659,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
 
     ctx.crypto = { subtle: require('crypto').webcrypto.subtle }; ctx.TextEncoder = TextEncoder; ctx.TextDecoder = TextDecoder; ctx.Uint8Array = Uint8Array;
     loadInCtx(ctx, 'public/channel-decrypt.js');
-    loadInCtx(ctx, 'public/page-state.js');
     loadInCtx(ctx, 'public/channels.js');
-    ctx.app = appEl;
     ctx._pageHandlers.init(appEl);
     await Promise.resolve();
     const selectPromise = ctx.window._channelsSelectChannelForTest('general');
@@ -2874,7 +2677,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
     const dom = {};
     function makeEl(id) {
       if (dom[id]) return dom[id];
-      dom[id] = proxyEl({
+      dom[id] = {
         id,
         innerHTML: '',
         textContent: '',
@@ -2893,7 +2696,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
         setAttribute() {},
         removeAttribute() {},
         focus() {},
-      });
+      };
       return dom[id];
     }
     const headerText = { textContent: '' };
@@ -2908,7 +2711,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
       innerHTML: '',
       querySelector(sel) {
         if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main') return makeEl(sel);
-        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } }, getBoundingClientRect() { return { width: 0 }; } };
+        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
         return makeEl(sel);
       },
       addEventListener() {},
@@ -2917,7 +2720,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
     let channelCall = 0;
     ctx.document.getElementById = makeEl;
     ctx.document.querySelector = (sel) => {
-      if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } }, getBoundingClientRect() { return { width: 0 }; } };
+      if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
       return null;
     };
     ctx.document.querySelectorAll = () => [];
@@ -2953,9 +2756,7 @@ console.log('\n=== channels.js: WS batch + region snapshot integration ===');
 
     ctx.crypto = { subtle: require('crypto').webcrypto.subtle }; ctx.TextEncoder = TextEncoder; ctx.TextDecoder = TextDecoder; ctx.Uint8Array = Uint8Array;
     loadInCtx(ctx, 'public/channel-decrypt.js');
-    loadInCtx(ctx, 'public/page-state.js');
     loadInCtx(ctx, 'public/channels.js');
-    ctx.app = appEl;
     ctx._pageHandlers.init(appEl);
     await Promise.resolve();
     await ctx.window._channelsSelectChannelForTest('general');
@@ -2974,7 +2775,7 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
     const dom = {};
     function makeEl(id) {
       if (dom[id]) return dom[id];
-      dom[id] = proxyEl({
+      dom[id] = {
         id,
         innerHTML: '',
         textContent: '',
@@ -2993,7 +2794,7 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
         setAttribute() {},
         removeAttribute() {},
         focus() {},
-      });
+      };
       return dom[id];
     }
     const headerText = { textContent: '' };
@@ -3008,7 +2809,7 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
       innerHTML: '',
       querySelector(sel) {
         if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main') return makeEl(sel);
-        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } }, getBoundingClientRect() { return { width: 0 }; } };
+        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
         return makeEl(sel);
       },
       addEventListener() {},
@@ -3016,7 +2817,7 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
     let apiCallPaths = [];
     ctx.document.getElementById = makeEl;
     ctx.document.querySelector = (sel) => {
-      if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } }, getBoundingClientRect() { return { width: 0 }; } };
+      if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
       return null;
     };
     ctx.document.querySelectorAll = () => [];
@@ -3057,9 +2858,7 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
 
     ctx.crypto = { subtle: require('crypto').webcrypto.subtle }; ctx.TextEncoder = TextEncoder; ctx.TextDecoder = TextDecoder; ctx.Uint8Array = Uint8Array;
     loadInCtx(ctx, 'public/channel-decrypt.js');
-    loadInCtx(ctx, 'public/page-state.js');
     loadInCtx(ctx, 'public/channels.js');
-    ctx.app = appEl;
     ctx._pageHandlers.init(appEl);
     // Wait for loadChannels() to resolve (async in init)
     for (let i = 0; i < 10; i++) await Promise.resolve();
@@ -3071,7 +2870,7 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
     // Should show lock message, NOT fetch messages API
     const msgEl = dom['chMessages'];
     assert.ok(msgEl.innerHTML.includes('🔒'), 'should show lock emoji for encrypted channel without key');
-    assert.ok(msgEl.innerHTML.includes('no key configured'), 'should mention no key configured');
+    assert.ok(msgEl.innerHTML.includes('no decryption key'), 'should mention no decryption key');
     const messageApiFetched = apiCallPaths.some(p => p.indexOf('/messages') !== -1);
     assert.ok(!messageApiFetched, 'should NOT fetch messages API for encrypted channel without key');
   });
@@ -3085,7 +2884,7 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
     const dom = {};
     function makeEl(id) {
       if (dom[id]) return dom[id];
-      dom[id] = proxyEl({
+      dom[id] = {
         id, innerHTML: '', textContent: '', value: '',
         scrollTop: 0, scrollHeight: 100, clientHeight: 80,
         style: {}, dataset: {},
@@ -3094,7 +2893,7 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
         querySelector() { return null; }, querySelectorAll() { return []; },
         getBoundingClientRect() { return { left: 0, bottom: 0, width: 0 }; },
         setAttribute() {}, removeAttribute() {}, focus() {},
-      });
+      };
       return dom[id];
     }
     const headerText = { textContent: '' };
@@ -3104,7 +2903,7 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
       innerHTML: '',
       querySelector(sel) {
         if (sel === '.ch-sidebar' || sel === '.ch-sidebar-resize' || sel === '.ch-main') return makeEl(sel);
-        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } }, getBoundingClientRect() { return { width: 0 }; } };
+        if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
         return makeEl(sel);
       },
       addEventListener() {},
@@ -3112,7 +2911,7 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
     let apiCallPaths = [];
     ctx.document.getElementById = makeEl;
     ctx.document.querySelector = (sel) => {
-      if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } }, getBoundingClientRect() { return { width: 0 }; } };
+      if (sel === '.ch-layout') return { classList: { add() {}, remove() {}, contains() { return false; } } };
       return null;
     };
     ctx.document.querySelectorAll = () => [];
@@ -3152,9 +2951,7 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
     ctx.crypto = { subtle: require('crypto').webcrypto.subtle };
     ctx.TextEncoder = TextEncoder; ctx.TextDecoder = TextDecoder; ctx.Uint8Array = Uint8Array;
     loadInCtx(ctx, 'public/channel-decrypt.js');
-    loadInCtx(ctx, 'public/page-state.js');
     loadInCtx(ctx, 'public/channels.js');
-    ctx.app = appEl;
     if (opts.storedKey) {
       ctx.ChannelDecrypt.saveKey(opts.storedKey.name, opts.storedKey.hex);
     }
@@ -3183,7 +2980,7 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
       storedKey: null,
     });
     assert.ok(r.msgHtml.includes('🔒'), 'encrypted #channel without key must show lock affordance');
-    assert.ok(r.msgHtml.includes('no key configured'), 'lock should mention no key configured');
+    assert.ok(r.msgHtml.includes('no decryption key'), 'lock should mention no decryption key');
     const messageApiFetched = r.apiCallPaths.some(p => p.indexOf('/messages') !== -1);
     assert.ok(!messageApiFetched, 'must NOT fetch /messages REST for encrypted channel without key');
   });
@@ -3194,7 +2991,7 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
       includeEncryptedChannels: [{ hash: '#private', name: '#private', messageCount: 5, lastActivity: null, encrypted: true }],
       storedKey: { name: '#private', hex: 'abcd1234abcd1234abcd1234abcd1234' },
     });
-    assert.ok(!r.msgHtml.includes('no key configured'), 'must not show no-key lock when key is stored');
+    assert.ok(!r.msgHtml.includes('no decryption key'), 'must not show no-key lock when key is stored');
     // Decrypt path either renders something or shows decrypt-specific empty/wrong-key state — never the no-key lock.
   });
 }
@@ -4346,9 +4143,9 @@ console.log('\n=== app.js: payloadTypeColor ===');
   test('payloadTypeColor(99) = unknown', () => assert.strictEqual(payloadTypeColor(99), 'unknown'));
   test('payloadTypeColor(null) = unknown', () => assert.strictEqual(payloadTypeColor(null), 'unknown'));
   test('payloadTypeColor(undefined) = unknown', () => assert.strictEqual(payloadTypeColor(undefined), 'unknown'));
-  test('payloadTypeColor(6) = grp-data', () => assert.strictEqual(payloadTypeColor(6), 'grp-data'));
+  test('payloadTypeColor(6) = unknown (no mapping for 6)', () => assert.strictEqual(payloadTypeColor(6), 'unknown'));
   test('all defined payload types return a non-unknown string', () => {
-    const definedTypes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+    const definedTypes = [0, 1, 2, 3, 4, 5, 7, 8, 9];
     for (const t of definedTypes) {
       const result = payloadTypeColor(t);
       assert.strictEqual(typeof result, 'string', `type ${t} should return a string`);
@@ -4356,7 +4153,7 @@ console.log('\n=== app.js: payloadTypeColor ===');
     }
   });
   test('all defined payload types return distinct values', () => {
-    const definedTypes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+    const definedTypes = [0, 1, 2, 3, 4, 5, 7, 8, 9];
     const values = new Set(definedTypes.map(t => payloadTypeColor(t)));
     assert.strictEqual(values.size, definedTypes.length, 'each type should map to a unique color class');
   });
@@ -5764,6 +5561,19 @@ console.log('\n=== packets.js: buildFieldTable hop count from path_len (#844) ==
     const html = buildFieldTable(pkt, {}, [], {});
     assert.ok(!html.includes('section-path'), 'Should not render Path section for direct advert');
     assert.ok(html.includes('direct advert'), 'Should note direct advert in path_length description');
+  });
+}
+
+// ===== live.js: anomaly icon in feed =====
+console.log('\n=== live.js: anomaly icon in feed ===');
+{
+  const liveSource = fs.readFileSync('public/live.js', 'utf8');
+
+  test('addFeedItemDOM shows anomaly icon when decoded has anomaly', () => {
+    assert.ok(liveSource.includes('anomalyIcon'),
+      'live.js should have anomalyIcon variable for feed items');
+    assert.ok(liveSource.includes('pkt.decoded && pkt.decoded.anomaly'),
+      'live.js should check pkt.decoded.anomaly');
   });
 }
 
