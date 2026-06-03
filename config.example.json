@@ -361,10 +361,12 @@
   },
   "routeHistory": {
     "backfillEnabled": true,
-    "backfillDays": 7,
+    "backfillDays": 1,
+    "edgeRetentionDays": 2,
+    "hourlyRetentionDays": 8,
     "backfillChunkMinutes": 60,
     "backfillPauseMs": 2000,
-    "_comment": "Ingestor route-history materialization. backfillEnabled: whether to backfill historical route-history aggregates after startup. backfillDays: how far back to backfill (default 7, capped at 30). backfillChunkMinutes: bounded scan size per chunk (default 60, clamped 5..1440). backfillPauseMs: pause between chunks so MQTT ingestion and SQLite writes keep moving (default 2000, capped at 60000)."
+    "_comment": "Ingestor route-history materialization. Two tables, DECOUPLED retention: route_history_edges is the raw per-observation build intermediate (heavy — 1 row per hop per observation) bounded by edgeRetentionDays (default 2); route_history_edge_hourly is the aggregate the UI actually renders, bounded by hourlyRetentionDays (default 8) — raise this to extend the DISPLAYABLE route-history window cheaply. INVARIANT: backfillDays must stay below edgeRetentionDays or it would replay observations whose raw edges were pruned and double the hourly counts — it is auto-clamped to edgeRetentionDays-1. backfillEnabled: backfill historical aggregates after startup. backfillChunkMinutes: bounded scan per chunk (clamped 5..1440). backfillPauseMs: pause between chunks (capped 60000)."
   },
   "neighborGraph": {
     "maxAgeDays": 5,
