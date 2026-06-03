@@ -327,6 +327,18 @@
   box-shadow: 0 0 4px currentColor;
 }
 
+/* #1293 — SVG shape-aware legend swatch (replaces the flat colour dot).
+ * Inline-block wrapper keeps SVG aligned with adjacent text labels. */
+.live-shape-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  margin-right: 6px;
+  vertical-align: middle;
+  line-height: 0;
+}
+.live-shape-swatch svg { display: block; }
+
 /* #1274: marker-style swatches — mirror the live map circleMarker ring
  * convention (bright white ring = repeater, faded ring = other roles).
  * Background uses --role-repeater / --text-muted via CSS variables so
@@ -410,9 +422,21 @@
 .live-node-filter::placeholder { color: var(--text-muted); opacity: 0.7; }
 .live-node-filter::-webkit-search-cancel-button { cursor: pointer; }
 
-/* Region filter (#1045) inline in live header toggles */
-.live-toggles .live-region-filter-container { display: inline-flex; align-items: center; }
-.live-toggles .live-region-filter-container .region-dropdown-trigger { font-size: inherit; padding: 2px 6px; }
+/* Region/Area filters inline in live header controls body */
+.live-controls-body .live-region-filter-container,
+.live-controls-body .live-area-filter-container { display: inline-flex; align-items: center; }
+.live-controls-body .live-region-filter-container .region-dropdown-trigger,
+.live-controls-body .live-area-filter-container .region-dropdown-trigger { font-size: inherit; padding: 2px 6px; }
+
+/* #1108 — "Show all nodes" sibling of the region dropdown. Reuses the
+   .live-controls-body label rhythm so it lines up with the other inline toggles. */
+.live-controls-body .live-show-all-region-nodes {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: inherit;
+  white-space: nowrap;
+}
 
 /* Satmap provider select */
 .live-satmap-select {
@@ -484,6 +508,7 @@
     padding: 0;
     flex: 0 0 auto;
     width: auto;
+    margin-left: auto;
   }
   /* #1220 — both panels collapsed = single-row strip. Drop the header's
      vertical padding so the panel hugs the 48px toggle buttons (chrome ≈
@@ -495,7 +520,7 @@
   }
 
   /* Expanded body on narrow: stack so it never overflows the cluster */
-  .live-controls.is-expanded { max-width: calc(100vw - 24px); }
+  .live-controls.is-expanded { max-width: calc(100vw - 24px); margin-top: 12px; }
   .live-controls.is-expanded .live-controls-body { flex-wrap: wrap; }
   .live-controls.is-expanded .live-toggles { flex-wrap: wrap; max-height: 50vh; overflow-y: auto; }
 }
@@ -978,7 +1003,7 @@
 }
 .vcr-scope-btn.active {
   background: rgba(59,130,246,0.2);
-  color: var(--accent);
+  color: var(--text);
   border-color: rgba(59,130,246,0.3);
 }
 
@@ -1445,3 +1470,29 @@
 .lc-path-chain { margin-top: 4px; word-break: break-word; }
 .lc-path-link-wrap { margin-top: 4px; }
 .lc-path-link { font-size: 11px; }
+
+/* Eliminate SVG baseline drift inside Leaflet divIcons */
+.live-node-marker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 !important;
+  border: none !important;
+  box-sizing: border-box !important;
+  background: transparent !important;
+}
+
+.live-node-marker svg {
+  display: block;
+  margin: 0;
+  padding: 0;
+}
+
+/* Hide all overlays during zoom for maximum smoothness */
+.leaflet-zoom-anim .leaflet-marker-pane,
+.leaflet-zoom-anim .leaflet-tooltip-pane,
+.leaflet-zoom-anim .leaflet-popup-pane,
+.leaflet-zoom-anim .leaflet-overlay-pane,
+.leaflet-zoom-anim .leaflet-liveAnimPane-pane {
+  display: none !important;
+}

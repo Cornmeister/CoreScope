@@ -6,30 +6,62 @@
   let selectedHash = null;
   let messages = [];
   let wsHandler = null;
+
+  // #1498: messages appended via the live WebSocket are stamped with
+  // _fromWS so a subsequent REST replacement (selectChannel /
+  // refreshMessages) can merge them in instead of stomping them.
+  // mergeWsAppendedIntoRest() preserves any WS-pushed messages whose
+  // packetHash is not already present in the REST response.
+  //
+  // Takes currentMsgs explicitly (rather than reading the module-global
+  // `messages`) so the helper is unit-testable in isolation.
+  //
+  // Eviction policy (round-1 review finding #1):
+  //   - REST contains the same packetHash → REST version wins, survivor
+  //     dropped (_fromWS flag effectively cleared because REST entry
+  //     has no stamp).
+  //   - Survivor with packetHash NOT in REST → preserved as survivor.
+  //   - Survivor older than MAX_WS_SURVIVOR_MS → dropped regardless
+  //     (defensive cap so a WS message REST never returns can't survive
+  //     forever in the array).
+  //   - Survivor with null/undefined packetHash (finding #3): preserved
+  //     too (no hash → no way to dedup against REST → REST can't
+  //     possibly include it). The max-age cap evicts it eventually.
+  //   - Ordering: REST first, survivors appended at the end. Caller's
+  //     ordering convention is oldest→newest, and survivors arrived
+  //     AFTER the REST snapshot, so end-of-array is the correct slot.
+  var MAX_WS_SURVIVOR_MS = 5 * 60 * 1000; // 5 minutes
+  function mergeWsAppendedIntoRest(currentMsgs, restMsgs) {
+    if (!Array.isArray(restMsgs)) return [];
+    if (!Array.isArray(currentMsgs) || currentMsgs.length === 0) return restMsgs.slice();
+    var restHashes = new Set();
+    for (var i = 0; i < restMsgs.length; i++) {
+      var h = restMsgs[i] && restMsgs[i].packetHash;
+      if (h) restHashes.add(h);
+    }
+    var now = Date.now();
+    var survivors = [];
+    for (var j = 0; j < currentMsgs.length; j++) {
+      var m = currentMsgs[j];
+      if (!m || !m._fromWS) continue;
+      // Drop survivors past max age (defensive eviction).
+      if (m._wsAt && (now - m._wsAt) > MAX_WS_SURVIVOR_MS) continue;
+      // If packetHash present and REST contains it, REST wins (drop).
+      if (m.packetHash && restHashes.has(m.packetHash)) continue;
+      // Hash absent OR not in REST → preserve.
+      survivors.push(m);
+    }
+    // Always return a fresh array — never alias restMsgs — so callers
+    // can mutate freely without leaking changes back to the input.
+    return survivors.length ? restMsgs.concat(survivors) : restMsgs.slice();
+  }
   let autoScroll = true;
   let nodeCache = {};
   let selectedNode = null;
   let observerIataById = {};
   let observerIataByName = {};
-  let observerSfByName = {};
   let messageRequestId = 0;
-  let _serverChannelKeys = null;
-  // Reach thresholds from /api/config/client. Populated once at init.
-  let _reachThresholds = { mediumMinObservers: 2, goodMinObservers: 4 };
-
-  function getServerChannelKeys() {
-    if (_serverChannelKeys !== null) return Promise.resolve(_serverChannelKeys);
-    return fetch('/api/config/channel-keys')
-      .then(function (r) { return r.ok ? r.json() : {}; })
-      .then(function (keys) { _serverChannelKeys = keys || {}; return _serverChannelKeys; })
-      .catch(function () { _serverChannelKeys = {}; return {}; });
-  }
   var _nodeCacheTTL = 5 * 60 * 1000; // 5 minutes
-
-  // Listener/observer refs hoisted so destroy() can clean them up (leak fix)
-  let _themeObserver = null;
-  let _sidebarMouseMove = null;
-  let _sidebarMouseUp = null;
 
   function getSelectedRegionsSnapshot() {
     var rp = RegionFilter.getRegionParam();
@@ -62,20 +94,6 @@
     return selectedRegions.indexOf(observerRegion) !== -1;
   }
 
-  function resolveObserverSfs(msgs) {
-    for (var i = 0; i < msgs.length; i++) {
-      var obs = msgs[i].observers;
-      if (!obs) continue;
-      for (var j = 0; j < obs.length; j++) {
-        if (typeof obs[j] === 'string') {
-          obs[j] = { name: obs[j], sf: observerSfByName[obs[j]] || null };
-        } else if (obs[j].sf == null && obs[j].name) {
-          obs[j].sf = observerSfByName[obs[j].name] || null;
-        }
-      }
-    }
-  }
-
   async function loadObserverRegions() {
     try {
       var data = await api('/observers', { ttl: CLIENT_TTL.observers });
@@ -86,10 +104,6 @@
         var o = list[i];
         var id = o.id || o.observer_id;
         var name = o.name || o.observer_name;
-        if (name && o.radio) {
-          var sf = parseInt(o.radio.split(',')[2], 10);
-          if (!isNaN(sf)) observerSfByName[name] = sf;
-        }
         if (!o.iata) continue;
         if (id) byId[id] = o.iata;
         if (name) {
@@ -100,8 +114,6 @@
       }
       observerIataById = byId;
       observerIataByName = byName;
-      // Backfill SF into any messages already on screen
-      if (messages.length) { resolveObserverSfs(messages); renderMessages(); }
     } catch {}
   }
 
@@ -127,7 +139,7 @@
     const header = document.getElementById('chHeader');
     if (header) header.querySelector('.ch-header-text').textContent = 'Select a channel';
     const msgEl = document.getElementById('chMessages');
-    if (msgEl) msgEl.innerHTML = PageState.empty({ icon: '📡', title: 'Choose a channel', hint: 'Pick a channel from the sidebar to view its messages' });
+    if (msgEl) msgEl.innerHTML = '<div class="ch-empty">Choose a channel from the sidebar to view messages</div>';
     document.getElementById('chScrollBtn')?.classList.add('hidden');
     return true;
   }
@@ -228,7 +240,7 @@
           <button class="ch-node-close" data-action="ch-close-node" aria-label="Close">✕</button>
         </div>
         <div class="ch-node-panel-body">
-          ${PageState.empty({ title: 'No node record found', hint: 'This sender has only been seen in channel messages, not via adverts.', compact: true })}
+          <div class="ch-node-field" style="color:var(--text-muted)">No node record found — this sender has only been seen in channel messages, not via adverts.</div>
         </div>`;
       _focusTrapCleanup = trapFocus(panel);
       panel.querySelector('.ch-node-close')?.focus();
@@ -262,7 +274,7 @@
       _focusTrapCleanup = trapFocus(panel);
       panel.querySelector('.ch-node-close')?.focus();
     } catch (e) {
-      panel.innerHTML = `<div class="ch-node-panel-header"><strong>${escapeHtml(name)}</strong><button class="ch-node-close" data-action="ch-close-node">✕</button></div><div class="ch-node-panel-body">${PageState.errorText('Failed to load', { compact: true })}</div>`;
+      panel.innerHTML = `<div class="ch-node-panel-header"><strong>${escapeHtml(name)}</strong><button class="ch-node-close" data-action="ch-close-node">✕</button></div><div class="ch-node-panel-body ch-empty">Failed to load</div>`;
       _focusTrapCleanup = trapFocus(panel);
       panel.querySelector('.ch-node-close')?.focus();
     }
@@ -318,13 +330,9 @@
     return palette[hashCode(String(name)) % palette.length];
   }
 
-  /* escapeHtml: delegate to canonical window.escapeHtml (packet-helpers.js).
-     Falls back to an inline implementation only if packet-helpers.js is not
-     loaded (e.g. isolated unit-test sandboxes). */
   function escapeHtml(str) {
-    if (typeof window !== 'undefined' && window.escapeHtml) return window.escapeHtml(str);
-    if (str == null) return '';
-    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    if (!str) return '';
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
   function truncate(str, len) {
@@ -654,7 +662,7 @@
           sender_timestamp: d.sender_timestamp || null,
           packetHash: c.packet.hash, packetId: c.packet.id,
           hops: d.path_len || 0, snr: c.packet.snr || null,
-          observers: c.packet.observer_name ? [{ name: c.packet.observer_name, sf: observerSfByName[c.packet.observer_name] || null }] : [],
+          observers: c.packet.observer_name ? [c.packet.observer_name] : [],
           repeats: 1
         });
         continue;
@@ -670,7 +678,7 @@
           sender_timestamp: result.timestamp || null,
           packetHash: c.packet.hash, packetId: c.packet.id,
           hops: 0, snr: c.packet.snr || null,
-          observers: c.packet.observer_name ? [{ name: c.packet.observer_name, sf: observerSfByName[c.packet.observer_name] || null }] : [],
+          observers: c.packet.observer_name ? [c.packet.observer_name] : [],
           repeats: 1
         });
       } else {
@@ -717,12 +725,10 @@
           <div id="chRegionFilter" class="region-filter-container ch-header-region"></div>
           <button type="button" id="chAddChannelBtn" class="ch-add-channel-btn"
                   aria-label="Add channel" title="Add a channel — generate, paste a key, or monitor a hashtag">+ Add</button>
-          <a href="#/analytics" class="ch-analytics-link"
-             title="Open the Analytics page to see channel activity stats" aria-label="Channel Analytics">📊</a>
         </div>
         <div id="chAddStatus" class="ch-add-status" style="display:none"></div>
         <div class="ch-channel-list" id="chList" role="listbox" aria-label="Channels">
-          ${PageState.loading('Loading channels…', { compact: true })}
+          <div class="ch-loading">Loading channels…</div>
         </div>
         <div class="ch-sidebar-resize" aria-hidden="true"></div>
       </div>
@@ -777,7 +783,7 @@
           </section>
 
           <div class="ch-modal-footer">
-            🔒 Keys stay in your browser — Cornmeister.nl is a passive observer that monitors and decrypts traffic but cannot transmit over RF. Use ✕ to remove individual channels.
+            🔒 Keys stay in your browser — CoreScope is a passive observer that monitors and decrypts traffic but cannot transmit over RF. Use ✕ to remove individual channels.
           </div>
         </div>
       </div>
@@ -808,12 +814,12 @@
       </div>
       <div class="ch-main" role="region" aria-label="Channel messages">
         <div class="ch-main-header" id="chHeader">
-          <button type="button" class="ch-back-btn" id="chBackBtn" aria-label="Back to channels">←</button>
+          <button type="button" class="ch-back" data-action="ch-back"
+                  aria-label="Back to channel list" title="Back">‹</button>
           <span class="ch-header-text">Select a channel</span>
-          <button type="button" class="ch-header-qr-btn hidden" id="chHeaderQrBtn" aria-label="Share channel" aria-haspopup="dialog" title="Share channel QR">📤</button>
         </div>
         <div class="ch-messages" id="chMessages">
-          ${PageState.empty({ icon: '📡', title: 'Choose a channel', hint: 'Pick a channel from the sidebar to view its messages' })}
+          <div class="ch-empty">Choose a channel from the sidebar to view messages</div>
         </div>
         <span id="chAriaLive" class="sr-only" aria-live="polite"></span>
         <button class="ch-scroll-btn hidden" id="chScrollBtn">↓ New messages</button>
@@ -822,10 +828,11 @@
 
     RegionFilter.init(document.getElementById('chRegionFilter'));
 
-    // #1034 PR1: encrypted-channels visibility now driven by sectioned sidebar.
-    // Always include encrypted channels in the API call; the renderer groups them.
-    var showEncrypted = true;
-    try { localStorage.setItem('channels-show-encrypted', 'true'); } catch (e) { /* quota */ }
+    // #1409: Do NOT force-enable encrypted-channel visibility on init. The
+    // operator-facing toggle (read at the includeEncrypted gate in
+    // loadChannels) drives whether the API returns the 246+ encrypted
+    // placeholders. Default is OFF (hidden); a future user-facing toggle
+    // writes the flag explicitly.
 
     regionChangeHandler = RegionFilter.onChange(function () {
       loadChannels(true).then(async function () {
@@ -1107,16 +1114,6 @@
       await addUserChannel('#' + raw, '');
     });
 
-    // Fetch reach thresholds from server config — one-shot, best-effort.
-    api('/config/client', { ttl: CLIENT_TTL.config || 60000 })
-      .then(function (cfg) {
-        if (cfg && cfg.reachThresholds) {
-          _reachThresholds = cfg.reachThresholds;
-          if (messages.length) renderMessages();
-        }
-      })
-      .catch(function () { /* keep defaults */ });
-
     loadObserverRegions();
     loadChannels().then(async function () {
       // Also load user-added encrypted channels into the sidebar.
@@ -1131,6 +1128,13 @@
       if (_pendingNode && _pendingNode.length < 200) await showNodeDetail(_pendingNode);
     });
 
+    // #1454 — customizer flips the "show encrypted channels" toggle, which
+    // writes localStorage and fires this event. Re-fetch the list live so
+    // the operator sees the change without a page reload.
+    window.addEventListener('mc-channels-show-encrypted-changed', function () {
+      loadChannels(true);
+    });
+
     // #89: Sidebar resize handle
     (function () {
       var sidebar = app.querySelector('.ch-sidebar');
@@ -1139,18 +1143,12 @@
       if (saved) { var w = parseInt(saved, 10); if (w >= 180 && w <= 600) { sidebar.style.width = w + 'px'; sidebar.style.minWidth = w + 'px'; } }
       var dragging = false, startX, startW;
       handle.addEventListener('mousedown', function (e) { dragging = true; startX = e.clientX; startW = sidebar.getBoundingClientRect().width; e.preventDefault(); });
-      // Remove any stale handlers from a prior mount before re-registering (dedupe guard).
-      if (_sidebarMouseMove) document.removeEventListener('mousemove', _sidebarMouseMove);
-      if (_sidebarMouseUp) document.removeEventListener('mouseup', _sidebarMouseUp);
-      _sidebarMouseMove = function (e) { if (!dragging) return; var w = Math.max(180, Math.min(600, startW + e.clientX - startX)); sidebar.style.width = w + 'px'; sidebar.style.minWidth = w + 'px'; };
-      _sidebarMouseUp = function () { if (!dragging) return; dragging = false; localStorage.setItem('channels-sidebar-width', parseInt(sidebar.style.width, 10)); };
-      document.addEventListener('mousemove', _sidebarMouseMove);
-      document.addEventListener('mouseup', _sidebarMouseUp);
+      document.addEventListener('mousemove', function (e) { if (!dragging) return; var w = Math.max(180, Math.min(600, startW + e.clientX - startX)); sidebar.style.width = w + 'px'; sidebar.style.minWidth = w + 'px'; });
+      document.addEventListener('mouseup', function () { if (!dragging) return; dragging = false; localStorage.setItem('channels-sidebar-width', parseInt(sidebar.style.width, 10)); });
     })();
 
     // #90: Theme change observer — re-render messages on theme toggle
-    if (_themeObserver) _themeObserver.disconnect();
-    _themeObserver = new MutationObserver(function (muts) {
+    var _themeObserver = new MutationObserver(function (muts) {
       for (var i = 0; i < muts.length; i++) {
         if (muts[i].attributeName === 'data-theme') { if (selectedHash) renderMessages(); break; }
       }
@@ -1163,42 +1161,19 @@
       if (!btn) return;
       var action = btn.dataset.action;
       if (action === 'ch-close-node') closeNodeDetail();
+      if (action === 'ch-back') {
+        // Mobile slide-back: return to the channel list view.
+        selectedHash = null;
+        messages = [];
+        history.replaceState(null, '', '#/channels');
+        document.querySelector('.ch-layout')?.classList.remove('ch-detail-open');
+        var headerT = document.querySelector('#chHeader .ch-header-text');
+        if (headerT) headerT.textContent = 'Select a channel';
+        var msgEl = document.getElementById('chMessages');
+        if (msgEl) msgEl.innerHTML = '<div class="ch-empty">Choose a channel from the sidebar to view messages</div>';
+        renderChannelList();
+      }
     });
-
-    document.getElementById('chBackBtn').addEventListener('click', function () {
-      var layout = app.querySelector('.ch-layout');
-      if (layout) layout.classList.remove('ch-viewing');
-      selectedHash = null;
-      history.replaceState(null, '', '#/channels');
-      renderChannelList();
-      var msgEl2 = document.getElementById('chMessages');
-      if (msgEl2) msgEl2.innerHTML = PageState.empty({ icon: '📡', title: 'Choose a channel', hint: 'Pick a channel from the sidebar to view its messages' });
-      var hdr = document.getElementById('chHeader');
-      if (hdr) hdr.querySelector('.ch-header-text').textContent = 'Select a channel';
-      var hdrQrBtn = document.getElementById('chHeaderQrBtn');
-      if (hdrQrBtn) { hdrQrBtn.classList.add('hidden'); hdrQrBtn.removeAttribute('data-share-channel'); hdrQrBtn.removeAttribute('data-share-channel-server'); }
-    });
-
-    var headerQrBtn = document.getElementById('chHeaderQrBtn');
-    if (headerQrBtn) {
-      headerQrBtn.addEventListener('click', function () {
-        var shareHash = headerQrBtn.getAttribute('data-share-channel');
-        if (!shareHash) return;
-        var sCh = channels.find(function (c) { return c.hash === shareHash; });
-        var channelName = shareHash.startsWith('user:') ? shareHash.substring(5) : (sCh && sCh.name) || shareHash;
-        var labels = typeof ChannelDecrypt.getLabels === 'function' ? ChannelDecrypt.getLabels() : {};
-        var labelFromStore = typeof ChannelDecrypt.getLabel === 'function' ? ChannelDecrypt.getLabel(channelName) : (labels[channelName] || '');
-        var displayName = labelFromStore || channelName;
-        var keys = ChannelDecrypt.getStoredKeys();
-        var keyHex = keys[channelName];
-        if (keyHex) { openShareModal(displayName, channelName, keyHex); return; }
-        // Fall back to server-provided key
-        var srvKeys = _serverChannelKeys || {};
-        var srvKeyHex = srvKeys[channelName];
-        if (srvKeyHex) { openShareModal(displayName, channelName, srvKeyHex); return; }
-        openShareModalError(displayName, 'No key found for this channel.');
-      });
-    }
 
     // Event delegation for channel selection (touch-friendly)
     var chListEl = document.getElementById('chList');
@@ -1273,7 +1248,7 @@
             messages = [];
             history.replaceState(null, '', '#/channels');
             var msgEl2 = document.getElementById('chMessages');
-            if (msgEl2) msgEl2.innerHTML = PageState.empty({ icon: '📡', title: 'Choose a channel', hint: 'Pick a channel from the sidebar to view its messages' });
+            if (msgEl2) msgEl2.innerHTML = '<div class="ch-empty">Choose a channel from the sidebar to view messages</div>';
             var header2 = document.getElementById('chHeader');
             if (header2) header2.querySelector('.ch-header-text').textContent = 'Select a channel';
           }
@@ -1286,7 +1261,7 @@
           if (selectedHash === channelHash) {
             messages = [];
             var msgEl2 = document.getElementById('chMessages');
-            if (msgEl2) msgEl2.innerHTML = PageState.empty({ icon: '🔑', title: 'Key removed', hint: 'Add a key to decrypt messages' });
+            if (msgEl2) msgEl2.innerHTML = '<div class="ch-empty">Key removed — add a key to decrypt messages</div>';
           }
         }
         renderChannelList();
@@ -1308,7 +1283,7 @@
         if (ch) ChannelColorPicker.show(ch, e.clientX, e.clientY);
         return;
       }
-      const item = e.target.closest('.ch-item[data-hash]');
+      const item = e.target.closest('.ch-item[data-hash], .ch-row[data-hash]');
       if (item) selectChannel(item.dataset.hash);
     });
 
@@ -1406,7 +1381,13 @@
         var payload = m.data?.decoded?.payload;
         if (!payload) continue;
 
-        var channelName = payload.channel || 'unknown';
+        // #1468: drop CHAN messages with no decoded channel name instead of
+        // synthesizing a literal "unknown" row that renders as a fake channel
+        // in the sidebar. Server-side (#1373/#1377) already filters these from
+        // /api/channels; the live WebSocket router was the remaining offender.
+        if (!payload.channel) continue;
+
+        var channelName = payload.channel;
         // For live-decrypted user-added (PSK) channels, decryptLivePSKBatch
         // also stamps payload.channelKey ("user:<name>") so we route the
         // message to the correct sidebar row and to the open chat view.
@@ -1467,9 +1448,14 @@
           var existing = pktHash ? messages.find(function (msg) { return msg.packetHash === pktHash; }) : null;
           if (existing) {
             existing.repeats = (existing.repeats || 1) + 1;
-            if (observer && existing.observers && !existing.observers.find(function (o) { return o.name === observer; })) {
-              existing.observers.push({ name: observer, sf: observerSfByName[observer] || null });
+            if (observer && existing.observers && existing.observers.indexOf(observer) === -1) {
+              existing.observers.push(observer);
             }
+            // #1498 round-1 finding #2: a WS-arriving observer update on a
+            // REST-loaded message must be stamped so the next REST tick
+            // doesn't stomp it. Without this, the new observer disappears.
+            existing._fromWS = true;
+            existing._wsAt = Date.now();
           } else {
             messages.push({
               sender: sender,
@@ -1479,9 +1465,15 @@
               packetId: pktId,
               packetHash: pktHash,
               repeats: 1,
-              observers: observer ? [{ name: observer, sf: observerSfByName[observer] || null }] : [],
+              observers: observer ? [observer] : [],
               hops: payload.path_len || 0,
               snr: snr,
+              // #1498: mark as WS-pushed so a later REST replacement
+              // (selectChannel / refreshMessages) can merge instead of
+              // stomp. Without this flag the REST response wipes any
+              // live messages that landed during the in-flight fetch.
+              _fromWS: true,
+              _wsAt: Date.now(),
             });
           }
           messagesDirty = true;
@@ -1596,14 +1588,27 @@
     window._channelsHandleWSBatchForTest = handleWSBatch;
     window._channelsProcessWSBatchForTest = processWSBatch;
 
+    // #1367: Re-render the channel list when the viewport crosses the
+    // mobile/desktop boundary so the layout swaps between flat .ch-row
+    // and sectioned .ch-item without a navigation.
+    var _chMobileMQ = null;
+    try { _chMobileMQ = window.matchMedia('(max-width: 767px)'); } catch (e) { /* noop */ }
+    if (_chMobileMQ && typeof _chMobileMQ.addEventListener === 'function') {
+      _chMobileMQ.addEventListener('change', function () { renderChannelList(); });
+    }
+
     // Tick relative timestamps every 1s — iterates channels array, updates DOM text only
     timeAgoTimer = setInterval(function () {
       var now = Date.now();
       for (var i = 0; i < channels.length; i++) {
         var ch = channels[i];
         if (!ch.lastActivityMs) continue;
+        var text = formatSecondsAgo(Math.floor((now - ch.lastActivityMs) / 1000));
         var el = document.querySelector('.ch-item-time[data-channel-hash="' + ch.hash + '"]');
-        if (el) el.textContent = formatSecondsAgo(Math.floor((now - ch.lastActivityMs) / 1000));
+        if (el) el.textContent = text;
+        // #1367: mobile rows live in a flat list; update those too.
+        var rowEl = document.querySelector('.ch-row[data-hash="' + ch.hash + '"] .ch-row-time');
+        if (rowEl) rowEl.textContent = text;
       }
     }, 1000);
   }
@@ -1617,9 +1622,6 @@
     timeAgoTimer = null;
     if (regionChangeHandler) RegionFilter.offChange(regionChangeHandler);
     regionChangeHandler = null;
-    if (_themeObserver) { _themeObserver.disconnect(); _themeObserver = null; }
-    if (_sidebarMouseMove) { document.removeEventListener('mousemove', _sidebarMouseMove); _sidebarMouseMove = null; }
-    if (_sidebarMouseUp) { document.removeEventListener('mouseup', _sidebarMouseUp); _sidebarMouseUp = null; }
     channels = [];
     messages = [];
     selectedHash = null;
@@ -1647,7 +1649,7 @@
     } catch (e) {
       if (!silent) {
         const el = document.getElementById('chList');
-        if (el) PageState.error(el, e, function () { loadChannels(); }, { compact: true });
+        if (el) el.innerHTML = `<div class="ch-empty">Failed to load channels</div>`;
       }
     }
   }
@@ -1750,11 +1752,72 @@
     </button>`;
   }
 
+  // #1367: mobile chat-app row renderer. Full-width 80px rows with a
+  // hash-colored avatar, bold name, ellipsized last-message preview,
+  // and right-aligned relative timestamp. No inline action chips.
+  function isMobileChannels() {
+    try { return window.matchMedia('(max-width: 767px)').matches; } catch (e) { return false; }
+  }
+
+  function avatarTextForChannel(ch) {
+    const name = ch && ch.name ? String(ch.name) : '';
+    if (name.charAt(0) === '#') return name.slice(0, 3); // "#wa"
+    if (ch && ch.encrypted && !ch.userAdded) return '🔒';
+    if (ch && ch.userAdded) return '🔑';
+    // Fallback: 2-char uppercase abbreviation.
+    return name.replace(/[^A-Za-z0-9]/g, '').slice(0, 2).toUpperCase() ||
+      String(ch && ch.hash || '?').slice(0, 2).toUpperCase();
+  }
+
+  function renderChannelRowMobile(ch) {
+    const isEncrypted = ch.encrypted === true;
+    const isUserAdded = ch.userAdded === true;
+    const encryptedFallback = isEncrypted ? 'Unknown' : '';
+    const name = channelDisplayName(ch, encryptedFallback);
+    const color = (isEncrypted && !isUserAdded)
+      ? 'var(--text-muted, #6b7280)'
+      : getChannelColor(ch.hash);
+    const time = ch.lastActivityMs
+      ? formatSecondsAgo(Math.floor((Date.now() - ch.lastActivityMs) / 1000))
+      : '';
+    let preview = '';
+    if (ch.lastSender && ch.lastMessage) {
+      preview = ch.lastSender + ': ' + ch.lastMessage;
+    } else if (isEncrypted && !isUserAdded) {
+      preview = '0x' + formatHashHex(ch.hash);
+    } else if (typeof ch.messageCount === 'number' && ch.messageCount > 0) {
+      preview = ch.messageCount + ' messages';
+    }
+    const abbr = avatarTextForChannel(ch);
+    const sel = selectedHash === ch.hash ? ' selected' : '';
+    return '<button type="button" class="ch-row' + sel + '" data-hash="' + escapeHtml(ch.hash) +
+      '" role="option" aria-selected="' + (selectedHash === ch.hash ? 'true' : 'false') +
+      '" aria-label="' + escapeHtml(name) + '">' +
+      '<div class="ch-avatar ch-row-avatar" style="background:' + color +
+      '" aria-hidden="true">' + escapeHtml(abbr) + '</div>' +
+      '<div class="ch-row-body">' +
+        '<div class="ch-row-line1">' +
+          '<span class="ch-row-name">' + escapeHtml(name) + '</span>' +
+          '<span class="ch-row-time">' + escapeHtml(time) + '</span>' +
+        '</div>' +
+        '<div class="ch-row-preview">' + escapeHtml(preview) + '</div>' +
+      '</div>' +
+    '</button>';
+  }
+
   // #1034 PR1: sectioned sidebar — My Channels / Network / Encrypted (N).
   function renderChannelList() {
     const el = document.getElementById('chList');
     if (!el) return;
-    if (channels.length === 0) { el.innerHTML = PageState.empty({ title: 'No channels found', compact: true }); return; }
+    if (channels.length === 0) { el.innerHTML = '<div class="ch-empty">No channels found</div>'; return; }
+
+    // #1367: mobile gets a flat chat-app list (no sections, no inline actions).
+    if (isMobileChannels()) {
+      const sortByActivity = (a, b) => (b.lastActivityMs || 0) - (a.lastActivityMs || 0);
+      const sorted = channels.slice().sort(sortByActivity);
+      el.innerHTML = sorted.map(renderChannelRowMobile).join('');
+      return;
+    }
 
     const sortByActivity = (a, b) => (b.lastActivityMs || 0) - (a.lastActivityMs || 0);
     const sortByCount = (a, b) => (b.messageCount || 0) - (a.messageCount || 0);
@@ -1809,16 +1872,19 @@
   async function selectChannel(hash, decryptOpts) {
     const rp = RegionFilter.getRegionParam() || '';
     const request = beginMessageRequest(hash, rp);
+    // #1498: clear messages BEFORE flipping selectedHash so any WS-pushed
+    // messages from the previously-viewed channel can't survive into the
+    // new channel's view via mergeWsAppendedIntoRest(). Messages don't
+    // carry channel context, so the merge can't distinguish them itself.
+    messages = [];
     selectedHash = hash;
     // Clear unread badge on the channel we're about to view (#1029).
     var __selCh = channels.find(function (c) { return c.hash === hash; });
     if (__selCh && __selCh.unread) { __selCh.unread = 0; }
     history.replaceState(null, '', `#/channels/${encodeURIComponent(hash)}`);
-    // On narrow layouts switch to message view (sidebar hides, main fills screen).
-    var __layout = app.querySelector('.ch-layout');
-    if (__layout && __layout.getBoundingClientRect().width <= 700) {
-      __layout.classList.add('ch-viewing');
-    }
+    // #1367: mobile slide-in — flip the layout into detail mode so CSS
+    // can swap the visible pane. Desktop is a no-op (rule matches mobile).
+    document.querySelector('.ch-layout')?.classList.add('ch-detail-open');
     renderChannelList();
     const ch = channels.find(c => c.hash === hash);
     // #1041: never show raw "psk:<hex>" prefixes in the header — use the
@@ -1826,37 +1892,19 @@
     const name = ch ? channelDisplayName(ch) : `Channel ${formatHashHex(hash)}`;
     const header = document.getElementById('chHeader');
     header.querySelector('.ch-header-text').textContent = `${name} — ${ch?.messageCount || 0} messages`;
-    var _hdrQrBtn = document.getElementById('chHeaderQrBtn');
-    if (_hdrQrBtn) {
-      var _chKeyName = hash.startsWith('user:') ? hash.substring(5) : hash;
-      var _hasLocalKey = typeof ChannelDecrypt !== 'undefined' && !!ChannelDecrypt.getStoredKeys()[_chKeyName];
-      if (_hasLocalKey) {
-        _hdrQrBtn.setAttribute('data-share-channel', hash);
-        _hdrQrBtn.classList.remove('hidden');
-      } else {
-        // Check server keys (async); show button if the server knows the PSK.
-        _hdrQrBtn.removeAttribute('data-share-channel');
-        _hdrQrBtn.classList.add('hidden');
-        getServerChannelKeys().then(function (srvKeys) {
-          if (selectedHash !== hash) return; // channel changed while fetching
-          if (srvKeys[_chKeyName]) {
-            _hdrQrBtn.setAttribute('data-share-channel', hash);
-            _hdrQrBtn.setAttribute('data-share-channel-server', '1');
-            _hdrQrBtn.classList.remove('hidden');
-          }
-        });
-      }
-    }
 
     const msgEl = document.getElementById('chMessages');
 
     // Shared helper: fetch, decrypt, and render messages for a channel key (M5: cache-first)
     async function decryptAndRender(keyHex, channelHashByte, channelName) {
-      msgEl.innerHTML = PageState.loading('Decrypting messages…');
+      msgEl.innerHTML = '<div class="ch-loading">Decrypting messages…</div>';
       var result = await fetchAndDecryptChannel(keyHex, channelHashByte, channelName, {
         onCacheHit: function (cachedMsgs) {
-          // M5: Render cached messages immediately while delta fetch runs
-          messages = cachedMsgs;
+          // M5: Render cached messages immediately while delta fetch runs.
+          // #1498 round-1 finding #4: this site is a REST replacement
+          // path too — it must merge any WS-pushed messages instead of
+          // stomping them, same as the other two sites below.
+          messages = mergeWsAppendedIntoRest(messages, cachedMsgs || []);
           if (messages.length > 0) {
             header.querySelector('.ch-header-text').textContent = name + ' — ' + messages.length + ' messages (cached)';
             renderMessages();
@@ -1866,17 +1914,17 @@
       });
       if (isStaleMessageRequest(request)) return { stale: true };
       if (result.wrongKey) {
-        msgEl.innerHTML = PageState.empty({ icon: '🔑', title: 'Key does not match', hint: 'The configured key cannot decrypt this channel' });
+        msgEl.innerHTML = '<div class="ch-empty ch-wrong-key">🔒 Key does not match — no messages could be decrypted</div>';
         return { wrongKey: true, messageCount: 0 };
       }
       if (result.error) {
-        msgEl.innerHTML = PageState.errorText(result.error);
+        msgEl.innerHTML = '<div class="ch-empty">' + escapeHtml(result.error) + '</div>';
         return { error: result.error, messageCount: 0 };
       }
-      messages = result.messages || [];
-      resolveObserverSfs(messages);
+      // #1498: merge WS-pushed messages that landed during the decrypt fetch.
+      messages = mergeWsAppendedIntoRest(messages, result.messages || []);
       if (messages.length === 0) {
-        msgEl.innerHTML = PageState.empty({ title: 'No encrypted messages found for this channel' });
+        msgEl.innerHTML = '<div class="ch-empty">No encrypted messages found for this channel</div>';
       } else {
         header.querySelector('.ch-header-text').textContent = `${name} — ${messages.length} messages (decrypted)`;
         renderMessages();
@@ -1909,15 +1957,13 @@
         var kh = storedKeys[kn];
         var kb = ChannelDecrypt.hexToBytes(kh);
         var hb = await ChannelDecrypt.computeChannelHash(kb);
-        // #815: `#`-named channels are keyed by name, not by hash byte —
-        // match the stored-key name directly against the channel hash/name.
-        if (kn === hash || kn === ch.name || String(hb) === String(hash) || String(ch.hash) === String(hb)) {
+        if (String(hb) === String(hash) || String(ch.hash) === String(hb)) {
           await decryptAndRender(kh, hb, kn);
           return;
         }
       }
       // #781: No matching key found — show lock message instead of fetching gibberish
-      msgEl.innerHTML = PageState.empty({ icon: '🔒', title: 'Encrypted and no key configured', hint: 'Add a decryption key for this channel to view its messages' });
+      msgEl.innerHTML = '<div class="ch-empty">🔒 This channel is encrypted and no decryption key is configured</div>';
       return;
     }
 
@@ -1937,7 +1983,7 @@
       // before assuming a lock state. Conservative on error — fall through.
       // Show a loading affordance so cold deep links don't display stale content
       // for the duration of the metadata RTT (cached 15s thereafter).
-      msgEl.innerHTML = PageState.loading('Loading messages…');
+      msgEl.innerHTML = '<div class="ch-loading">Loading messages…</div>';
       try {
         var rpInc = RegionFilter.getRegionParam();
         var paramsInc = ['includeEncrypted=true'];
@@ -1946,7 +1992,7 @@
         if (isStaleMessageRequest(request)) return;
         var foundCh = (allCh.channels || []).find(function (c) { return c.hash === hash; });
         if (foundCh && foundCh.encrypted === true) {
-          msgEl.innerHTML = PageState.empty({ icon: '🔒', title: 'Encrypted and no key configured', hint: 'Add a decryption key for this channel to view its messages' });
+          msgEl.innerHTML = '<div class="ch-empty">🔒 This channel is encrypted and no decryption key is configured</div>';
           return;
         }
         // Unencrypted (or unknown) — fall through to the REST fetch below.
@@ -1955,23 +2001,24 @@
       }
     }
 
-    msgEl.innerHTML = PageState.loading('Loading messages…');
+    msgEl.innerHTML = '<div class="ch-loading">Loading messages…</div>';
 
     try {
       const regionQs = rp ? '&region=' + encodeURIComponent(rp) : '';
       const data = await api(`/channels/${encodeURIComponent(hash)}/messages?limit=200${regionQs}`, { ttl: CLIENT_TTL.channelMessages });
       if (isStaleMessageRequest(request)) return;
-      messages = data.messages || [];
-      resolveObserverSfs(messages);
+      // #1498: merge so any WS-pushed messages that arrived while the
+      // REST fetch was in flight aren't stomped.
+      messages = mergeWsAppendedIntoRest(messages, data.messages || []);
       if (messages.length === 0 && rp) {
-        msgEl.innerHTML = PageState.empty({ title: 'Channel not available in selected region' });
+        msgEl.innerHTML = '<div class="ch-empty">Channel not available in selected region</div>';
       } else {
         renderMessages();
         scrollToBottom();
       }
     } catch (e) {
       if (isStaleMessageRequest(request)) return;
-      msgEl.innerHTML = PageState.errorText('Failed to load messages: ' + e.message);
+      msgEl.innerHTML = `<div class="ch-empty">Failed to load messages: ${e.message}</div>`;
     }
   }
 
@@ -1994,15 +2041,21 @@
       const newMsgs = data.messages || [];
       if (opts.regionSwitch && rp && newMsgs.length === 0) {
         messages = [];
-        msgEl.innerHTML = PageState.empty({ title: 'Channel not available in selected region' });
+        msgEl.innerHTML = '<div class="ch-empty">Channel not available in selected region</div>';
         document.getElementById('chScrollBtn')?.classList.add('hidden');
         return;
       }
-      // #92: Use message ID/hash for change detection instead of count + timestamp
+      // #92: Use message ID/hash for change detection instead of count + timestamp.
+      // #1498 round-1 finding #5: REST returns oldest→newest, and the
+      // merge appends survivors at the END (newest position), so the
+      // last element of `messages` is the newest item — same convention
+      // for REST and for the merged array. _getLastId remains correct.
       var _getLastId = function (arr) { var m = arr.length ? arr[arr.length - 1] : null; return m ? (m.id || m.packetId || m.timestamp || '') : ''; };
       if (newMsgs.length === messages.length && _getLastId(newMsgs) === _getLastId(messages)) return;
       var prevLen = messages.length;
-      messages = newMsgs;
+      // #1498: merge WS-pushed messages so a refresh that races a live
+      // packet doesn't wipe it.
+      messages = mergeWsAppendedIntoRest(messages, newMsgs);
       renderMessages();
       if (wasAtBottom) scrollToBottom();
       else {
@@ -2013,71 +2066,52 @@
     } catch {}
   }
 
-  // Returns a coloured "N obs" badge HTML string for the message reach indicator.
-  // Levels: bad (< mediumMin) → red, medium (< goodMin) → yellow, good (≥ goodMin) → green.
-  // rawTotal is the raw observation row count (may exceed observerCount due to
-  // duplicate submissions from the same observer); shown in tooltip when it differs.
-  function reachBadgeHtml(observerCount, rawTotal) {
-    var med = _reachThresholds.mediumMinObservers || 2;
-    var good = _reachThresholds.goodMinObservers || 4;
-    var level, quality;
-    if (observerCount >= good) {
-      level = 'good'; quality = 'Good reach';
-    } else if (observerCount >= med) {
-      level = 'medium'; quality = 'Medium reach';
-    } else {
-      level = 'bad'; quality = 'Poor reach';
-    }
-    var obs = observerCount + ' unique observer' + (observerCount !== 1 ? 's' : '');
-    var title = quality + ' — ' + obs;
-    // Mention raw total only when it differs from unique count (duplicate obs rows).
-    if (rawTotal && rawTotal > observerCount) {
-      title += ' (' + rawTotal + ' total observations)';
-    }
-    var label = observerCount + ' obs';
-    return '<span class="ch-reach-badge ch-reach-' + level + '" title="' + title + '" aria-label="' + title + '">' + label + '</span>';
-  }
-
   function renderMessages() {
     const msgEl = document.getElementById('chMessages');
     if (!msgEl) return;
-    if (messages.length === 0) { msgEl.innerHTML = PageState.empty({ icon: '💬', title: 'No messages in this channel yet' }); return; }
+    if (messages.length === 0) { msgEl.innerHTML = '<div class="ch-empty">No messages in this channel yet</div>'; return; }
 
     msgEl.innerHTML = messages.map(msg => {
       const sender = msg.sender || 'Unknown';
       const senderColor = getSenderColor(sender);
       const senderLetter = sender.replace(/[^\w]/g, '').charAt(0).toUpperCase() || '?';
 
-      let displayText;
-      displayText = highlightMentions(msg.text || '');
+      let rawBody = msg.text || '';
+      // Detect a leading @TARGET reply prefix and split it out so we can
+      // style it in the sender color (#1367 detail-view spec).
+      let replyTarget = '';
+      const replyMatch = rawBody.match(/^@([A-Za-z0-9_\-]{1,32})\s+/);
+      if (replyMatch) {
+        replyTarget = replyMatch[1];
+        rawBody = rawBody.slice(replyMatch[0].length);
+      }
+      let displayText = highlightMentions(rawBody);
+      if (replyTarget) {
+        displayText = '<span class="ch-reply-target" style="color:' + senderColor + '">@' +
+          escapeHtml(replyTarget) + '</span> ' + displayText;
+      }
 
-      const time = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-      const date = msg.timestamp ? new Date(msg.timestamp).toLocaleDateString() : '';
+      const tsDate = msg.timestamp ? new Date(msg.timestamp) : null;
+      const time = tsDate ? tsDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+      const date = tsDate ? tsDate.toLocaleDateString() : '';
 
-      const obsCount = msg.observers?.length || 0;
-      // msg.repeats is the raw observation-row count (not deduplicated by observer).
-      // It can exceed obsCount when the same observer submitted the packet more than
-      // once. We fold it into the reach badge tooltip rather than showing both numbers
-      // side-by-side, which was confusing ("134× heard · 58 obs").
-      const rawObs = msg.repeats || obsCount;
       const meta = [];
       meta.push(date + ' ' + time);
-      // Reach indicator: always shown so single-observer messages are visibly flagged red.
-      meta.push(reachBadgeHtml(obsCount, rawObs));
-      if (msg.observers?.length > 0) {
-        const sfs = [...new Set(msg.observers.map(o => o.sf).filter(sf => sf != null))].sort((a, b) => a - b);
-        if (sfs.length > 0) meta.push('SF' + sfs.join('-SF'));
-      }
+      if (msg.repeats > 1) meta.push(`${msg.repeats}× heard`);
+      if (msg.observers?.length > 1) meta.push(`${msg.observers.length} observers`);
       if (msg.hops > 0) meta.push(`${msg.hops} hops`);
       if (msg.snr !== null && msg.snr !== undefined) meta.push(`SNR ${msg.snr}`);
 
       const safeId = btoa(encodeURIComponent(sender));
-      return `<div class="ch-msg">
+      // #1367: emit BOTH the new chat-app class names (.ch-message /
+      // .ch-message-bubble / .ch-message-meta) and the legacy .ch-msg*
+      // names so existing tests/themes don't regress.
+      return `<div class="ch-msg ch-message">
         <div class="ch-avatar ch-tappable" style="background:${senderColor}" tabindex="0" role="button" data-node="${safeId}">${senderLetter}</div>
-        <div class="ch-msg-content">
-          <div class="ch-msg-sender ch-sender-link ch-tappable" style="color:${senderColor}" tabindex="0" role="button" data-node="${safeId}">${escapeHtml(sender)}</div>
-          <div class="ch-msg-bubble">${displayText}</div>
-          <div class="ch-msg-meta">${meta.join(' · ')}${msg.packetHash ? ` · <a href="#/packets/${msg.packetHash}" class="ch-analyze-link">View packet →</a>` : ''}</div>
+        <div class="ch-msg-content ch-message-content">
+          <div class="ch-msg-sender ch-message-sender ch-sender-link ch-tappable" style="color:${senderColor}" tabindex="0" role="button" data-node="${safeId}">${escapeHtml(sender)}</div>
+          <div class="ch-msg-bubble ch-message-bubble">${displayText}</div>
+          <div class="ch-msg-meta ch-message-meta">${meta.join(' · ')}${msg.packetHash ? ` · <a href="#/packets/${msg.packetHash}" class="ch-analyze-link">View packet →</a>` : ''}</div>
         </div>
       </div>`;
     }).join('');
@@ -2100,6 +2134,7 @@
   };
   window._channelsSelectChannelForTest = selectChannel;
   window._channelsRefreshMessagesForTest = refreshMessages;
+  window._channelsMergeWsAppendedIntoRestForTest = mergeWsAppendedIntoRest;
   window._channelsLoadChannelsForTest = loadChannels;
   window._channelsBeginMessageRequestForTest = beginMessageRequest;
   window._channelsIsStaleMessageRequestForTest = isStaleMessageRequest;

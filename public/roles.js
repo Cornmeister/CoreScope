@@ -9,10 +9,159 @@
 
 (function () {
   // ─── Role definitions ───
-  window.ROLE_COLORS = {
-    repeater: '#dc2626', companion: '#2563eb', room: '#16a34a',
-    sensor: '#d97706', observer: '#8b5cf6', unknown: '#6b7280'
+  // #1407 — Wong palette defaults that match the unscoped --mc-role-* CSS
+  // vars in :root of style.css. These are FALLBACKS only — the live getter
+  // below reads --mc-role-* from documentElement on every access, so any
+  // preset switch (cb-presets.js) is reflected immediately without per-page
+  // listener wiring. The legacy April palette (#dc2626 etc.) was the bug.
+  var WONG_ROLE_DEFAULTS = {
+    repeater:  '#D55E00',
+    companion: '#56B4E9',
+    room:      '#009E73',
+    sensor:    '#F0E442',
+    observer:  '#CC79A7',
+    unknown:   '#6b7280'
   };
+  var WONG_ROLE_TEXT_DEFAULTS = {
+    repeater: '#1a1a1a', companion: '#1a1a1a', room: '#1a1a1a',
+    sensor: '#1a1a1a', observer: '#1a1a1a', unknown: '#1a1a1a'
+  };
+
+  function _readCssVar(name, fallback) {
+    try {
+      if (typeof document === 'undefined' || !document.documentElement) return fallback;
+      var v = '';
+      if (typeof getComputedStyle === 'function') {
+        v = getComputedStyle(document.documentElement).getPropertyValue(name);
+      }
+      if (!v && document.documentElement.style && typeof document.documentElement.style.getPropertyValue === 'function') {
+        v = document.documentElement.style.getPropertyValue(name);
+      }
+      v = (v || '').trim();
+      return v || fallback;
+    } catch (e) { return fallback; }
+  }
+
+  // Server-config overrides go into this object; the getter prefers them
+  // when present so backend-pushed role colors still win over CSS vars.
+  var _roleOverrides = {};
+
+  function _liveRoleColors() {
+    var base = {};
+    var roles = ['repeater', 'companion', 'room', 'sensor', 'observer'];
+    for (var i = 0; i < roles.length; i++) {
+      var k = roles[i];
+      base[k] = _roleOverrides[k] || _readCssVar('--mc-role-' + k, WONG_ROLE_DEFAULTS[k]);
+    }
+    base.unknown = _roleOverrides.unknown || WONG_ROLE_DEFAULTS.unknown;
+    // Wrap in a Proxy so per-key assignment by legacy callers (customizer:
+    //   `window.ROLE_COLORS[key] = inp.value`) lands in _roleOverrides and
+    //   is visible on the NEXT read. Without this, the mutation would be
+    //   thrown away when the snapshot is GC'd. Falls back to a plain object
+    //   in environments without Proxy (none we ship to, but cheap).
+    if (typeof Proxy === 'function') {
+      return new Proxy(base, {
+        set: function (t, prop, value) {
+          _roleOverrides[prop] = value;
+          t[prop] = value;
+          return true;
+        }
+      });
+    }
+    return base;
+  }
+
+  Object.defineProperty(window, 'ROLE_COLORS', {
+    configurable: true,
+    enumerable: true,
+    get: function () { return _liveRoleColors(); },
+    // Setter accepts per-key writes — older callers do
+    //   `ROLE_COLORS.repeater = '#xxx'`
+    // which on a getter-only object would silently no-op in strict mode.
+    // We treat any whole-object assignment as an override merge so the
+    // legacy customizer code path still works.
+    set: function (v) {
+      if (v && typeof v === 'object') {
+        for (var k in v) if (Object.prototype.hasOwnProperty.call(v, k)) _roleOverrides[k] = v[k];
+      }
+    }
+  });
+  // Per-key writes via Proxy not portable enough — expose helper for callers
+  // that want to override at runtime (customizer "node colors" path).
+  // #1438: snapshot of the cb-preset (or initial) CSS-var value per role
+  // so that clearing an override restores the preset, not nothing.
+  // We write the override to BOTH documentElement and body inline styles
+  // because cb-presets ships stylesheet rules of the form
+  //   body[data-cb-preset="deut"] { --mc-role-X: #...; }
+  // which beats inheritance from :root. Body inline beats both.
+  var _presetCssSnapshot = {};
+  function _styleTargets() {
+    var t = [];
+    try { if (document.documentElement && document.documentElement.style) t.push(document.documentElement.style); } catch (e) {}
+    try { if (document.body && document.body.style) t.push(document.body.style); } catch (e) {}
+    return t.filter(function (s) { return s && typeof s.setProperty === 'function'; });
+  }
+  window.setRoleColorOverride = function (role, hex) {
+    if (!role) return;
+    var targets = _styleTargets();
+    var varName = '--mc-role-' + role;
+
+    if (hex == null || hex === '') {
+      // Clear override → restore prior CSS var values captured at
+      // first-override time, so CSS-var consumers see the preset color
+      // again (matches JS getter behavior, preserves #1412 contract).
+      delete _roleOverrides[role];
+      if (Object.prototype.hasOwnProperty.call(_presetCssSnapshot, role)) {
+        var snap = _presetCssSnapshot[role] || {};
+        targets.forEach(function (s, i) {
+          var prior = snap[i];
+          if (prior && prior.length) s.setProperty(varName, prior);
+          else s.removeProperty(varName);
+        });
+        delete _presetCssSnapshot[role];
+      } else {
+        targets.forEach(function (s) { s.removeProperty(varName); });
+      }
+      return;
+    }
+    // Capture the current per-target CSS var values before overwriting,
+    // but only on the first override for this role so repeated picks
+    // don't lose the original preset value.
+    if (!Object.prototype.hasOwnProperty.call(_presetCssSnapshot, role)) {
+      _presetCssSnapshot[role] = targets.map(function (s) {
+        return s.getPropertyValue ? (s.getPropertyValue(varName) || '').trim() : '';
+      });
+    }
+    _roleOverrides[role] = hex;
+    // #1438: drive the CSS var so CSS-var consumers (cluster pills,
+    // route lines, all marker SVGs that use fill="var(--mc-role-X)")
+    // pick up the operator's hex without a page reload. Writing to
+    // body inline style is necessary because body[data-cb-preset="..."]
+    // selectors beat :root inheritance.
+    //
+    // #1446: write with !important so the inline body declaration also
+    // beats the body[data-cb-preset="X"] CSS rule on equal specificity.
+    // Without !important, the cascade order picks the later-defined
+    // stylesheet rule in some browser versions even though specificity
+    // (1,0,1) matches the inline body style — operator pick visibly
+    // loses to active preset (root cause of #1444).
+    targets.forEach(function (s) {
+      // documentElement gets the value without !important (used as the
+      // canonical readout for the JS getter); body gets !important so it
+      // wins the CSS cascade against body[data-cb-preset="X"].
+      if (s === (document.body && document.body.style)) {
+        s.setProperty(varName, hex, 'important');
+      } else {
+        s.setProperty(varName, hex);
+      }
+    });
+  };
+  // Back-compat: also export the writable override map so customize.js's
+  // `window.ROLE_COLORS[key] = inp.value` style mutation works.
+  // We intercept by replacing the getter target with a Proxy on access.
+  Object.defineProperty(window, 'ROLE_COLORS_OVERRIDES', {
+    value: _roleOverrides, writable: false, enumerable: false, configurable: false
+  });
 
   window.TYPE_COLORS = {
     ADVERT: '#22c55e', GRP_TXT: '#3b82f6', GRP_DATA: '#8b5cf6', TXT_MSG: '#f59e0b', ACK: '#6b7280',
@@ -55,16 +204,131 @@
     sensor: 'Sensors', observer: 'Observers'
   };
 
-  window.ROLE_STYLE = {
-    repeater:  { color: '#dc2626', shape: 'diamond',  radius: 10, weight: 2 },
-    companion: { color: '#2563eb', shape: 'circle',   radius: 8,  weight: 2 },
-    room:      { color: '#16a34a', shape: 'square',   radius: 9,  weight: 2 },
-    sensor:    { color: '#d97706', shape: 'triangle', radius: 8,  weight: 2 },
-    observer:  { color: '#8b5cf6', shape: 'star',     radius: 11, weight: 2 }
+  // #1293 — Marker shape per role (WCAG 1.4.1 — shape, not only colour).
+  // Single source of truth; ROLE_STYLE.shape is derived from this map.
+  window.ROLE_SHAPES = {
+    repeater:  'circle',
+    companion: 'square',
+    room:      'hexagon',
+    sensor:    'triangle',
+    observer:  'diamond'
   };
 
+  // #1407 — ROLE_STYLE.color reads live (matches ROLE_COLORS getter).
+  // The shape/radius/weight stay static. Stored overrides survive across
+  // reads via the closure above.
+  var _styleShapes = {
+    repeater:  { shape: 'circle',   radius: 8, weight: 2 },
+    companion: { shape: 'square',   radius: 8, weight: 2 },
+    room:      { shape: 'hexagon',  radius: 9, weight: 2 },
+    sensor:    { shape: 'triangle', radius: 8, weight: 2 },
+    observer:  { shape: 'diamond',  radius: 9, weight: 2 }
+  };
+  function _buildRoleStyle() {
+    var out = {};
+    var live = _liveRoleColors();
+    for (var role in _styleShapes) {
+      var s = _styleShapes[role];
+      out[role] = {
+        color:  _roleOverrides[role] || live[role],
+        shape:  s.shape,
+        radius: s.radius,
+        weight: s.weight
+      };
+    }
+    return out;
+  }
+  Object.defineProperty(window, 'ROLE_STYLE', {
+    configurable: true,
+    enumerable: true,
+    get: function () { return _buildRoleStyle(); },
+    set: function (v) {
+      // Legacy whole-object assignment: copy color overrides only.
+      if (v && typeof v === 'object') {
+        for (var k in v) if (v[k] && v[k].color) _roleOverrides[k] = v[k].color;
+      }
+    }
+  });
+
+  // Glyphs mirror the ROLE_SHAPES (used in tooltips, legends, lists).
   window.ROLE_EMOJI = {
-    repeater: '◆', companion: '●', room: '■', sensor: '▲', observer: '★'
+    repeater: '●', companion: '■', room: '⬢', sensor: '▲', observer: '◆'
+  };
+
+  /**
+   * #1293 — Shared SVG marker generator. Returns a self-contained
+   * <svg>...</svg> string for the given role/colour/size, with white
+   * stroke for contrast (works on both dark + light tiles). Used by:
+   *   - public/live.js  → addNodeMarker (L.divIcon)
+   *   - public/live.js  → role legend swatches
+   *   - public/map.js   → makeMarkerIcon (legacy switch retained for
+   *                       per-role overrides + observer star overlay)
+   *
+   * Reads ROLE_SHAPES for the role's geometry; falls back to circle.
+   * Caller controls colour to allow theming overrides (matrix mode,
+   * stale dim, etc.) without rebuilding the marker.
+   */
+  window.makeRoleMarkerSVG = function (role, color, size) {
+    var shape = (window.ROLE_SHAPES && window.ROLE_SHAPES[role]) || 'circle';
+    size = size || 16;
+    var c = size / 2;
+    // #1438: default fill resolves through the live CSS var so existing
+    // mounted SVG markers recolor when cb-preset switches or the
+    // operator picks a per-role override via the customizer. Callers
+    // that need a fixed tint (matrix mode, stale dim) keep passing
+    // their explicit colour.
+    var fill = color || ('var(--mc-role-' + (role || 'companion') + ')');
+    // #1488 — stroke routed through CSS vars so operators can dial
+    // colour/width without code edits (customizer Colors → Marker Stroke).
+    var strokeAttr = ' stroke="var(--mc-marker-stroke-color)" stroke-width="var(--mc-marker-stroke-width)" stroke-opacity="var(--mc-marker-stroke-opacity)"';
+    var path;
+    switch (shape) {
+      case 'square':
+        path = '<rect x="3" y="3" width="' + (size - 6) + '" height="' + (size - 6) +
+               '" fill="' + fill + '"' + strokeAttr + '/>';
+        break;
+      case 'triangle':
+        path = '<polygon points="' + c + ',2 ' + (size - 2) + ',' + (size - 2) +
+               ' 2,' + (size - 2) + '" fill="' + fill + '"' + strokeAttr + '/>';
+        break;
+      case 'diamond':
+        path = '<polygon points="' + c + ',2 ' + (size - 2) + ',' + c + ' ' +
+               c + ',' + (size - 2) + ' 2,' + c +
+               '" fill="' + fill + '"' + strokeAttr + '/>';
+        break;
+      case 'hexagon': {
+        // Pointy-top hexagon centred at (c,c), inscribed radius ≈ c-1.5
+        var r = c - 1.5;
+        var pts = '';
+        for (var i = 0; i < 6; i++) {
+          var a = (i * 60 - 90) * Math.PI / 180;
+          pts += (c + r * Math.cos(a)).toFixed(2) + ',' +
+                 (c + r * Math.sin(a)).toFixed(2) + ' ';
+        }
+        path = '<polygon points="' + pts.trim() + '" fill="' + fill +
+               '"' + strokeAttr + '/>';
+        break;
+      }
+      case 'star': {
+        var cx = c, cy = c, outer = c - 1, inner = outer * 0.4;
+        var spts = '';
+        for (var j = 0; j < 5; j++) {
+          var aO = (j * 72 - 90) * Math.PI / 180;
+          var aI = ((j * 72) + 36 - 90) * Math.PI / 180;
+          spts += (cx + outer * Math.cos(aO)) + ',' + (cy + outer * Math.sin(aO)) + ' ';
+          spts += (cx + inner * Math.cos(aI)) + ',' + (cy + inner * Math.sin(aI)) + ' ';
+        }
+        path = '<polygon points="' + spts.trim() + '" fill="' + fill +
+               '"' + strokeAttr + '/>';
+        break;
+      }
+      default: // circle
+        path = '<circle cx="' + c + '" cy="' + c + '" r="' + (c - 2) +
+               '" fill="' + fill + '"' + strokeAttr + '/>';
+    }
+    return '<svg width="' + size + '" height="' + size +
+           '" viewBox="0 0 ' + size + ' ' + size +
+           '" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' + path + '</svg>';
   };
 
   window.ROLE_SORT = ['repeater', 'companion', 'room', 'sensor', 'observer'];
@@ -97,13 +361,40 @@
   // ─── Tile URLs ───
   window.TILE_DARK  = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
   window.TILE_LIGHT = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
-  window.TILE_TOPO  = 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png'; // max zoom 17
 
   window.getTileUrl = function () {
     var isDark = document.documentElement.getAttribute('data-theme') === 'dark' ||
       (document.documentElement.getAttribute('data-theme') !== 'light' &&
        window.matchMedia('(prefers-color-scheme: dark)').matches);
-    return isDark ? TILE_DARK : TILE_LIGHT;
+    if (!isDark) return TILE_LIGHT;
+    // #1461 followup: honor customizer's dark-tile-provider pick (#1420 / #1430)
+    // when the registry is loaded. Falls back to TILE_DARK if absent.
+    try {
+      if (window.MC_getDarkTileProvider && window.MC_TILE_PROVIDERS) {
+        var id = window.MC_getDarkTileProvider();
+        var p = window.MC_TILE_PROVIDERS[id];
+        if (p && (p.url || p.baseUrl)) {
+          return p.url || p.baseUrl;
+        }
+      }
+    } catch (_e) {}
+    return TILE_DARK;
+  };
+  /* Helper: get the full provider object (for callers that also need the
+   * invertFilter or refUrl/attribution). Returns null when no customizer
+   * provider applies (light mode, or registry not loaded). */
+  window.getActiveTileProvider = function () {
+    var isDark = document.documentElement.getAttribute('data-theme') === 'dark' ||
+      (document.documentElement.getAttribute('data-theme') !== 'light' &&
+       window.matchMedia('(prefers-color-scheme: dark)').matches);
+    if (!isDark) return null;
+    try {
+      if (window.MC_getDarkTileProvider && window.MC_TILE_PROVIDERS) {
+        var id = window.MC_getDarkTileProvider();
+        return window.MC_TILE_PROVIDERS[id] || null;
+      }
+    } catch (_e) {}
+    return null;
   };
 
   // ─── SNR thresholds ───
@@ -140,18 +431,22 @@
 
   // ─── External URLs ───
   window.EXTERNAL_URLS = {
-    flasher: 'https://flasher.meshcore.co.uk/'
+    flasher: 'https://flasher.meshcore.io/'
   };
-
-  window.MESHMAPPER_CONFIGURED = false;
 
   // ─── Fetch server overrides ───
   window.MeshConfigReady = fetch('/api/config/client').then(function (r) { return r.json(); }).then(function (cfg) {
     if (cfg.roles) {
-      if (cfg.roles.colors) Object.assign(ROLE_COLORS, cfg.roles.colors);
+      if (cfg.roles.colors) {
+        // #1407 — ROLE_COLORS is now a live getter; merge into the override map.
+        for (var rk in cfg.roles.colors) _roleOverrides[rk] = cfg.roles.colors[rk];
+      }
       if (cfg.roles.labels) Object.assign(ROLE_LABELS, cfg.roles.labels);
       if (cfg.roles.style) {
-        for (var k in cfg.roles.style) ROLE_STYLE[k] = Object.assign(ROLE_STYLE[k] || {}, cfg.roles.style[k]);
+        // Same: merge color overrides only; shape/radius/weight come from _styleShapes.
+        for (var sk in cfg.roles.style) {
+          if (cfg.roles.style[sk] && cfg.roles.style[sk].color) _roleOverrides[sk] = cfg.roles.style[sk].color;
+        }
       }
       if (cfg.roles.emoji) Object.assign(ROLE_EMOJI, cfg.roles.emoji);
       if (cfg.roles.sort) window.ROLE_SORT = cfg.roles.sort;
@@ -160,6 +455,10 @@
     if (cfg.tiles) {
       if (cfg.tiles.dark) window.TILE_DARK = cfg.tiles.dark;
       if (cfg.tiles.light) window.TILE_LIGHT = cfg.tiles.light;
+    }
+    // #1420 — server default for dark-tile provider picker.
+    if (typeof cfg.mapDarkTileProvider === 'string' && typeof window.MC_setServerDefaultTileProvider === 'function') {
+      window.MC_setServerDefaultTileProvider(cfg.mapDarkTileProvider);
     }
     if (cfg.snrThresholds) Object.assign(SNR_THRESHOLDS, cfg.snrThresholds);
     if (cfg.distThresholds) Object.assign(DIST_THRESHOLDS, cfg.distThresholds);
@@ -170,11 +469,8 @@
     if (cfg.cacheInvalidateMs != null) window.CACHE_INVALIDATE_MS = cfg.cacheInvalidateMs;
     if (cfg.externalUrls) Object.assign(EXTERNAL_URLS, cfg.externalUrls);
     if (cfg.propagationBufferMs != null) window.PROPAGATION_BUFFER_MS = cfg.propagationBufferMs;
-    window.MESHMAPPER_CONFIGURED = cfg.meshMapperConfigured === true;
     // Sync ROLE_STYLE colors with ROLE_COLORS
-    for (var role in ROLE_STYLE) {
-      if (ROLE_COLORS[role]) ROLE_STYLE[role].color = ROLE_COLORS[role];
-    }
+    // #1407 — both are now live getters; no manual sync needed. Kept as no-op for clarity.
   }).catch(function () { /* use defaults */ });
 
   // ─── Built-in IATA airport code → city name mapping ───

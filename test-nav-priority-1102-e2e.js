@@ -9,16 +9,16 @@
  * the bug here is the SET being hidden is wrong (way too aggressive).
  *
  * Acceptance:
- *  - At 2560px: ALL links visible inline AND "More ▾" hidden.
+ *  - At 2560px: ALL 11 links visible inline AND "More ▾" hidden.
  *  - At 1920px: at least 9 links visible (room for most).
- *  - At 1080px: more than the 5 high-priority links fit inline, and the
- *    More menu contains every link not currently visible inline.
+ *  - At 1080px: 5 high-priority links visible AND More menu contains
+ *    every link not currently visible inline.
  *  - At 768px (just above hamburger threshold): 5 high-priority links
  *    visible AND More menu non-empty.
  *
- * Regression guard for the fff9892 behavior: overflow is decided by
- * measured fit, not by a fixed 768-1100px rule that hides every
- * non-high-priority link even when several would fit.
+ * #1105 MINOR 7: at 1080/800px we now assert the visible set is *exactly*
+ * the 5 high-priority links (Home/Packets/Map/Live/Nodes). A buggy queue
+ * that hid Home and showed Lab would still pass the cardinality check.
  *
  * #1105 MINOR 9: also asserts that navigating to a route whose link
  * lives in the More menu lights up #navMoreBtn with .active.
@@ -30,15 +30,14 @@ const { chromium } = require('playwright');
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
 
 // [width, expected behavior]
+// requireExactHighPri: when true, asserts the visible set matches HIGH_PRIORITY_HREFS exactly
 const HIGH_PRIORITY_HREFS = ['#/home', '#/packets', '#/map', '#/live', '#/nodes'];
 const CASES = [
-  // viewport, minVisible, moreVisible, requireBeyondHighPri, label
-  { w: 2560, minVisible: 13, moreVisible: false, requireBeyondHighPri: false, label: '2560px — all visible' },
-  // CORNMEISTER.NL brand title is wider than the upstream CoreScope default,
-  // so the Priority+ algorithm fits one fewer link at 1920px (8 instead of 9).
-  { w: 1920, minVisible: 8,  moreVisible: null,  requireBeyondHighPri: false, label: '1920px — most visible' },
-  { w: 1080, minVisible: 6,  moreVisible: null,  requireBeyondHighPri: true,  label: '1080px — measured fit' },
-  { w: 800,  minVisible: 5,  moreVisible: true,  requireBeyondHighPri: false, label: '800px — collapsed' },
+  // viewport, minVisible, moreVisible, requireExactHighPri, label
+  { w: 2560, minVisible: 11, moreVisible: false, requireExactHighPri: false, label: '2560px — all visible' },
+  { w: 1920, minVisible: 9,  moreVisible: null,  requireExactHighPri: false, label: '1920px — most visible' },
+  { w: 1080, minVisible: 5,  moreVisible: true,  requireExactHighPri: true,  label: '1080px — collapsed' },
+  { w: 800,  minVisible: 5,  moreVisible: true,  requireExactHighPri: true,  label: '800px — collapsed' },
 ];
 
 const HEIGHT = 900;
@@ -83,9 +82,6 @@ async function main() {
         }));
       });
     }, null, { timeout: 5000 });
-    // applyNavPriority also reruns after document.fonts.ready; give that
-    // callback a frame to settle before sampling visible links.
-    await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
 
     const data = await page.evaluate(() => {
       const links = Array.from(document.querySelectorAll('.nav-links .nav-link'));
@@ -119,15 +115,20 @@ async function main() {
                      `(menu has ${data.moreMenuLinks.length}, expected ${data.hiddenInline.length})`);
       }
     }
-    const missingHighPri = HIGH_PRIORITY_HREFS.filter(h => !data.visibleHrefs.includes(h));
-    if (missingHighPri.length) {
-      reasons.push(`high-priority link(s) NOT visible inline: ${missingHighPri.join(', ')} ` +
-                   `(visible=[${data.visibleHrefs.join(', ')}])`);
-    }
-    if (c.requireBeyondHighPri) {
+    // #1105 MINOR 7: identity, not just cardinality. The 5 visible links
+    // at the collapsed widths must be EXACTLY the high-priority set
+    // (Home/Packets/Map/Live/Nodes). A buggy queue that hid Home and
+    // showed Lab would still pass `visibleCount >= 5`.
+    if (c.requireExactHighPri) {
+      const missingHighPri = HIGH_PRIORITY_HREFS.filter(h => !data.visibleHrefs.includes(h));
+      if (missingHighPri.length) {
+        reasons.push(`high-priority link(s) NOT visible inline: ${missingHighPri.join(', ')} ` +
+                     `(visible=[${data.visibleHrefs.join(', ')}])`);
+      }
       const extra = data.visibleHrefs.filter(h => !HIGH_PRIORITY_HREFS.includes(h));
-      if (extra.length === 0) {
-        reasons.push(`no non-high-priority links visible at ${c.w}px; overflow appears forced instead of measured`);
+      if (extra.length) {
+        reasons.push(`unexpected non-high-priority link(s) visible: ${extra.join(', ')} ` +
+                     `(expected exactly [${HIGH_PRIORITY_HREFS.join(', ')}])`);
       }
     }
 
@@ -142,13 +143,15 @@ async function main() {
     }
   }
 
-  // #1105 MINOR 9: when at a collapsed width, navigating to a route
-  // whose link overflows into the More menu must light up #navMoreBtn
-  // with .active. Verifies rebuildMoreMenu() correctly mirrors the
-  // active state from the inline (cloned) link to the More button on
-  // each hashchange (applyNavPriority is wired to hashchange and runs
-  // after the route handler's class toggles).
-  await page.setViewportSize({ width: 800, height: HEIGHT });
+  // #1105 MINOR 9 (updated by #1391): the active-route pill is now
+  // PINNED inline at any viewport ≥768px — even if it is not a
+  // data-priority="high" link. So when we navigate to /#/observers
+  // (non-high) at 1080px, the observers link MUST stay inline and the
+  // More menu MUST NOT contain it. The navMoreBtn .active mirror only
+  // fires when the active route is actually in the dropdown — under
+  // #1391 that can no longer happen at any width ≥768px, so this test
+  // verifies the inverse contract.
+  await page.setViewportSize({ width: 1080, height: HEIGHT });
   await page.goto(`${BASE}/#/observers`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('.top-nav .nav-links');
   await page.evaluate(() => document.fonts && document.fonts.ready ? document.fonts.ready : null);
@@ -170,72 +173,45 @@ async function main() {
   const activeMirror = await page.evaluate(() => {
     const observersInline = document.querySelector('.nav-links .nav-link[href="#/observers"]');
     const inlineHidden = observersInline && observersInline.classList.contains('is-overflow');
+    const inlineActive = observersInline && observersInline.classList.contains('active');
+    const inlineWidth = observersInline ? observersInline.getBoundingClientRect().width : 0;
     const moreBtn = document.getElementById('navMoreBtn');
     const moreBtnActive = moreBtn ? moreBtn.classList.contains('active') : false;
-    const moreMenuActiveHrefs = Array.from(document.querySelectorAll('#navMoreMenu .nav-link.active'))
+    const moreMenuHrefs = Array.from(document.querySelectorAll('#navMoreMenu .nav-link'))
       .map(a => a.getAttribute('href'));
-    return { inlineHidden, moreBtnActive, moreMenuActiveHrefs };
+    return { inlineHidden, inlineActive, inlineWidth, moreBtnActive, moreMenuHrefs };
   });
 
   const mirrorReasons = [];
-  if (!activeMirror.inlineHidden) {
-    mirrorReasons.push('precondition: #/observers should be in the More menu at 800px (not visible inline)');
+  // #1391: active link MUST stay inline (not overflowed).
+  if (activeMirror.inlineHidden) {
+    mirrorReasons.push('#1391 contract: #/observers is active route — MUST stay inline at 1080px, not in More');
   }
-  if (!activeMirror.moreBtnActive) {
-    mirrorReasons.push('navMoreBtn missing .active class while #/observers is the active route');
+  if (!activeMirror.inlineActive) {
+    mirrorReasons.push('inline #/observers link missing .active class');
   }
-  if (!activeMirror.moreMenuActiveHrefs.includes('#/observers')) {
-    mirrorReasons.push(`More-menu clone of #/observers missing .active (active hrefs in menu: [${activeMirror.moreMenuActiveHrefs.join(', ')}])`);
+  if (activeMirror.inlineWidth === 0) {
+    mirrorReasons.push('inline #/observers has zero width (clipped)');
+  }
+  // #1391: navMoreBtn should NOT have .active because the active link
+  // is inline, not in the dropdown.
+  if (activeMirror.moreBtnActive) {
+    mirrorReasons.push('navMoreBtn has .active but active route #/observers is inline (mirror should be off)');
+  }
+  // #1391: More menu must NOT contain the active link.
+  if (activeMirror.moreMenuHrefs.includes('#/observers')) {
+    mirrorReasons.push(`More menu contains active route #/observers (must be inline only): menu=[${activeMirror.moreMenuHrefs.join(', ')}]`);
   }
   if (mirrorReasons.length === 0) {
     passes++;
-    console.log(`  ✅ active-mirror @800 #/observers: navMoreBtn.active=true, menu .active=#/observers`);
+    console.log(`  ✅ active-pinned @1080 #/observers: inline + .active set, More mirror off, menu excludes active`);
   } else {
     failures++;
-    console.log(`  ❌ active-mirror @800 #/observers: ${mirrorReasons.join(' | ')}`);
-  }
-
-  await page.click('#navMoreBtn');
-  await page.evaluate(() => new Promise(r => requestAnimationFrame(r)));
-  const menuClip = await page.evaluate(() => {
-    const nav = document.querySelector('.top-nav');
-    const menu = document.getElementById('navMoreMenu');
-    if (!nav || !menu) return { missing: true };
-    const navRect = nav.getBoundingClientRect();
-    const menuRect = menu.getBoundingClientRect();
-    return {
-      missing: false,
-      position: getComputedStyle(menu).position,
-      navBottom: navRect.bottom,
-      menuTop: menuRect.top,
-      menuBottom: menuRect.bottom,
-      menuHeight: menuRect.height,
-    };
-  });
-  const clipReasons = [];
-  if (menuClip.missing) {
-    clipReasons.push('missing nav or More menu element');
-  } else {
-    if (menuClip.position !== 'fixed') {
-      clipReasons.push(`More menu should use fixed positioning, got ${menuClip.position}`);
-    }
-    if (menuClip.menuTop < menuClip.navBottom - 1) {
-      clipReasons.push(`More menu starts inside the navbar (top=${menuClip.menuTop}, navBottom=${menuClip.navBottom})`);
-    }
-    if (menuClip.menuHeight < 40 || menuClip.menuBottom <= menuClip.navBottom + 24) {
-      clipReasons.push(`More menu appears clipped at navbar edge (height=${menuClip.menuHeight}, bottom=${menuClip.menuBottom}, navBottom=${menuClip.navBottom})`);
-    }
-  }
-  if (clipReasons.length === 0) {
-    passes++;
-    console.log(`  ✅ dropdown-escape @800: More menu renders below navbar without edge clipping`);
-  } else {
-    failures++;
-    console.log(`  ❌ dropdown-escape @800: ${clipReasons.join(' | ')}`);
+    console.log(`  ❌ active-pinned @1080 #/observers: ${mirrorReasons.join(' | ')}`);
   }
 
   await browser.close();
-  console.log(`\ntest-nav-priority-1102-e2e.js: ${failures === 0 ? 'OK' : 'FAIL'} — ${passes}/${CASES.length + 2} passed`);
+  console.log(`\ntest-nav-priority-1102-e2e.js: ${failures === 0 ? 'OK' : 'FAIL'} — ${passes}/${CASES.length + 1} passed`);
   process.exit(failures === 0 ? 0 : 1);
 }
 
