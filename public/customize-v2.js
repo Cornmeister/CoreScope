@@ -33,8 +33,8 @@
     'meshcore-live-heatmap-opacity'
   ];
 
-  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke'];
-  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke'];
+  var VALID_SECTIONS = ['theme', 'themeDark', 'nodeColors', 'typeColors', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke'];
+  var OBJECT_SECTIONS = ['theme', 'themeDark', 'nodeColors', 'typeColors', 'timestamps', 'markerStroke'];
   var SCALAR_SECTIONS = ['heatmapOpacity', 'liveHeatmapOpacity'];
   var DISTANCE_UNIT_VALUES = ['km', 'mi', 'auto'];
 
@@ -52,54 +52,6 @@
   };
 
   var THEME_COLOR_KEYS = Object.keys(THEME_CSS_MAP).filter(function (k) { return k !== 'font' && k !== 'mono'; });
-
-  // ── Brand logo swap helper (PR #1137) ──
-  // The default navbar brand logo is an inline <svg class="brand-logo"> so it
-  // inherits page CSS vars (--logo-text / --logo-accent / etc.). When an
-  // operator overrides branding.logoUrl in the customizer they expect a
-  // remote image — swap the inline <svg> for an <img>. Going back to the
-  // default URL or clearing the override swaps the <img> back to the inline
-  // <svg>. Layout dimensions (width=111 height=36) are preserved either way.
-  function _setBrandLogoUrl(url, alt) {
-    var node = document.querySelector('.nav-brand .brand-logo');
-    if (!node) return;
-    if (url) {
-      if (node.tagName.toLowerCase() === 'img') {
-        node.setAttribute('src', url);
-        if (alt != null) node.setAttribute('alt', alt);
-        return;
-      }
-      // swap inline <svg> → <img>
-      var img = document.createElement('img');
-      img.className = 'brand-logo';
-      img.setAttribute('src', url);
-      img.setAttribute('alt', alt || node.getAttribute('aria-label') || 'Brand');
-      // #1450 — DO NOT set width/height attrs. CSS img.brand-logo handles
-      // sizing (height:36px, width:auto, max-width cap) so the operator's
-      // natural image aspect ratio is preserved instead of being squished
-      // into the default SVG's 125x36 pill box.
-      node.parentNode.replaceChild(img, node);
-    } else {
-      if (node.tagName.toLowerCase() !== 'img') {
-        if (alt != null) node.setAttribute('aria-label', alt);
-        return;
-      }
-      // swap <img> → inline <svg> by clearing the src; here we just keep the
-      // <img> in place because we don't have the SVG markup at runtime
-      // (it lives in index.html). The next page reload restores the inline
-      // SVG. Setting src to the default URL is a graceful intermediate.
-      node.setAttribute('src', 'img/corescope-logo.svg');
-      if (alt != null) node.setAttribute('alt', alt);
-    }
-  }
-  function _setBrandAlt(alt) {
-    var node = document.querySelector('.nav-brand .brand-logo');
-    if (!node) return;
-    if (node.tagName.toLowerCase() === 'img') node.setAttribute('alt', alt);
-    else node.setAttribute('aria-label', alt);
-    var brandLink = document.querySelector('.nav-brand');
-    if (brandLink) brandLink.setAttribute('aria-label', alt + ' home');
-  }
 
   // ── Presets (copied from v1 customize.js) ──
   var PRESETS = {
@@ -453,11 +405,6 @@
           }
         }
         if (Object.keys(ts).length) clean[key] = ts;
-      } else if (key === 'branding' || key === 'home') {
-        // Pass through as-is (object shape)
-        if (typeof delta[key] === 'object' && delta[key] !== null) {
-          clean[key] = JSON.parse(JSON.stringify(delta[key]));
-        }
       } else {
         // Unknown key — pass through for forward compatibility
         clean[key] = delta[key];
@@ -503,10 +450,6 @@
 
   function computeEffective(serverConfig, userOverrides) {
     var effective = JSON.parse(JSON.stringify(serverConfig || {}));
-    // Defense-in-depth: if server returned home:null, use built-in defaults
-    if (!effective.home || typeof effective.home !== 'object') {
-      effective.home = JSON.parse(JSON.stringify(DEFAULT_HOME));
-    }
     if (!userOverrides || typeof userOverrides !== 'object') return effective;
     for (var key in userOverrides) {
       if (!userOverrides.hasOwnProperty(key)) continue;
@@ -692,26 +635,6 @@
       }
     }
 
-    // Branding
-    var br = effectiveConfig.branding;
-    if (br) {
-      if (br.siteName) {
-        document.title = br.siteName;
-        _setBrandAlt(br.siteName);
-        var brandEl = document.querySelector('.brand-text');
-        if (brandEl) brandEl.textContent = br.siteName;
-      }
-      if (br.logoUrl) {
-        _setBrandLogoUrl(br.logoUrl, br.siteName || null);
-        var iconEl = document.querySelector('.brand-icon');
-        if (iconEl) iconEl.innerHTML = '<img src="' + br.logoUrl + '" style="height:24px" onerror="this.style.display=\'none\'">';
-      }
-      if (br.faviconUrl) {
-        var fav = document.querySelector('link[rel="icon"]');
-        if (fav) fav.href = br.faviconUrl;
-      }
-    }
-
     // Dispatch theme-changed event (bare, no payload — matches existing behavior)
     window.dispatchEvent(new CustomEvent('theme-changed'));
   }
@@ -834,7 +757,7 @@
       if (raw) {
         var parsed = JSON.parse(raw);
         if (parsed && typeof parsed === 'object') {
-          var allowedKeys = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home'];
+          var allowedKeys = ['theme', 'themeDark', 'nodeColors', 'typeColors'];
           for (var k = 0; k < allowedKeys.length; k++) {
             if (parsed[allowedKeys[k]] && typeof parsed[allowedKeys[k]] === 'object') {
               delta[allowedKeys[k]] = JSON.parse(JSON.stringify(parsed[allowedKeys[k]]));
@@ -969,7 +892,7 @@
   // ── Customizer panel UI ──
 
   var _panelEl = null;
-  var _activeTab = 'branding';
+  var _activeTab = 'theme';
   var _styleEl = null;
 
   // GeoFilter tab state
@@ -1103,10 +1026,8 @@
 
   function _renderTabs() {
     var tabs = [
-      { id: 'branding', label: '🏷️', title: 'Branding', badge: _tabBadge('branding') },
       { id: 'theme', label: '🎨', title: 'Theme', badge: _tabBadge(isDarkMode() ? 'themeDark' : 'theme') },
       { id: 'nodes', label: '🎯', title: 'Colors', badge: (function () { var n = _countOverrides('nodeColors') + _countOverrides('typeColors'); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
-      { id: 'home', label: '🏠', title: 'Home', badge: _tabBadge('home') },
       { id: 'display', label: '🖥️', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'geofilter', label: '🗺️', title: 'GeoFilter' },
       { id: 'export', label: '📤', title: 'Export' }
@@ -1177,18 +1098,6 @@
     }
     html += '</div></div>';
     return html;
-  }
-
-  function _renderBranding() {
-    var eff = _getEffective();
-    var b = eff.branding || {};
-    var logoPreview = b.logoUrl ? '<img class="cust-preview-img" src="' + escAttr(b.logoUrl) + '" alt="Logo preview" onerror="this.style.display=\'none\'">' : '';
-    return '<div class="cust-panel' + (_activeTab === 'branding' ? ' active' : '') + '" data-panel="branding">' +
-      '<div class="cust-field"><label>Site Name' + _overrideDot('branding', 'siteName') + '</label><input type="text" data-cv2-field="branding.siteName" value="' + escAttr(b.siteName || '') + '"></div>' +
-      '<div class="cust-field"><label>Tagline' + _overrideDot('branding', 'tagline') + '</label><input type="text" data-cv2-field="branding.tagline" value="' + escAttr(b.tagline || '') + '"></div>' +
-      '<div class="cust-field"><label>Logo URL' + _overrideDot('branding', 'logoUrl') + '</label><input type="text" data-cv2-field="branding.logoUrl" value="' + escAttr(b.logoUrl || '') + '" placeholder="https://...">' + logoPreview + '</div>' +
-      '<div class="cust-field"><label>Favicon URL' + _overrideDot('branding', 'faviconUrl') + '</label><input type="text" data-cv2-field="branding.faviconUrl" value="' + escAttr(b.faviconUrl || '') + '" placeholder="https://..."></div>' +
-    '</div>';
   }
 
   function _renderTheme() {
@@ -1431,54 +1340,6 @@
         '<select id="cv2-dark-tile-provider" data-cv2-dark-tile-provider style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text)">' +
         options +
         '</select></div>';
-  }
-
-  function _renderHome() {
-    var eff = _getEffective();
-    var h = eff.home || {};
-    var steps = h.steps || [];
-    var checklist = h.checklist || [];
-    var footerLinks = h.footerLinks || [];
-
-    var stepsHtml = steps.map(function (s, i) {
-      return '<div class="cust-list-item">' +
-        '<div class="cust-list-row">' +
-          '<input class="cust-emoji-input" data-cv2-home="steps.' + i + '.emoji" value="' + escAttr(s.emoji) + '" placeholder="📡">' +
-          '<input data-cv2-home="steps.' + i + '.title" value="' + escAttr(s.title) + '" placeholder="Title">' +
-          '<button class="cust-list-btn" data-cv2-move="steps.' + i + '.up">↑</button>' +
-          '<button class="cust-list-btn" data-cv2-move="steps.' + i + '.down">↓</button>' +
-          '<button class="cust-list-btn danger" data-cv2-rm="steps.' + i + '">✕</button>' +
-        '</div>' +
-        '<textarea data-cv2-home="steps.' + i + '.description" placeholder="Description" rows="2">' + esc(s.description) + '</textarea>' +
-        '<div class="cust-md-hint">Markdown: <code>**bold**</code> <code>*italic*</code> <code>`code`</code> <code>[text](url)</code></div></div>';
-    }).join('');
-
-    var checkHtml = checklist.map(function (c, i) {
-      return '<div class="cust-list-item">' +
-        '<div class="cust-list-row"><input data-cv2-home="checklist.' + i + '.question" value="' + escAttr(c.question) + '" placeholder="Question">' +
-          '<button class="cust-list-btn danger" data-cv2-rm="checklist.' + i + '">✕</button></div>' +
-        '<textarea data-cv2-home="checklist.' + i + '.answer" placeholder="Answer" rows="2">' + esc(c.answer) + '</textarea></div>';
-    }).join('');
-
-    var linksHtml = footerLinks.map(function (l, i) {
-      return '<div class="cust-list-item">' +
-        '<div class="cust-list-row"><input data-cv2-home="footerLinks.' + i + '.label" value="' + escAttr(l.label) + '" placeholder="Label">' +
-          '<button class="cust-list-btn danger" data-cv2-rm="footerLinks.' + i + '">✕</button></div>' +
-        '<input data-cv2-home="footerLinks.' + i + '.url" value="' + escAttr(l.url) + '" placeholder="URL"></div>';
-    }).join('');
-
-    return '<div class="cust-panel' + (_activeTab === 'home' ? ' active' : '') + '" data-panel="home">' +
-      '<div class="cust-field"><label>Hero Title' + _overrideDot('home', 'heroTitle') + '</label>' +
-        '<input type="text" data-cv2-field="home.heroTitle" value="' + escAttr(h.heroTitle || '') + '"></div>' +
-      '<div class="cust-field"><label>Hero Subtitle' + _overrideDot('home', 'heroSubtitle') + '</label>' +
-        '<input type="text" data-cv2-field="home.heroSubtitle" value="' + escAttr(h.heroSubtitle || '') + '"></div>' +
-      '<p class="cust-section-title" style="margin-top:20px">Steps</p>' + stepsHtml +
-      '<button class="cust-add-btn" data-cv2-add="steps">+ Add Step</button>' +
-      '<p class="cust-section-title" style="margin-top:24px">FAQ / Checklist</p>' + checkHtml +
-      '<button class="cust-add-btn" data-cv2-add="checklist">+ Add Question</button>' +
-      '<p class="cust-section-title" style="margin-top:24px">Footer Links</p>' + linksHtml +
-      '<button class="cust-add-btn" data-cv2-add="footerLinks">+ Add Link</button>' +
-    '</div>';
   }
 
   function _renderGeoFilter() {
@@ -1887,10 +1748,8 @@
     container.innerHTML =
       _renderTabs() +
       '<div class="cust-body">' +
-        _renderBranding() +
         _renderTheme() +
         _renderNodes() +
-        _renderHome() +
         _renderDisplay() +
         _renderGeoFilter() +
         _renderExport() +
@@ -2081,25 +1940,6 @@
         // Text inputs — debounced write on input
         inp.addEventListener('input', function () {
           setOverride(section, key, inp.value);
-          // Live branding updates
-          if (section === 'branding' && key === 'siteName') {
-            _setBrandAlt(inp.value);
-            var el = document.querySelector('.brand-text');
-            if (el) el.textContent = inp.value;
-            document.title = inp.value;
-          }
-          if (section === 'branding' && key === 'logoUrl') {
-            _setBrandLogoUrl(inp.value || '', null);
-            var iconEl = document.querySelector('.brand-icon');
-            if (iconEl) {
-              if (inp.value) iconEl.innerHTML = '<img src="' + inp.value + '" style="height:24px" onerror="this.style.display=\'none\'">';
-              else iconEl.textContent = '📡';
-            }
-          }
-          if (section === 'branding' && key === 'faviconUrl') {
-            var link = document.querySelector('link[rel="icon"]');
-            if (link && inp.value) link.href = inp.value;
-          }
         });
       }
     });
@@ -2177,64 +2017,6 @@
         delta.markerStroke = Object.assign({}, delta.markerStroke || {}, current);
         writeOverrides(delta);
         _runPipeline();
-      });
-    });
-
-    // Home page list editing
-    container.querySelectorAll('[data-cv2-home]').forEach(function (inp) {
-      inp.addEventListener('input', function () {
-        // Parse: steps.0.title → home.steps[0].title
-        var path = inp.dataset.cv2Home.split('.');
-        var eff = _getEffective();
-        var home = JSON.parse(JSON.stringify(eff.home || {}));
-        var arr = home[path[0]];
-        if (arr && arr[parseInt(path[1])]) {
-          arr[parseInt(path[1])][path[2]] = inp.value;
-          setOverride('home', path[0], arr);
-        }
-      });
-    });
-
-    // Home list move/remove
-    container.querySelectorAll('[data-cv2-move]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var parts = btn.dataset.cv2Move.split('.');
-        var listKey = parts[0];
-        var idx = parseInt(parts[1]);
-        var dir = parts[2] === 'up' ? -1 : 1;
-        var eff = _getEffective();
-        var home = JSON.parse(JSON.stringify(eff.home || {}));
-        var arr = home[listKey];
-        if (!arr) return;
-        var j = idx + dir;
-        if (j < 0 || j >= arr.length) return;
-        var tmp = arr[idx]; arr[idx] = arr[j]; arr[j] = tmp;
-        setOverride('home', listKey, arr);
-      });
-    });
-    container.querySelectorAll('[data-cv2-rm]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var parts = btn.dataset.cv2Rm.split('.');
-        var listKey = parts[0];
-        var idx = parseInt(parts[1]);
-        var eff = _getEffective();
-        var home = JSON.parse(JSON.stringify(eff.home || {}));
-        var arr = home[listKey];
-        if (!arr) return;
-        arr.splice(idx, 1);
-        setOverride('home', listKey, arr);
-      });
-    });
-    container.querySelectorAll('[data-cv2-add]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var listKey = btn.dataset.cv2Add;
-        var eff = _getEffective();
-        var home = JSON.parse(JSON.stringify(eff.home || {}));
-        var arr = home[listKey] || [];
-        if (listKey === 'steps') arr.push({ emoji: '📌', title: '', description: '' });
-        else if (listKey === 'checklist') arr.push({ question: '', answer: '' });
-        else if (listKey === 'footerLinks') arr.push({ label: '', url: '' });
-        setOverride('home', listKey, arr);
       });
     });
 
@@ -2423,26 +2205,6 @@
   document.addEventListener('DOMContentLoaded', function () {
     var btn = document.getElementById('customizeToggle');
     if (btn) btn.addEventListener('click', toggle);
-
-    // Re-apply branding from overrides once DOM is ready
-    var overrides = readOverrides();
-    if (overrides.branding) {
-      if (overrides.branding.siteName) {
-        _setBrandAlt(overrides.branding.siteName);
-        var brandEl = document.querySelector('.brand-text');
-        if (brandEl) brandEl.textContent = overrides.branding.siteName;
-        document.title = overrides.branding.siteName;
-      }
-      if (overrides.branding.logoUrl) {
-        _setBrandLogoUrl(overrides.branding.logoUrl, overrides.branding.siteName || null);
-        var iconEl = document.querySelector('.brand-icon');
-        if (iconEl) iconEl.innerHTML = '<img src="' + overrides.branding.logoUrl + '" style="height:24px" onerror="this.style.display=\'none\'">';
-      }
-      if (overrides.branding.faviconUrl) {
-        var link = document.querySelector('link[rel="icon"]');
-        if (link) link.href = overrides.branding.faviconUrl;
-      }
-    }
 
     // Watch dark/light mode toggle and re-apply
     new MutationObserver(function () {
