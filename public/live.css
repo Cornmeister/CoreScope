@@ -583,7 +583,7 @@
   .live-legend { font-size: 10px; padding: 8px 10px; }
   .live-header { gap: 8px; padding: 6px 12px; }
   .live-stat-pill { font-size: 11px; padding: 2px 8px; }
-  .live-toggles { font-size: 10px; gap: 6px; }
+  .live-toggles, .live-menubar { font-size: 10px; gap: 6px; }
 
   /* Show controls toggle button */
   .live-controls-toggle { display: inline-flex; }
@@ -618,7 +618,8 @@
   /* Expanded body on narrow: stack so it never overflows the cluster */
   .live-controls.is-expanded { max-width: calc(100vw - 24px); margin-top: 12px; }
   .live-controls.is-expanded .live-controls-body { flex-wrap: wrap; }
-  .live-controls.is-expanded .live-toggles { flex-wrap: wrap; max-height: 50vh; overflow-y: auto; }
+  .live-controls.is-expanded .live-toggles,
+  .live-controls.is-expanded .live-menubar { flex-wrap: wrap; max-height: 50vh; overflow-y: auto; }
 }
 
 /* ---- Responsive ---- */
@@ -636,13 +637,17 @@
   .live-header { align-items: center; }
   .live-header .live-stats-row,
   .live-header .live-toggles,
+  .live-header .live-menubar,
   .live-header .audio-controls { display: none; }
   .live-header.is-expanded .live-stats-row,
-  .live-header.is-expanded .live-toggles { display: flex; }
+  .live-header.is-expanded .live-toggles,
+  .live-header.is-expanded .live-menubar { display: flex; }
   .live-header.is-expanded .audio-controls:not(.hidden) { display: flex; }
   .live-stats-row { flex-wrap: wrap; gap: 4px; }
   .live-stat-pill { font-size: 11px; padding: 2px 7px; }
   .live-toggles { font-size: 10px; gap: 6px; margin-left: 0; overflow-x: auto; flex-wrap: nowrap; width: 100%; min-width: 0; }
+  /* Grouped menubar wraps (a few compact buttons) instead of horizontal-scrolling. */
+  .live-menubar { font-size: 10px; gap: 6px; margin-left: 0; flex-wrap: wrap; width: 100%; min-width: 0; }
   .live-title { font-size: 12px; letter-spacing: 1px; }
 
   /* #1234 chrome-reduction pass 2 — mobile-only adjustments.
@@ -1449,6 +1454,7 @@
 /* ── Auto-compact state: title + stats visible, toggles hidden (desktop only) ── */
 @media (min-width: 641px) {
   .live-header.is-compact .live-toggles,
+  .live-header.is-compact .live-menubar,
   .live-header.is-compact .audio-controls {
     display: none !important;
   }
