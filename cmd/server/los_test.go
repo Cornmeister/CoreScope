@@ -120,6 +120,58 @@ func TestLOSAnalyze_BlockedPath(t *testing.T) {
 	}
 }
 
+func TestHandleLOS_EndpointGap(t *testing.T) {
+	// Mock elevation API where point A (52.000000,4.000000) has no data (null) and
+	// every other point resolves to 50 m. No fallback dataset is configured, so the
+	// hole at A survives and must be reported as an endpoint gap.
+	mockElev := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		points := strings.Split(r.URL.Query().Get("locations"), "|")
+		results := make([]map[string]interface{}, len(points))
+		for i, p := range points {
+			if p == "52.000000,4.000000" {
+				results[i] = map[string]interface{}{"elevation": nil}
+			} else {
+				results[i] = map[string]interface{}{"elevation": 50.0}
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"results": results})
+	}))
+	defer mockElev.Close()
+
+	cfg := &Config{LOS: &LOSConfig{
+		ElevationURL:  mockElev.URL,
+		SampleMin:     10,
+		SampleMax:     10,
+		CacheTTLHours: 1,
+	}}
+	srv := &Server{cfg: cfg, perfStats: NewPerfStats()}
+	r := mux.NewRouter()
+	r.HandleFunc("/api/los", srv.handleLOS).Methods("POST")
+
+	body := strings.NewReader(`{"lat_a":52.0,"lon_a":4.0,"lat_b":52.03,"lon_b":4.03,"antenna_height_a":2,"antenna_height_b":2}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/los", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp losResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.DataGaps {
+		t.Errorf("expected data_gaps true")
+	}
+	if !resp.EndpointGapA {
+		t.Errorf("expected endpoint_gap_a true (point A had no elevation)")
+	}
+	if resp.EndpointGapB {
+		t.Errorf("expected endpoint_gap_b false (point B had elevation)")
+	}
+}
+
 func TestHandleLOS_BadRequest(t *testing.T) {
 	srv := &Server{cfg: &Config{}, perfStats: NewPerfStats()}
 	r := mux.NewRouter()

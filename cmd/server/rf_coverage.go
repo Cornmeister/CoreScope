@@ -36,6 +36,7 @@ type rfCoverageResponse struct {
 	Model          string            `json:"model"`
 	SensitivityDBm float64           `json:"sensitivity_dbm"`
 	DataGaps       bool              `json:"data_gaps,omitempty"`
+	CenterGap      bool              `json:"center_gap,omitempty"`
 }
 
 // ─── Math ──────────────────────────────────────────────────────────────────────
@@ -109,7 +110,7 @@ func destCoordFromBearing(lat, lon, distKm, bearing float64) (float64, float64) 
 // computeRFCoverage samples numBearings radial directions from req.Lat/Lon,
 // fetching all elevation points in one batched call, then walks each radial to
 // find the farthest step where the link budget and terrain LOS are still met.
-func (h *losHandler) computeRFCoverage(ctx context.Context, req rfCoverageRequest, maxRangeKm float64, numBearings int, stepKm float64) ([]rfCoveragePoint, bool, error) {
+func (h *losHandler) computeRFCoverage(ctx context.Context, req rfCoverageRequest, maxRangeKm float64, numBearings int, stepKm float64) (coverage []rfCoveragePoint, dataGaps, centerGap bool, err error) {
 	n := rfPathLossExponent(req.Model)
 	sensitivity := rfSensitivityDBm(req.SF)
 	numSteps := int(maxRangeKm / stepKm)
@@ -140,15 +141,19 @@ func (h *losHandler) computeRFCoverage(ctx context.Context, req rfCoverageReques
 		lats[i] = p.lat
 		lons[i] = p.lon
 	}
-	elevs, dataGaps, err := h.fetchElevations(ctx, lats, lons)
-	if err != nil {
-		return nil, false, err
+	elevs, gaps, ferr := h.fetchElevations(ctx, lats, lons)
+	if ferr != nil {
+		return nil, false, false, ferr
 	}
+	dataGaps = anyTrue(gaps)
+	// index 0 is the TX. A gap there means the whole coverage was computed from a
+	// sea-level TX base, not the real ground under the transmitter.
+	centerGap = gaps[0]
 
 	txElev := elevs[0] + req.AntennaHeight
 
 	// ── Walk each radial ───────────────────────────────────────────────────────
-	coverage := make([]rfCoveragePoint, numBearings)
+	coverage = make([]rfCoveragePoint, numBearings)
 	for b := 0; b < numBearings; b++ {
 		bearing := float64(b) * 360.0 / float64(numBearings)
 		offset := bearingOffsets[b]
@@ -199,7 +204,7 @@ func (h *losHandler) computeRFCoverage(ctx context.Context, req rfCoverageReques
 		coverage[b] = rfCoveragePoint{Lat: endLat, Lon: endLon, RangeKm: edgeKm}
 	}
 
-	return coverage, dataGaps, nil
+	return coverage, dataGaps, centerGap, nil
 }
 
 // ─── HTTP handler ──────────────────────────────────────────────────────────────
@@ -248,7 +253,7 @@ func (s *Server) handleRFCoverage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h := s.getLOSHandler()
-	coverage, dataGaps, err := h.computeRFCoverage(
+	coverage, dataGaps, centerGap, err := h.computeRFCoverage(
 		r.Context(), req,
 		s.cfg.RFMaxRangeKm(), s.cfg.RFBearings(), s.cfg.RFStepKm(),
 	)
@@ -268,6 +273,7 @@ func (s *Server) handleRFCoverage(w http.ResponseWriter, r *http.Request) {
 		Model:          req.Model,
 		SensitivityDBm: rfSensitivityDBm(req.SF),
 		DataGaps:       dataGaps,
+		CenterGap:      centerGap,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

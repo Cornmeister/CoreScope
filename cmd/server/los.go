@@ -49,6 +49,8 @@ type losResponse struct {
 	MaxViolationM float64           `json:"max_violation_m"`
 	DistanceKm    float64           `json:"distance_km"`
 	DataGaps      bool              `json:"data_gaps,omitempty"`
+	EndpointGapA  bool              `json:"endpoint_gap_a,omitempty"`
+	EndpointGapB  bool              `json:"endpoint_gap_b,omitempty"`
 	Profile       []losProfilePoint `json:"profile"`
 	Relay         *losRelayPoint    `json:"relay"`
 }
@@ -196,9 +198,16 @@ type topoResponse struct {
 	Results []topoPoint `json:"results"`
 }
 
-func (h *losHandler) fetchElevations(ctx context.Context, lats, lons []float64) (elevs []float64, dataGaps bool, err error) {
+// fetchElevations resolves an elevation (m ASL) for every (lat, lon) point. It
+// returns a per-point gaps slice: gaps[i] is true when neither the primary nor
+// the fallback dataset had data for point i, in which case elevs[i] is 0 (a
+// sea-level estimate). Callers can inspect specific indices — e.g. the path
+// endpoints or a coverage centre — where a gap is more consequential than a
+// gap on an intermediate sample.
+func (h *losHandler) fetchElevations(ctx context.Context, lats, lons []float64) (elevs []float64, gaps []bool, err error) {
 	n := len(lats)
 	elevs = make([]float64, n)
+	gaps = make([]bool, n)
 	missing := make([]int, 0, n)
 
 	for i := 0; i < n; i++ {
@@ -209,7 +218,7 @@ func (h *losHandler) fetchElevations(ctx context.Context, lats, lons []float64) 
 		}
 	}
 	if len(missing) == 0 {
-		return elevs, false, nil
+		return elevs, gaps, nil
 	}
 
 	fallback := h.cfg.LOSElevationFallbackDataset()
@@ -218,7 +227,7 @@ func (h *losHandler) fetchElevations(ctx context.Context, lats, lons []float64) 
 	resolved, stillMissing, perr := h.fetchDataset(ctx, h.cfg.LOSElevationDataset(), missing, lats, lons)
 	if perr != nil {
 		if fallback == "" {
-			return nil, false, perr // preserve original behaviour when no fallback is configured
+			return nil, nil, perr // preserve original behaviour when no fallback is configured
 		}
 		// With a fallback configured, a primary failure is not fatal — let the
 		// fallback dataset try every point the primary couldn't return.
@@ -246,11 +255,23 @@ func (h *losHandler) fetchElevations(ctx context.Context, lats, lons []float64) 
 	}
 
 	if len(stillMissing) > 0 {
-		dataGaps = true
 		log.Printf("[los] %d/%d profile points had no elevation (primary %q, fallback %q) — using 0",
 			len(stillMissing), n, h.cfg.LOSElevationDataset(), fallback)
 	}
-	return elevs, dataGaps, nil
+	for _, idx := range stillMissing {
+		gaps[idx] = true
+	}
+	return elevs, gaps, nil
+}
+
+// anyTrue reports whether any element of the slice is true.
+func anyTrue(bs []bool) bool {
+	for _, b := range bs {
+		if b {
+			return true
+		}
+	}
+	return false
 }
 
 // fetchDataset queries a single opentopodata dataset for the given point indices,
@@ -362,12 +383,17 @@ func (s *Server) handleLOS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h := s.getLOSHandler()
-	elevs, dataGaps, err := h.fetchElevations(r.Context(), lats, lons)
+	elevs, gaps, err := h.fetchElevations(r.Context(), lats, lons)
 	if err != nil {
 		log.Printf("[los] elevation fetch failed: %v", err)
 		writeError(w, http.StatusBadGateway, "elevation API unavailable")
 		return
 	}
+	dataGaps := anyTrue(gaps)
+	// A gap on an endpoint (the antenna base) shifts the whole sightline, so it
+	// is far more consequential than a gap on an intermediate sample.
+	endpointGapA := gaps[0]
+	endpointGapB := gaps[n-1]
 
 	elevA := elevs[0] + req.AntennaHeightA
 	elevB := elevs[n-1] + req.AntennaHeightB
@@ -395,6 +421,8 @@ func (s *Server) handleLOS(w http.ResponseWriter, r *http.Request) {
 		MaxViolationM: analysis.MaxViolationM,
 		DistanceKm:    distKm,
 		DataGaps:      dataGaps,
+		EndpointGapA:  endpointGapA,
+		EndpointGapB:  endpointGapB,
 		Profile:       profile,
 		Relay:         analysis.Relay,
 	}

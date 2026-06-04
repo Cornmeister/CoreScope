@@ -169,6 +169,60 @@ func mockRFElevServer(t *testing.T) *httptest.Server {
 	}))
 }
 
+func TestHandleRFCoverage_CenterGap(t *testing.T) {
+	// Every point resolves to 0 m EXCEPT the TX (52.000000,5.000000), which returns
+	// null — simulating the transmitter sitting in an elevation gap. That must be
+	// flagged as a center gap (the whole coverage was computed from a sea-level TX).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		points := strings.Split(r.URL.Query().Get("locations"), "|")
+		type dataset struct {
+			Elevation *float64 `json:"elevation"`
+		}
+		type point struct {
+			Datasets []dataset `json:"datasets"`
+		}
+		type resp struct {
+			Results []point `json:"results"`
+		}
+		zero := 0.0
+		results := make([]point, len(points))
+		for i, p := range points {
+			if p == "52.000000,5.000000" {
+				results[i] = point{Datasets: []dataset{{Elevation: nil}}}
+			} else {
+				results[i] = point{Datasets: []dataset{{Elevation: &zero}}}
+			}
+		}
+		json.NewEncoder(w).Encode(resp{Results: results})
+	}))
+	defer srv.Close()
+
+	cfg := &Config{LOS: &LOSConfig{ElevationURL: srv.URL, CacheTTLHours: 0}}
+	s := &Server{cfg: cfg}
+	router := mux.NewRouter()
+	router.HandleFunc("/api/rf-coverage", s.handleRFCoverage).Methods("POST")
+
+	body := `{"lat":52.0,"lon":5.0,"tx_power_dbm":20,"freq_mhz":869.618,"sf":7,"antenna_height":2,"model":"free"}`
+	req := httptest.NewRequest("POST", "/api/rf-coverage", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	var resp rfCoverageResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if !resp.CenterGap {
+		t.Errorf("expected center_gap true when TX has no elevation")
+	}
+	if !resp.DataGaps {
+		t.Errorf("expected data_gaps true when TX has no elevation")
+	}
+}
+
 func TestHandleRFCoverage_MockElevation(t *testing.T) {
 	srv := mockRFElevServer(t)
 	defer srv.Close()
