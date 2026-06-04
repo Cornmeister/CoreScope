@@ -181,7 +181,7 @@ func (h *losHandler) computeRFCoverage(ctx context.Context, req rfCoverageReques
 				profile[j] = losProfilePoint{
 					Lat: lats[idx], Lon: lons[idx],
 					TerrainElev: terrain, LOSElev: losElevJ,
-					Bulge: bulge, Blocked: terrain > (losElevJ + bulge),
+					Bulge: bulge, Blocked: sampleViolationM(terrain, losElevJ, bulge) > 0,
 				}
 			}
 

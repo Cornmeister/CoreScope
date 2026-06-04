@@ -257,8 +257,10 @@
     var labels = profile.map(function (_, i) {
       return (i / Math.max(n - 1, 1) * totalKm).toFixed(2);
     });
-    var terrain = profile.map(function (p) { return p.terrain_elev; });
-    var losLine  = profile.map(function (p) { return p.los_elev + p.bulge; });
+    // Earth curvature raises the terrain relative to the straight RF ray, so plot
+    // effective terrain (terrain + bulge) against the straight line of sight.
+    var terrain = profile.map(function (p) { return p.terrain_elev + p.bulge; });
+    var losLine  = profile.map(function (p) { return p.los_elev; });
 
     losChart = new Chart(canvas, {
       type: 'line',
@@ -266,7 +268,7 @@
         labels: labels,
         datasets: [
           {
-            label: 'Terrain (m ASL)',
+            label: 'Terrain + Earth curvature (m ASL)',
             data: terrain,
             fill: true,
             backgroundColor: 'rgba(139,90,43,0.35)',
@@ -276,7 +278,7 @@
             tension: 0.2,
           },
           {
-            label: 'LOS line (with curvature)',
+            label: 'Line of sight (m ASL)',
             data: losLine,
             fill: false,
             borderColor: 'rgba(59,130,246,0.85)',

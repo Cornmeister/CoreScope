@@ -66,10 +66,18 @@ func earthBulgeM(t, distM float64) float64 {
 	return t * (1 - t) * distM * distM / (2 * earthRadiusM * kFactor)
 }
 
+// sampleViolationM returns how far a sample's terrain rises above the straight
+// line-of-sight after accounting for Earth curvature. Positive = obstruction.
+// Curvature raises the TERRAIN relative to the RF ray, so the bulge is added to
+// terrain (NOT to losElev).
+func sampleViolationM(terrainElev, losElev, bulge float64) float64 {
+	return (terrainElev + bulge) - losElev
+}
+
 func losAnalyze(profile []losProfilePoint) losAnalysisResult {
 	maxViolation := 0.0
 	for _, p := range profile {
-		v := p.TerrainElev - (p.LOSElev + p.Bulge)
+		v := sampleViolationM(p.TerrainElev, p.LOSElev, p.Bulge)
 		if v > maxViolation {
 			maxViolation = v
 		}
@@ -96,14 +104,14 @@ func findRelay(profile []losProfilePoint) *losRelayPoint {
 	for c := 1; c < len(profile)-1; c++ {
 		leftWorst := 0.0
 		for i := 0; i <= c; i++ {
-			v := profile[i].TerrainElev - (profile[i].LOSElev + profile[i].Bulge)
+			v := sampleViolationM(profile[i].TerrainElev, profile[i].LOSElev, profile[i].Bulge)
 			if v > leftWorst {
 				leftWorst = v
 			}
 		}
 		rightWorst := 0.0
 		for i := c; i < len(profile); i++ {
-			v := profile[i].TerrainElev - (profile[i].LOSElev + profile[i].Bulge)
+			v := sampleViolationM(profile[i].TerrainElev, profile[i].LOSElev, profile[i].Bulge)
 			if v > rightWorst {
 				rightWorst = v
 			}
@@ -369,7 +377,7 @@ func (s *Server) handleLOS(w http.ResponseWriter, r *http.Request) {
 		t := float64(i) / float64(n-1)
 		losElev := elevA + t*(elevB-elevA)
 		bulge := earthBulgeM(t, distM)
-		blocked := elevs[i] > (losElev + bulge)
+		blocked := sampleViolationM(elevs[i], losElev, bulge) > 0
 		profile[i] = losProfilePoint{
 			Lat:         lats[i],
 			Lon:         lons[i],

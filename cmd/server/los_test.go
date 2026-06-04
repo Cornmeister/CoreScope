@@ -63,6 +63,28 @@ func TestEarthBulgeM_Midpoint(t *testing.T) {
 	}
 }
 
+func TestSampleViolationM_CurvatureRaisesTerrain(t *testing.T) {
+	cases := []struct {
+		name                      string
+		terrain, los, bulge, want float64
+	}{
+		// 130 km midpoint, sea level, 2 m/2 m: observed bulge ~248, sightline ~4.
+		{"long link blocked by bulge", 0, 4, 248, 244},
+		// 30 km midpoint: bulge ~13.2 m, beyond the 2 m/2 m radio horizon -> blocked.
+		{"medium link blocked", 0, 2, 13.24, 11.24},
+		// 6 km midpoint: bulge ~0.66 m, within radio horizon -> clear (negative).
+		{"short link clear", 0, 2, 0.66, -1.34},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := sampleViolationM(c.terrain, c.los, c.bulge)
+			if math.Abs(got-c.want) > 0.01 {
+				t.Fatalf("violation = %.2f, want %.2f", got, c.want)
+			}
+		})
+	}
+}
+
 func TestLOSAnalyze_ClearPath(t *testing.T) {
 	profile := []losProfilePoint{
 		{TerrainElev: 0, LOSElev: 10, Bulge: 0},
@@ -79,18 +101,19 @@ func TestLOSAnalyze_ClearPath(t *testing.T) {
 }
 
 func TestLOSAnalyze_BlockedPath(t *testing.T) {
-	// Mountain at index 1 exceeds LOS line
+	// Mountain at index 1 exceeds LOS line. Curvature raises the terrain, so the
+	// 2 m bulge adds to the violation: (100 + 2) - 50 = 52.
 	profile := []losProfilePoint{
 		{TerrainElev: 10, LOSElev: 50, Bulge: 0},
-		{TerrainElev: 100, LOSElev: 50, Bulge: 2}, // blocked: 100 > 52
+		{TerrainElev: 100, LOSElev: 50, Bulge: 2}, // blocked: 100 + 2 > 50
 		{TerrainElev: 10, LOSElev: 50, Bulge: 0},
 	}
 	result := losAnalyze(profile)
 	if result.LOSClear {
 		t.Errorf("expected LOS blocked")
 	}
-	if math.Abs(result.MaxViolationM-48) > 1 {
-		t.Errorf("expected ~48m violation, got %.2f", result.MaxViolationM)
+	if math.Abs(result.MaxViolationM-52) > 1 {
+		t.Errorf("expected ~52m violation, got %.2f", result.MaxViolationM)
 	}
 	if result.Relay == nil {
 		t.Errorf("expected relay suggestion when blocked")
@@ -161,9 +184,11 @@ func TestHandleLOS_Integration(t *testing.T) {
 	r := mux.NewRouter()
 	r.HandleFunc("/api/los", srv.handleLOS).Methods("POST")
 
+	// Short ~4 km link: well within the 2 m/2 m radio horizon, so even with the
+	// Earth-curvature bulge added to the terrain the flat path stays clear.
 	body := strings.NewReader(`{
 		"lat_a": 52.0, "lon_a": 4.0,
-		"lat_b": 52.1, "lon_b": 4.1,
+		"lat_b": 52.03, "lon_b": 4.03,
 		"antenna_height_a": 2, "antenna_height_b": 2
 	}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/los", body)
