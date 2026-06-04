@@ -1445,8 +1445,12 @@
           const marker = nodeMarkers[key];
           const isVisible = bounds.contains(marker.getLatLng());
           const hasLayer = nodesLayer.hasLayer(marker);
-          if (isVisible && !hasLayer) nodesLayer.addLayer(marker);
-          else if (!isVisible && hasLayer) nodesLayer.removeLayer(marker);
+          // Respect the active node filter: never re-show a marker the filter
+          // hid (marker._nodeFiltered), even when it scrolls into view on
+          // zoom/pan. Culling was added after the node filter and was unaware
+          // of it, so the filter was lost on every zoom/move.
+          if (isVisible && !hasLayer && !marker._nodeFiltered) nodesLayer.addLayer(marker);
+          else if (hasLayer && (!isVisible || marker._nodeFiltered)) nodesLayer.removeLayer(marker);
         }
       });
     }
