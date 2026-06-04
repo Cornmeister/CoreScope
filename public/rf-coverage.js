@@ -136,6 +136,7 @@
     var sf    = parseInt(document.getElementById('rfc-sf').value, 10)  || 7;
     var ht    = parseFloat(document.getElementById('rfc-ht').value)    || 2;
     var model = document.getElementById('rfc-model').value             || 'free';
+    var maxRange = parseFloat(document.getElementById('rfc-maxrange').value) || 0;
 
     if (isNaN(lat) || isNaN(lon)) {
       showStatus('error', '❌ Set the TX position before running.');
@@ -151,6 +152,7 @@
         lat: lat, lon: lon,
         tx_power_dbm: power, freq_mhz: freq,
         sf: sf, antenna_height: ht, model: model,
+        max_range_km: maxRange,
       }),
     })
       .then(function (r) {
@@ -193,6 +195,17 @@
       ? '<br><span style="color:var(--status-red)">⚠️ The transmitter has no elevation data, so its antenna base was assumed to be at sea level. Coverage may be unreliable. Try a TX point with terrain coverage.</span>'
       : '';
 
+    var es = data.elev_sources;
+    var elevLine = '';
+    if (es) {
+      var parts = [(es.primary_dataset || 'primary') + ' ' + (es.primary || 0)];
+      if (es.fallback_dataset) parts.push(es.fallback_dataset + ' ' + (es.fallback || 0));
+      parts.push('none ' + (es.gap || 0));
+      elevLine = '<br>Elevation: <strong>' + parts.join(' · ') + '</strong>';
+    }
+
+    var capNote = data.max_range_km ? (' · Range cap: ' + data.max_range_km + ' km') : '';
+
     var sfLabel = data.sf ? ('SF' + data.sf) : 'SF7';
     showStatus('ok',
       '✅ ' + sfLabel +
@@ -202,6 +215,8 @@
       '<br>Sensitivity: <strong>' + data.sensitivity_dbm + ' dBm</strong>' +
       ' · Max range: <strong>' + maxKm + ' km</strong>' +
       ' · Avg range: <strong>' + avgKm + ' km</strong>' +
+      capNote +
+      elevLine +
       gapsNote +
       centerGapNote
     );
@@ -307,6 +322,10 @@
       '      <div class="rfc-field">',
       '        <label>Antenna Height (m)</label>',
       '        <input id="rfc-ht" type="number" value="2" min="1" max="100">',
+      '      </div>',
+      '      <div class="rfc-field">',
+      '        <label>Max range (km)</label>',
+      '        <input id="rfc-maxrange" type="number" value="20" min="1" max="100" step="1">',
       '      </div>',
       '      <div class="rfc-field">',
       '        <label>Environment</label>',

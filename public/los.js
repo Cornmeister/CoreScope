@@ -207,6 +207,17 @@
       });
   }
 
+  // Renders the elevation-source breakdown (how many sample points came from the
+  // primary dataset vs the fallback vs genuine gaps), so it is clear which data
+  // the result is actually based on.
+  function elevSourcesHtml(es) {
+    if (!es) return '';
+    var parts = [(es.primary_dataset || 'primary') + ' ' + (es.primary || 0)];
+    if (es.fallback_dataset) parts.push(es.fallback_dataset + ' ' + (es.fallback || 0));
+    parts.push('none ' + (es.gap || 0));
+    return '<div class="los-distance">Elevation: <strong>' + parts.join(' · ') + '</strong></div>';
+  }
+
   function renderResult(data) {
     _lastResult = data;
     var resultEl = document.getElementById('los-result');
@@ -247,6 +258,7 @@
     resultEl.innerHTML =
       '<div class="los-status ' + statusClass + '">' + statusText + '</div>' +
       '<div class="los-distance">Distance: <strong>' + data.distance_km.toFixed(2) + ' km</strong></div>' +
+      elevSourcesHtml(data.elev_sources) +
       gapsHtml +
       endpointGapHtml +
       '<div class="los-chart-head">' +

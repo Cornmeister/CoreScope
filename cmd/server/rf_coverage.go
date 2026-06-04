@@ -17,8 +17,13 @@ type rfCoverageRequest struct {
 	FreqMHz       float64 `json:"freq_mhz"`
 	SF            int     `json:"sf"`
 	AntennaHeight float64 `json:"antenna_height"`
-	Model         string  `json:"model"` // "free" | "suburban" | "urban" | "indoor"
+	Model         string  `json:"model"`        // "free" | "suburban" | "urban" | "indoor"
+	MaxRangeKm    float64 `json:"max_range_km"` // optional per-request probing radius; 0 = use config default
 }
+
+// rfMaxRangeCeilingKm bounds the per-request max range so the sample count
+// (1 + bearings*range/step) and the resulting elevation HTTP fan-out stay sane.
+const rfMaxRangeCeilingKm = 100.0
 
 type rfCoveragePoint struct {
 	Lat     float64 `json:"lat"`
@@ -35,8 +40,10 @@ type rfCoverageResponse struct {
 	SF             int               `json:"sf"`
 	Model          string            `json:"model"`
 	SensitivityDBm float64           `json:"sensitivity_dbm"`
+	MaxRangeKm     float64           `json:"max_range_km,omitempty"`
 	DataGaps       bool              `json:"data_gaps,omitempty"`
 	CenterGap      bool              `json:"center_gap,omitempty"`
+	ElevSources    *elevStats        `json:"elev_sources,omitempty"`
 }
 
 // ─── Math ──────────────────────────────────────────────────────────────────────
@@ -110,7 +117,7 @@ func destCoordFromBearing(lat, lon, distKm, bearing float64) (float64, float64) 
 // computeRFCoverage samples numBearings radial directions from req.Lat/Lon,
 // fetching all elevation points in one batched call, then walks each radial to
 // find the farthest step where the link budget and terrain LOS are still met.
-func (h *losHandler) computeRFCoverage(ctx context.Context, req rfCoverageRequest, maxRangeKm float64, numBearings int, stepKm float64) (coverage []rfCoveragePoint, dataGaps, centerGap bool, err error) {
+func (h *losHandler) computeRFCoverage(ctx context.Context, req rfCoverageRequest, maxRangeKm float64, numBearings int, stepKm float64) (coverage []rfCoveragePoint, dataGaps, centerGap bool, stats elevStats, err error) {
 	n := rfPathLossExponent(req.Model)
 	sensitivity := rfSensitivityDBm(req.SF)
 	numSteps := int(maxRangeKm / stepKm)
@@ -141,10 +148,11 @@ func (h *losHandler) computeRFCoverage(ctx context.Context, req rfCoverageReques
 		lats[i] = p.lat
 		lons[i] = p.lon
 	}
-	elevs, gaps, ferr := h.fetchElevations(ctx, lats, lons)
+	elevs, gaps, eStats, ferr := h.fetchElevations(ctx, lats, lons)
 	if ferr != nil {
-		return nil, false, false, ferr
+		return nil, false, false, elevStats{}, ferr
 	}
+	stats = eStats
 	dataGaps = anyTrue(gaps)
 	// index 0 is the TX. A gap there means the whole coverage was computed from a
 	// sea-level TX base, not the real ground under the transmitter.
@@ -204,7 +212,7 @@ func (h *losHandler) computeRFCoverage(ctx context.Context, req rfCoverageReques
 		coverage[b] = rfCoveragePoint{Lat: endLat, Lon: endLon, RangeKm: edgeKm}
 	}
 
-	return coverage, dataGaps, centerGap, nil
+	return coverage, dataGaps, centerGap, stats, nil
 }
 
 // ─── HTTP handler ──────────────────────────────────────────────────────────────
@@ -252,10 +260,21 @@ func (s *Server) handleRFCoverage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Range cap: per-request max_range_km overrides the config default, so taller
+	// antennas (a larger LOS horizon) are not clipped without editing config.json.
+	// Clamped to a hard ceiling to keep the sample/HTTP count bounded.
+	maxRangeKm := s.cfg.RFMaxRangeKm()
+	if req.MaxRangeKm > 0 {
+		maxRangeKm = req.MaxRangeKm
+	}
+	if maxRangeKm > rfMaxRangeCeilingKm {
+		maxRangeKm = rfMaxRangeCeilingKm
+	}
+
 	h := s.getLOSHandler()
-	coverage, dataGaps, centerGap, err := h.computeRFCoverage(
+	coverage, dataGaps, centerGap, eStats, err := h.computeRFCoverage(
 		r.Context(), req,
-		s.cfg.RFMaxRangeKm(), s.cfg.RFBearings(), s.cfg.RFStepKm(),
+		maxRangeKm, s.cfg.RFBearings(), s.cfg.RFStepKm(),
 	)
 	if err != nil {
 		log.Printf("[rf-coverage] error: %v", err)
@@ -272,8 +291,10 @@ func (s *Server) handleRFCoverage(w http.ResponseWriter, r *http.Request) {
 		SF:             req.SF,
 		Model:          req.Model,
 		SensitivityDBm: rfSensitivityDBm(req.SF),
+		MaxRangeKm:     maxRangeKm,
 		DataGaps:       dataGaps,
 		CenterGap:      centerGap,
+		ElevSources:    &eStats,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

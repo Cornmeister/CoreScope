@@ -223,6 +223,37 @@ func TestHandleRFCoverage_CenterGap(t *testing.T) {
 	}
 }
 
+func TestHandleRFCoverage_MaxRangeOverride(t *testing.T) {
+	srv := mockRFElevServer(t)
+	defer srv.Close()
+
+	cfg := &Config{LOS: &LOSConfig{ElevationURL: srv.URL, CacheTTLHours: 0}}
+	s := &Server{cfg: cfg}
+	router := mux.NewRouter()
+	router.HandleFunc("/api/rf-coverage", s.handleRFCoverage).Methods("POST")
+
+	// Request a max range above the ceiling; the response must report it clamped.
+	body := `{"lat":52.0,"lon":5.0,"sf":7,"antenna_height":2,"model":"free","max_range_km":9999}`
+	req := httptest.NewRequest("POST", "/api/rf-coverage", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	var resp rfCoverageResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if resp.MaxRangeKm != rfMaxRangeCeilingKm {
+		t.Errorf("max_range_km = %v, want clamped to %v", resp.MaxRangeKm, rfMaxRangeCeilingKm)
+	}
+	if resp.ElevSources == nil || resp.ElevSources.Primary == 0 {
+		t.Errorf("expected elev_sources with primary > 0, got %+v", resp.ElevSources)
+	}
+}
+
 func TestHandleRFCoverage_MockElevation(t *testing.T) {
 	srv := mockRFElevServer(t)
 	defer srv.Close()

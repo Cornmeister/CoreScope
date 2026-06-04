@@ -51,6 +51,7 @@ type losResponse struct {
 	DataGaps      bool              `json:"data_gaps,omitempty"`
 	EndpointGapA  bool              `json:"endpoint_gap_a,omitempty"`
 	EndpointGapB  bool              `json:"endpoint_gap_b,omitempty"`
+	ElevSources   *elevStats        `json:"elev_sources,omitempty"`
 	Profile       []losProfilePoint `json:"profile"`
 	Relay         *losRelayPoint    `json:"relay"`
 }
@@ -129,10 +130,33 @@ func findRelay(profile []losProfilePoint) *losRelayPoint {
 	return &losRelayPoint{Lat: p.Lat, Lon: p.Lon, TerrainElev: p.TerrainElev}
 }
 
+// ─── Elevation source tracking ───────────────────────────────────────────────
+
+// elevSource records which dataset resolved a point, so the API can report how
+// much of a profile came from the high-resolution primary dataset vs the coarse
+// fallback vs nothing at all (sea-level estimate).
+type elevSource byte
+
+const (
+	srcGap      elevSource = iota // neither dataset had data; estimated as 0 m
+	srcPrimary                    // resolved from the primary dataset (e.g. AHN)
+	srcFallback                   // resolved from the fallback dataset (e.g. SRTM)
+)
+
+// elevStats is the per-request elevation-source breakdown returned to clients.
+type elevStats struct {
+	PrimaryDataset  string `json:"primary_dataset"`
+	FallbackDataset string `json:"fallback_dataset,omitempty"`
+	Primary         int    `json:"primary"`
+	Fallback        int    `json:"fallback"`
+	Gap             int    `json:"gap"`
+}
+
 // ─── Elevation cache ───────────────────────────────────────────────────────────
 
 type elevCacheEntry struct {
 	elev      float64
+	src       elevSource
 	expiresAt time.Time
 }
 
@@ -150,20 +174,20 @@ func (c *elevationCache) cacheKey(lat, lon float64) string {
 	return fmt.Sprintf("%.4f,%.4f", lat, lon)
 }
 
-func (c *elevationCache) get(lat, lon float64) (float64, bool) {
+func (c *elevationCache) get(lat, lon float64) (float64, elevSource, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.entries[c.cacheKey(lat, lon)]
 	if !ok || time.Now().After(e.expiresAt) {
-		return 0, false
+		return 0, srcGap, false
 	}
-	return e.elev, true
+	return e.elev, e.src, true
 }
 
-func (c *elevationCache) set(lat, lon, elev float64) {
+func (c *elevationCache) set(lat, lon, elev float64, src elevSource) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.entries[c.cacheKey(lat, lon)] = elevCacheEntry{elev: elev, expiresAt: time.Now().Add(c.ttl)}
+	c.entries[c.cacheKey(lat, lon)] = elevCacheEntry{elev: elev, src: src, expiresAt: time.Now().Add(c.ttl)}
 }
 
 // ─── Elevation API client ──────────────────────────────────────────────────────
@@ -199,69 +223,84 @@ type topoResponse struct {
 }
 
 // fetchElevations resolves an elevation (m ASL) for every (lat, lon) point. It
-// returns a per-point gaps slice: gaps[i] is true when neither the primary nor
-// the fallback dataset had data for point i, in which case elevs[i] is 0 (a
-// sea-level estimate). Callers can inspect specific indices — e.g. the path
-// endpoints or a coverage centre — where a gap is more consequential than a
-// gap on an intermediate sample.
-func (h *losHandler) fetchElevations(ctx context.Context, lats, lons []float64) (elevs []float64, gaps []bool, err error) {
+// returns a per-point gaps slice (gaps[i] is true when neither the primary nor
+// the fallback dataset had data for point i, in which case elevs[i] is 0, a
+// sea-level estimate) and an elevStats breakdown of how many points each dataset
+// resolved. Callers can inspect specific gap indices — e.g. the path endpoints
+// or a coverage centre — where a gap is more consequential than a mid-path one.
+func (h *losHandler) fetchElevations(ctx context.Context, lats, lons []float64) (elevs []float64, gaps []bool, stats elevStats, err error) {
 	n := len(lats)
 	elevs = make([]float64, n)
 	gaps = make([]bool, n)
-	missing := make([]int, 0, n)
+	source := make([]elevSource, n) // srcGap until resolved
+	primaryDataset := h.cfg.LOSElevationDataset()
+	fallback := h.cfg.LOSElevationFallbackDataset()
+	stats = elevStats{PrimaryDataset: primaryDataset, FallbackDataset: fallback}
 
+	missing := make([]int, 0, n)
 	for i := 0; i < n; i++ {
-		if e, ok := h.cache.get(lats[i], lons[i]); ok {
+		if e, src, ok := h.cache.get(lats[i], lons[i]); ok {
 			elevs[i] = e
+			source[i] = src
 		} else {
 			missing = append(missing, i)
 		}
 	}
-	if len(missing) == 0 {
-		return elevs, gaps, nil
-	}
 
-	fallback := h.cfg.LOSElevationFallbackDataset()
-
-	// Primary dataset (e.g. AHN — high-resolution, but Netherlands-only).
-	resolved, stillMissing, perr := h.fetchDataset(ctx, h.cfg.LOSElevationDataset(), missing, lats, lons)
-	if perr != nil {
-		if fallback == "" {
-			return nil, nil, perr // preserve original behaviour when no fallback is configured
-		}
-		// With a fallback configured, a primary failure is not fatal — let the
-		// fallback dataset try every point the primary couldn't return.
-		log.Printf("[los] primary elevation dataset %q failed (%v) — falling back to %q", h.cfg.LOSElevationDataset(), perr, fallback)
-		resolved, stillMissing = nil, missing
-	}
-	for idx, e := range resolved {
-		elevs[idx] = e
-		h.cache.set(lats[idx], lons[idx], e)
-	}
-
-	// Fallback dataset (e.g. srtm30m) for points the primary lacks — outside the
-	// primary's coverage area (AHN stops at the Dutch border) or if it was down.
-	if fallback != "" && len(stillMissing) > 0 {
-		fbResolved, fbMissing, ferr := h.fetchDataset(ctx, fallback, stillMissing, lats, lons)
-		if ferr != nil {
-			log.Printf("[los] fallback elevation dataset %q failed: %v", fallback, ferr)
-		} else {
-			for idx, e := range fbResolved {
-				elevs[idx] = e
-				h.cache.set(lats[idx], lons[idx], e)
+	if len(missing) > 0 {
+		// Primary dataset (e.g. AHN — high-resolution, but Netherlands-only).
+		resolved, stillMissing, perr := h.fetchDataset(ctx, primaryDataset, missing, lats, lons)
+		if perr != nil {
+			if fallback == "" {
+				return nil, nil, stats, perr // preserve original behaviour when no fallback is configured
 			}
-			stillMissing = fbMissing
+			// With a fallback configured, a primary failure is not fatal — let the
+			// fallback dataset try every point the primary couldn't return.
+			log.Printf("[los] primary elevation dataset %q failed (%v) — falling back to %q", primaryDataset, perr, fallback)
+			resolved, stillMissing = nil, missing
+		}
+		for idx, e := range resolved {
+			elevs[idx] = e
+			source[idx] = srcPrimary
+			h.cache.set(lats[idx], lons[idx], e, srcPrimary)
+		}
+
+		// Fallback dataset (e.g. srtm30m) for points the primary lacks — outside the
+		// primary's coverage area (AHN stops at the Dutch border) or if it was down.
+		if fallback != "" && len(stillMissing) > 0 {
+			fbResolved, fbMissing, ferr := h.fetchDataset(ctx, fallback, stillMissing, lats, lons)
+			if ferr != nil {
+				log.Printf("[los] fallback elevation dataset %q failed: %v", fallback, ferr)
+			} else {
+				for idx, e := range fbResolved {
+					elevs[idx] = e
+					source[idx] = srcFallback
+					h.cache.set(lats[idx], lons[idx], e, srcFallback)
+				}
+				stillMissing = fbMissing
+			}
+		}
+
+		if len(stillMissing) > 0 {
+			log.Printf("[los] %d/%d profile points had no elevation (primary %q, fallback %q) — using 0",
+				len(stillMissing), n, primaryDataset, fallback)
+		}
+		for _, idx := range stillMissing {
+			gaps[idx] = true
 		}
 	}
 
-	if len(stillMissing) > 0 {
-		log.Printf("[los] %d/%d profile points had no elevation (primary %q, fallback %q) — using 0",
-			len(stillMissing), n, h.cfg.LOSElevationDataset(), fallback)
+	for i := 0; i < n; i++ {
+		switch source[i] {
+		case srcPrimary:
+			stats.Primary++
+		case srcFallback:
+			stats.Fallback++
+		default:
+			stats.Gap++
+		}
 	}
-	for _, idx := range stillMissing {
-		gaps[idx] = true
-	}
-	return elevs, gaps, nil
+	return elevs, gaps, stats, nil
 }
 
 // anyTrue reports whether any element of the slice is true.
@@ -383,7 +422,7 @@ func (s *Server) handleLOS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h := s.getLOSHandler()
-	elevs, gaps, err := h.fetchElevations(r.Context(), lats, lons)
+	elevs, gaps, eStats, err := h.fetchElevations(r.Context(), lats, lons)
 	if err != nil {
 		log.Printf("[los] elevation fetch failed: %v", err)
 		writeError(w, http.StatusBadGateway, "elevation API unavailable")
@@ -423,6 +462,7 @@ func (s *Server) handleLOS(w http.ResponseWriter, r *http.Request) {
 		DataGaps:      dataGaps,
 		EndpointGapA:  endpointGapA,
 		EndpointGapB:  endpointGapB,
+		ElevSources:   &eStats,
 		Profile:       profile,
 		Relay:         analysis.Relay,
 	}

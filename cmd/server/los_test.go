@@ -170,6 +170,16 @@ func TestHandleLOS_EndpointGap(t *testing.T) {
 	if resp.EndpointGapB {
 		t.Errorf("expected endpoint_gap_b false (point B had elevation)")
 	}
+	// Elevation-source diagnostic: 9 of 10 from the primary dataset, 1 gap.
+	if resp.ElevSources == nil {
+		t.Fatalf("expected elev_sources in response")
+	}
+	if resp.ElevSources.Primary != 9 || resp.ElevSources.Gap != 1 || resp.ElevSources.Fallback != 0 {
+		t.Errorf("elev_sources = %+v, want primary 9 fallback 0 gap 1", *resp.ElevSources)
+	}
+	if resp.ElevSources.PrimaryDataset != "srtm30m" {
+		t.Errorf("primary_dataset = %q, want srtm30m (the default)", resp.ElevSources.PrimaryDataset)
+	}
 }
 
 func TestHandleLOS_BadRequest(t *testing.T) {
