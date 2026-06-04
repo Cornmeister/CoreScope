@@ -153,6 +153,18 @@ type Server struct {
 	channelsCache   perKeyByteCache
 	bulkHealthCache perKeyByteCache
 
+	// Per-key byte caches added to bring previously-uncached, DB-backed
+	// endpoints inside the <100ms SLO. Each coalesces concurrent misses via
+	// singleflight; keys include the query params that vary the response.
+	directPacketsCache   perKeyByteCache // /api/nodes/{pk}/direct-packets — SQLite json_extract scan
+	nodePathsCache       perKeyByteCache // /api/nodes/{pk}/paths — per-candidate SQL confirmation
+	channelMessagesCache perKeyByteCache // /api/channels/{hash}/messages — SQLite history query
+	metricsSummaryCache  perKeyByteCache // /api/observers/metrics/summary — windowed SQL aggregate
+
+	// Single-key byte cache for /api/audio-lab/buckets — a full O(N) packet
+	// scan whose output does not vary by request.
+	audioLabCache singleKeyByteCache
+
 	// Cached default (no-filter) /api/observers response, served from an
 	// atomic-pointer snapshot. Refilled via singleflight on TTL boundary
 	// to prevent thundering-herd SQL stampedes. Issue #1481 P0-3 +
@@ -2417,14 +2429,20 @@ func (s *Server) handleNodeDirectPackets(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	packets, err := s.db.GetRecentDirectPacketsForNode(pubkey, limit, sinceHours)
-	if err != nil {
-		writeError(w, 500, err.Error())
-		return
-	}
-	writeJSON(w, map[string]interface{}{
-		"packets":   packets,
-		"truncated": len(packets) == limit,
+	// This endpoint hits SQLite with a non-sargable json_extract scan that
+	// costs ~1.6s on a busy node. Cache the marshaled result per
+	// pubkey|limit|since so frontend polling stays well inside the SLO;
+	// concurrent misses are coalesced via singleflight.
+	cacheKey := fmt.Sprintf("pk=%s&l=%d&s=%d", pubkey, limit, sinceHours)
+	s.directPacketsCache.serve(w, r, cacheKey, directPacketsCacheTTL, "handleNodeDirectPackets GetRecentDirectPacketsForNode", serveOpts{CacheControl: slowEndpointCacheHeader}, func() ([]byte, error) {
+		packets, err := s.db.GetRecentDirectPacketsForNode(pubkey, limit, sinceHours)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(map[string]interface{}{
+			"packets":   packets,
+			"truncated": len(packets) == limit,
+		})
 	})
 }
 
@@ -2451,6 +2469,19 @@ func (s *Server) handleNodeHealth(w http.ResponseWriter, r *http.Request) {
 // re-scanned up to 200 nodes × their packets, starving ingest writers.
 const bulkHealthCacheTTL = 30 * time.Second
 const bulkHealthCacheHeader = "private, max-age=30, stale-while-revalidate=30"
+
+// TTLs for the SLO-repair caches added for previously-uncached endpoints.
+// Short enough that staleness is invisible for these slow-changing views,
+// long enough that frontend polling almost always hits a warm entry.
+const (
+	directPacketsCacheTTL   = 30 * time.Second
+	nodePathsCacheTTL       = 30 * time.Second
+	channelMessagesCacheTTL = 15 * time.Second
+	metricsSummaryCacheTTL  = 30 * time.Second
+	audioLabCacheTTL        = 30 * time.Second
+)
+
+const slowEndpointCacheHeader = "private, max-age=15, stale-while-revalidate=30"
 
 func (s *Server) handleBulkHealth(w http.ResponseWriter, r *http.Request) {
 	limit := clampLimit(r, 50)
@@ -2507,6 +2538,19 @@ func (s *Server) handleNodePaths(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// This endpoint resolves candidate paths from the in-memory index and then
+	// confirms each candidate via per-candidate SQL (disk I/O) — ~140ms
+	// uncached. Cache the marshaled response per node; concurrent misses share
+	// one build via singleflight.
+	s.nodePathsCache.serve(w, r, strings.ToLower(pubkey), nodePathsCacheTTL, "handleNodePaths", serveOpts{CacheControl: slowEndpointCacheHeader}, func() ([]byte, error) {
+		return s.buildNodePathsResponse(pubkey, node)
+	})
+}
+
+// buildNodePathsResponse computes the marshaled /api/nodes/{pk}/paths payload.
+// Callers are responsible for blacklist/404/503 validation; this assumes a
+// valid node map and a non-nil store.
+func (s *Server) buildNodePathsResponse(pubkey string, node map[string]interface{}) ([]byte, error) {
 	// Use the precomputed byPathHop index instead of scanning all packets.
 	// Look up by full pubkey (resolved hops) and by short prefixes (raw hops).
 	lowerPK := strings.ToLower(pubkey)
@@ -2813,7 +2857,7 @@ func (s *Server) handleNodePaths(w http.ResponseWriter, r *http.Request) {
 		paths = paths[:50]
 	}
 
-	writeJSON(w, NodePathsResponse{
+	return json.Marshal(NodePathsResponse{
 		Node: map[string]interface{}{
 			"public_key": node["public_key"],
 			"name":       node["name"],
@@ -3335,22 +3379,27 @@ func (s *Server) handleChannelMessages(w http.ResponseWriter, r *http.Request) {
 	limit := queryInt(r, "limit", 100)
 	offset := queryInt(r, "offset", 0)
 	region := r.URL.Query().Get("region")
-	// Prefer DB for full history (in-memory store has limited retention)
-	if s.db != nil {
-		messages, total, err := s.db.GetChannelMessages(hash, limit, offset, region)
-		if err != nil {
-			writeInternalError(w, "handleChannelMessages GetChannelMessages", err)
-			return
+
+	// Uncached this endpoint runs a SQLite history query (~90ms). Cache the
+	// marshaled response per hash|limit|offset|region with a short TTL — the
+	// live tail arrives via WebSocket, so a few seconds of staleness on the
+	// history view is invisible. Concurrent misses share one build.
+	cacheKey := fmt.Sprintf("h=%s&l=%d&o=%d&r=%s", hash, limit, offset, region)
+	s.channelMessagesCache.serve(w, r, cacheKey, channelMessagesCacheTTL, "handleChannelMessages GetChannelMessages", serveOpts{CacheControl: slowEndpointCacheHeader}, func() ([]byte, error) {
+		// Prefer DB for full history (in-memory store has limited retention)
+		if s.db != nil {
+			messages, total, err := s.db.GetChannelMessages(hash, limit, offset, region)
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(ChannelMessagesResponse{Messages: messages, Total: total})
 		}
-		writeJSON(w, ChannelMessagesResponse{Messages: messages, Total: total})
-		return
-	}
-	if s.store != nil {
-		messages, total := s.store.GetChannelMessages(hash, limit, offset, region)
-		writeJSON(w, ChannelMessagesResponse{Messages: messages, Total: total})
-		return
-	}
-	writeJSON(w, ChannelMessagesResponse{Messages: []map[string]interface{}{}, Total: 0})
+		if s.store != nil {
+			messages, total := s.store.GetChannelMessages(hash, limit, offset, region)
+			return json.Marshal(ChannelMessagesResponse{Messages: messages, Total: total})
+		}
+		return json.Marshal(ChannelMessagesResponse{Messages: []map[string]interface{}{}, Total: 0})
+	})
 }
 
 // observersListCacheTTL caps how often /api/observers re-scans the DB.
@@ -4056,13 +4105,29 @@ func (s *Server) handleIATACoords(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAudioLabBuckets(w http.ResponseWriter, r *http.Request) {
+	// This is an O(N) scan over every packet with a per-packet json.Unmarshal.
+	// The output does not vary by request, so cache the marshaled bytes
+	// (single-key, singleflight) so the scan runs at most once per TTL.
+	s.audioLabCache.serve(w, r, audioLabCacheTTL, "handleAudioLabBuckets", serveOpts{CacheControl: slowEndpointCacheHeader}, func() ([]byte, error) {
+		return s.buildAudioLabBuckets()
+	})
+}
+
+func (s *Server) buildAudioLabBuckets() ([]byte, error) {
 	buckets := map[string][]AudioLabPacket{}
 
 	if s.store != nil {
-		// Use in-memory store (matches Node.js pktStore.packets approach)
+		// Snapshot the packet pointers under the read lock, then release it
+		// before the unmarshal/group/sort work. Holding the store lock across
+		// an O(N) JSON-decode loop needlessly contends with ingest writers;
+		// the sample loop below already reads StoreTx fields lock-free.
 		s.store.mu.RLock()
+		snapshot := make([]*StoreTx, len(s.store.packets))
+		copy(snapshot, s.store.packets)
+		s.store.mu.RUnlock()
+
 		byType := map[string][]*StoreTx{}
-		for _, tx := range s.store.packets {
+		for _, tx := range snapshot {
 			if tx.RawHex == "" {
 				continue
 			}
@@ -4082,7 +4147,6 @@ func (s *Server) handleAudioLabBuckets(w http.ResponseWriter, r *http.Request) {
 			}
 			byType[typeName] = append(byType[typeName], tx)
 		}
-		s.store.mu.RUnlock()
 
 		for typeName, pkts := range byType {
 			sort.Slice(pkts, func(i, j int) bool {
@@ -4112,7 +4176,7 @@ func (s *Server) handleAudioLabBuckets(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, AudioLabBucketsResponse{Buckets: buckets})
+	return json.Marshal(AudioLabBucketsResponse{Buckets: buckets})
 }
 
 // --- Helpers ---
@@ -4379,29 +4443,34 @@ func (s *Server) handleMetricsSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	since := time.Now().UTC().Add(-dur).Format(time.RFC3339)
-	summary, err := s.db.GetMetricsSummary(since)
-	if err != nil {
-		writeInternalError(w, "handleMetricsSummary GetMetricsSummary", err)
-		return
-	}
-	if summary == nil {
-		summary = []MetricsSummaryRow{}
-	}
-
-	// Filter by region if specified
-	if region != "" {
-		filtered := make([]MetricsSummaryRow, 0)
-		for _, row := range summary {
-			if strings.EqualFold(row.IATA, region) {
-				filtered = append(filtered, row)
-			}
+	// Uncached this endpoint runs a windowed SQL aggregate (~470ms). The
+	// response is identical for all callers within a window, so cache the
+	// marshaled bytes per window|region with a short TTL + singleflight.
+	cacheKey := fmt.Sprintf("w=%s&r=%s", window, region)
+	s.metricsSummaryCache.serve(w, r, cacheKey, metricsSummaryCacheTTL, "handleMetricsSummary GetMetricsSummary", serveOpts{CacheControl: slowEndpointCacheHeader}, func() ([]byte, error) {
+		since := time.Now().UTC().Add(-dur).Format(time.RFC3339)
+		summary, err := s.db.GetMetricsSummary(since)
+		if err != nil {
+			return nil, err
 		}
-		summary = filtered
-	}
+		if summary == nil {
+			summary = []MetricsSummaryRow{}
+		}
 
-	writeJSON(w, map[string]interface{}{
-		"observers": summary,
+		// Filter by region if specified
+		if region != "" {
+			filtered := make([]MetricsSummaryRow, 0)
+			for _, row := range summary {
+				if strings.EqualFold(row.IATA, region) {
+					filtered = append(filtered, row)
+				}
+			}
+			summary = filtered
+		}
+
+		return json.Marshal(map[string]interface{}{
+			"observers": summary,
+		})
 	})
 }
 
