@@ -602,17 +602,43 @@ const Logo = (function () {
   return api;
 })();
 
+// #liveDot (navbar wordmark dot): green while the WS is connected, brief flash
+// on each packet. The logo-pulse (Logo.pulse) is the primary indicator; this
+// restores the classic green dot alongside it.
+let _liveDotEl = null;
+function _liveDot() {
+  if (_liveDotEl) return _liveDotEl;
+  if (typeof document === 'undefined') return null;
+  return (_liveDotEl = document.getElementById('liveDot'));
+}
+function setLiveDot(isConnected) {
+  const d = _liveDot();
+  if (!d) return;
+  d.classList.toggle('live-connected', !!isConnected);
+  if (!isConnected) d.classList.remove('live-flash');
+}
+function flashLiveDot() {
+  const d = _liveDot();
+  if (!d) return;
+  d.classList.remove('live-flash');
+  void d.offsetWidth; // force reflow so the CSS animation restarts on rapid packets
+  d.classList.add('live-flash');
+}
+
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(`${proto}//${location.host}`);
-  ws.onopen = () => Logo.setConnected(true);
+  ws.onopen = () => { Logo.setConnected(true); setLiveDot(true); };
   ws.onclose = () => {
     Logo.setConnected(false);
+    setLiveDot(false);
     setTimeout(connectWS, 3000);
   };
   ws.onerror = () => ws.close();
   ws.onmessage = (e) => {
-    Logo.pulse(e);
+    // Logo.pulse returns true only when it actually pulsed (rate-limited to
+    // ~15Hz, gated on connected + visible) — reuse that to flash the dot in step.
+    if (Logo.pulse(e)) flashLiveDot();
     try {
       const msg = JSON.parse(e.data);
       // Debounce cache invalidation — don't nuke on every packet

@@ -587,6 +587,15 @@ input[type="week"] {
   width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted);
   display: inline-block; flex: 0 0 8px; transition: background .3s;
 }
+/* Green when the WebSocket is connected; brief flash on each packet. */
+.live-dot.live-connected { background: var(--status-green, #22c55e); }
+@keyframes live-dot-flash {
+  0%   { opacity: 1;   filter: brightness(2); }
+  50%  { opacity: .45; }
+  100% { opacity: 1;   filter: brightness(1); }
+}
+.live-dot.live-flash { animation: live-dot-flash 150ms ease-out; }
+@media (prefers-reduced-motion: reduce) { .live-dot.live-flash { animation: none; } }
 @keyframes logo-pulse-step {
   0%   { filter: brightness(1);   transform: scale(1); }
   40%  { filter: brightness(1.6); transform: scale(1.18); }
@@ -595,6 +604,10 @@ input[type="week"] {
 .brand-logo circle.logo-pulse-active,
 .brand-mark-only circle.logo-pulse-active {
   animation: logo-pulse-step 80ms ease-out;
+  /* Scale around the circle's own centre (not the SVG origin) so the pulse
+     grows in place — required for the single-circle Cornmeister logo. */
+  transform-box: fill-box;
+  transform-origin: center;
 }
 @keyframes logo-pulse-blip-step {
   0%   { opacity: 1; }
