@@ -399,6 +399,93 @@
 .live-toggles label { display: flex; align-items: center; gap: 3px; cursor: pointer; white-space: nowrap; }
 .live-toggles input { margin: 0; }
 
+/* ---- Grouped toolbar menus (#header declutter) ---------------------------
+ * Replaces the flat .live-toggles row with one inline Map-style control plus
+ * five click-to-open menu buttons (Nodes / Packets / Overlays / FX / Area).
+ */
+.live-menubar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.live-menubar .live-mapstyle { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.live-menu { position: relative; }
+.live-menu-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(0,0,0,0.35);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 4px;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 8px;
+  min-height: 32px;
+  cursor: pointer;
+  white-space: nowrap;
+  touch-action: manipulation;
+  transition: border-color 0.15s, background 0.15s;
+}
+.live-menu-btn:hover { border-color: rgba(74,158,255,0.5); }
+.live-menu-btn:focus-visible { outline: 2px solid rgba(74,158,255,0.7); outline-offset: 1px; }
+.live-menu.is-open .live-menu-btn { border-color: rgba(74,158,255,0.6); background: rgba(74,158,255,0.12); }
+.live-menu-caret { font-size: 9px; opacity: 0.7; transition: transform 0.15s; }
+.live-menu.is-open .live-menu-caret { transform: rotate(180deg); }
+.live-menu-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent, #4a9eff);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+.live-menu-badge[hidden] { display: none; }
+.live-menu-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 1200;
+  display: none;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 190px;
+  max-width: min(320px, 82vw);
+  padding: 10px 12px;
+  background: var(--surface-1, rgba(20,24,33,0.98));
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+.live-menu.is-open .live-menu-pop { display: flex; }
+.live-menu-pop label { display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
+.live-menu-pop input[type="checkbox"] { margin: 0; }
+.live-menu-pop .live-node-filter-wrap { width: 100%; }
+.live-menu-pop .live-node-filter-input { width: 100%; box-sizing: border-box; }
+.live-menu-pop .live-region-filter-container { display: flex; }
+.live-menu-pop .live-show-all-region-nodes { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.live-menu-pop .audio-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+}
+.live-menu-pop .audio-controls.hidden { display: none; }
+
 /* ---- Live controls cluster (#1205 — re-anchored inside MESH LIVE panel)
  * History: PR #1180 detached the toggles into a `position:fixed` overlay
  * (`.live-overlay.live-controls`) pinned bottom-right. On many viewports

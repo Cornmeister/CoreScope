@@ -1121,8 +1121,8 @@
              detached them; this restores the pre-regression structure. -->
         <div class="live-controls" id="liveControls">
           <div class="live-controls-body" data-live-controls-body id="liveControlsBody">
-            <div class="live-toggles">
-            <label title="Choose the map tile style">Map style <select id="liveSatmapSelect" class="live-satmap-select" aria-label="Map tile style">
+            <div class="live-menubar" id="liveMenubar">
+            <label class="live-mapstyle" title="Choose the map tile style">Map style <select id="liveSatmapSelect" class="live-satmap-select" aria-label="Map tile style">
               <option value="positron">Positron</option>
               <option value="dark_matter">Dark Matter</option>
               <option value="gray_canvas">Gray Canvas</option>
@@ -1138,44 +1138,74 @@
               <option value="voyager_inverted">Carto Voyager (inverted)</option>
               <option value="positron_inverted">Carto Positron (inverted)</option>
             </select></label>
-            <label title="Overlay a density heat map on the mesh nodes"><input type="checkbox" id="liveHeatToggle" checked aria-describedby="heatDesc"> Heat</label>
-            <span id="heatDesc" class="sr-only">Overlay a density heat map on the mesh nodes</span>
-            <label title="Show inferred hop markers for unknown hops"><input type="checkbox" id="liveGhostToggle" checked aria-describedby="ghostDesc"> Inferred Hops</label>
-            <span id="ghostDesc" class="sr-only">Show inferred hop markers for unknown hops</span>
-            <label title="Buffer packets by hash and animate all paths simultaneously"><input type="checkbox" id="liveRealisticToggle" aria-describedby="realisticDesc"> Realistic</label>
-            <span id="realisticDesc" class="sr-only">Buffer packets by hash and animate all paths simultaneously</span>
-            <label title="Color flying-packet dots and contrails by packet hash for propagation tracing"><input type="checkbox" id="liveColorHashToggle" aria-describedby="colorHashDesc"> Color by hash</label>
-            <span id="colorHashDesc" class="sr-only">Color flying-packet dots and contrails by packet hash for propagation tracing</span>
-            <label title="Animate packet hex bytes flowing along paths like the Matrix"><input type="checkbox" id="liveMatrixToggle" aria-describedby="matrixDesc"> Matrix</label>
-            <span id="matrixDesc" class="sr-only">Animate packet hex bytes flowing along paths like the Matrix</span>
-            <label title="Matrix rain overlay — packets fall as hex columns"><input type="checkbox" id="liveMatrixRainToggle" aria-describedby="rainDesc"> Rain</label>
-            <span id="rainDesc" class="sr-only">Matrix rain overlay — packets fall as hex columns</span>
-            <label title="Sonify packets — turn raw bytes into generative music"><input type="checkbox" id="liveAudioToggle" aria-describedby="audioDesc"> 🎵 Audio</label>
-            <span id="audioDesc" class="sr-only">Sonify packets — turn raw bytes into generative music</span>
-            <label title="Show only favorited and claimed nodes"><input type="checkbox" id="liveFavoritesToggle" aria-describedby="favDesc"> ⭐ Favorites</label>
-            <span id="favDesc" class="sr-only">Show only favorited and claimed nodes</span>
-            <label title="Show a 24-hour packet route history overlay on the map"><input type="checkbox" id="liveOverlayRouteHistory" aria-describedby="routeHistDesc"> Route History</label>
-            <span id="routeHistDesc" class="sr-only">Show a 24-hour packet route history overlay on the map</span>
-            <label id="liveOverlayRadarLabel" title="Overlay live weather radar from RainViewer"><input type="checkbox" id="liveOverlayRadar" aria-describedby="radarDesc"> Radar</label>
-            <span id="radarDesc" class="sr-only">Overlay live weather radar from RainViewer</span>
-            <label title="Show animated wind speed and direction overlay from Open-Meteo"><input type="checkbox" id="liveOverlayWind" aria-describedby="windDesc"> Wind</label>
-            <span id="windDesc" class="sr-only">Show animated wind speed and direction overlay from Open-Meteo</span>
-            <label id="liveOverlayMeshMapperLabel" style="display:none"><input type="checkbox" id="liveOverlayMeshMapper"> 📶 MeshMapper</label>
-            <div class="live-node-filter-wrap" style="position:relative">
-              <input type="text" id="liveNodeFilterInput" placeholder="Filter by node…" autocomplete="off" class="live-node-filter-input" role="combobox" aria-expanded="false" aria-owns="liveNodeFilterDropdown" aria-autocomplete="list" aria-activedescendant="">
-              <div id="liveNodeFilterDropdown" class="live-node-filter-dropdown hidden" role="listbox"></div>
-              <button id="liveNodeFilterClear" class="vcr-btn" title="Clear node filter" style="display:none">×</button>
+
+            <div class="live-menu" data-live-menu>
+              <button type="button" class="live-menu-btn" data-live-menu-btn aria-haspopup="true" aria-expanded="false">Nodes<span class="live-menu-badge" hidden></span><span class="live-menu-caret" aria-hidden="true">▾</span></button>
+              <div class="live-menu-pop" role="group" aria-label="Node display options">
+                <label title="Show only favorited and claimed nodes"><input type="checkbox" id="liveFavoritesToggle" aria-describedby="favDesc"> ⭐ Favorites</label>
+                <span id="favDesc" class="sr-only">Show only favorited and claimed nodes</span>
+                <label title="Overlay a density heat map on the mesh nodes"><input type="checkbox" id="liveHeatToggle" checked aria-describedby="heatDesc"> Heat</label>
+                <span id="heatDesc" class="sr-only">Overlay a density heat map on the mesh nodes</span>
+                <label title="Show inferred hop markers for unknown hops"><input type="checkbox" id="liveGhostToggle" checked aria-describedby="ghostDesc"> Inferred Hops</label>
+                <span id="ghostDesc" class="sr-only">Show inferred hop markers for unknown hops</span>
+                <div class="live-node-filter-wrap" style="position:relative">
+                  <input type="text" id="liveNodeFilterInput" placeholder="Filter by node…" autocomplete="off" class="live-node-filter-input" role="combobox" aria-expanded="false" aria-owns="liveNodeFilterDropdown" aria-autocomplete="list" aria-activedescendant="">
+                  <div id="liveNodeFilterDropdown" class="live-node-filter-dropdown hidden" role="listbox"></div>
+                  <button id="liveNodeFilterClear" class="vcr-btn" title="Clear node filter" style="display:none">×</button>
+                </div>
+                <div id="liveNodeFilterCount" class="live-filter-count hidden"></div>
+                <label id="liveOverlayMeshMapperLabel" style="display:none"><input type="checkbox" id="liveOverlayMeshMapper"> 📶 MeshMapper</label>
+              </div>
             </div>
-            <div id="liveNodeFilterCount" class="live-filter-count hidden"></div>
-            <label id="liveGeoFilterLabel" style="display:none"><input type="checkbox" id="liveGeoFilterToggle"> Mesh live area</label>
-            <div id="liveRegionFilter" class="region-filter-container live-region-filter-container" aria-label="Filter live packets by IATA region"></div>
-          </div>
-          <div class="audio-controls hidden" id="audioControls">
-            <label class="audio-slider-label">Voice <select id="audioVoiceSelect" class="audio-voice-select"></select></label>
-            <label class="audio-slider-label">BPM <input type="range" id="audioBpmSlider" min="40" max="300" value="120" class="audio-slider"><span id="audioBpmVal">120</span></label>
-            <label class="audio-slider-label">Vol <input type="range" id="audioVolSlider" min="0" max="100" value="30" class="audio-slider"><span id="audioVolVal">30</span></label>
-          </div>
-          <div id="liveAreaFilter"></div>
+
+            <div class="live-menu" data-live-menu>
+              <button type="button" class="live-menu-btn" data-live-menu-btn aria-haspopup="true" aria-expanded="false">Packets<span class="live-menu-badge" hidden></span><span class="live-menu-caret" aria-hidden="true">▾</span></button>
+              <div class="live-menu-pop" role="group" aria-label="Packet animation options">
+                <label title="Buffer packets by hash and animate all paths simultaneously"><input type="checkbox" id="liveRealisticToggle" aria-describedby="realisticDesc"> Realistic</label>
+                <span id="realisticDesc" class="sr-only">Buffer packets by hash and animate all paths simultaneously</span>
+                <label title="Color flying-packet dots and contrails by packet hash for propagation tracing"><input type="checkbox" id="liveColorHashToggle" aria-describedby="colorHashDesc"> Color by hash</label>
+                <span id="colorHashDesc" class="sr-only">Color flying-packet dots and contrails by packet hash for propagation tracing</span>
+              </div>
+            </div>
+
+            <div class="live-menu" data-live-menu>
+              <button type="button" class="live-menu-btn" data-live-menu-btn aria-haspopup="true" aria-expanded="false">Overlays<span class="live-menu-badge" hidden></span><span class="live-menu-caret" aria-hidden="true">▾</span></button>
+              <div class="live-menu-pop" role="group" aria-label="Map overlays">
+                <label title="Show a 24-hour packet route history overlay on the map"><input type="checkbox" id="liveOverlayRouteHistory" aria-describedby="routeHistDesc"> Route History</label>
+                <span id="routeHistDesc" class="sr-only">Show a 24-hour packet route history overlay on the map</span>
+                <label id="liveOverlayRadarLabel" title="Overlay live weather radar from RainViewer"><input type="checkbox" id="liveOverlayRadar" aria-describedby="radarDesc"> Radar</label>
+                <span id="radarDesc" class="sr-only">Overlay live weather radar from RainViewer</span>
+                <label title="Show animated wind speed and direction overlay from Open-Meteo"><input type="checkbox" id="liveOverlayWind" aria-describedby="windDesc"> Wind</label>
+                <span id="windDesc" class="sr-only">Show animated wind speed and direction overlay from Open-Meteo</span>
+              </div>
+            </div>
+
+            <div class="live-menu" data-live-menu>
+              <button type="button" class="live-menu-btn" data-live-menu-btn aria-haspopup="true" aria-expanded="false">FX<span class="live-menu-badge" hidden></span><span class="live-menu-caret" aria-hidden="true">▾</span></button>
+              <div class="live-menu-pop" role="group" aria-label="Visual and audio effects">
+                <label title="Animate packet hex bytes flowing along paths like the Matrix"><input type="checkbox" id="liveMatrixToggle" aria-describedby="matrixDesc"> Matrix</label>
+                <span id="matrixDesc" class="sr-only">Animate packet hex bytes flowing along paths like the Matrix</span>
+                <label title="Matrix rain overlay — packets fall as hex columns"><input type="checkbox" id="liveMatrixRainToggle" aria-describedby="rainDesc"> Rain</label>
+                <span id="rainDesc" class="sr-only">Matrix rain overlay — packets fall as hex columns</span>
+                <label title="Sonify packets — turn raw bytes into generative music"><input type="checkbox" id="liveAudioToggle" aria-describedby="audioDesc"> 🎵 Audio</label>
+                <span id="audioDesc" class="sr-only">Sonify packets — turn raw bytes into generative music</span>
+                <div class="audio-controls hidden" id="audioControls">
+                  <label class="audio-slider-label">Voice <select id="audioVoiceSelect" class="audio-voice-select"></select></label>
+                  <label class="audio-slider-label">BPM <input type="range" id="audioBpmSlider" min="40" max="300" value="120" class="audio-slider"><span id="audioBpmVal">120</span></label>
+                  <label class="audio-slider-label">Vol <input type="range" id="audioVolSlider" min="0" max="100" value="30" class="audio-slider"><span id="audioVolVal">30</span></label>
+                </div>
+              </div>
+            </div>
+
+            <div class="live-menu" data-live-menu>
+              <button type="button" class="live-menu-btn" data-live-menu-btn aria-haspopup="true" aria-expanded="false">Area<span class="live-menu-badge" hidden></span><span class="live-menu-caret" aria-hidden="true">▾</span></button>
+              <div class="live-menu-pop" role="group" aria-label="Area and region filters">
+                <div id="liveRegionFilter" class="region-filter-container live-region-filter-container" aria-label="Filter live packets by IATA region"></div>
+                <label id="liveGeoFilterLabel" style="display:none"><input type="checkbox" id="liveGeoFilterToggle"> Mesh live area</label>
+                <div id="liveAreaFilter"></div>
+              </div>
+            </div>
+          </div><!-- /.live-menubar -->
         </div><!-- /#liveControlsBody -->
         <button class="live-controls-toggle" data-live-controls-toggle id="liveControlsToggle"
                 aria-expanded="false" aria-controls="liveControlsBody"
@@ -1889,6 +1919,52 @@
       volVal.textContent = v;
       if (window.MeshAudio) MeshAudio.setVolume(v / 100);
     });
+
+    // Grouped toolbar menus (Nodes/Packets/Overlays/FX/Area): click-to-open
+    // popovers with outside-click + Esc close and a per-menu active-count
+    // badge. Replaces the old flat .live-toggles row (#header declutter).
+    (function initLiveMenus() {
+      const bar = document.getElementById('liveMenubar');
+      if (!bar) return;
+      const menus = Array.prototype.slice.call(bar.querySelectorAll('[data-live-menu]'));
+      function closeAll(except) {
+        menus.forEach((m) => {
+          if (m === except) return;
+          m.classList.remove('is-open');
+          const b = m.querySelector('[data-live-menu-btn]');
+          if (b) b.setAttribute('aria-expanded', 'false');
+        });
+      }
+      menus.forEach((m) => {
+        const btn = m.querySelector('[data-live-menu-btn]');
+        const pop = m.querySelector('.live-menu-pop');
+        if (!btn) return;
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const willOpen = !m.classList.contains('is-open');
+          closeAll(m);
+          m.classList.toggle('is-open', willOpen);
+          btn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+        });
+        // Clicks inside the popover must not bubble to the document closer.
+        if (pop) pop.addEventListener('click', (e) => e.stopPropagation());
+        // Active-count badge = checked checkboxes inside this menu.
+        const badge = btn.querySelector('.live-menu-badge');
+        function updateBadge() {
+          if (!badge) return;
+          const n = m.querySelectorAll('.live-menu-pop input[type="checkbox"]:checked').length;
+          if (n > 0) { badge.textContent = String(n); badge.hidden = false; }
+          else { badge.hidden = true; }
+        }
+        m.addEventListener('change', updateBadge);
+        m._updateBadge = updateBadge;
+        updateBadge();
+      });
+      document.addEventListener('click', () => closeAll(null));
+      document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeAll(null); });
+      // Recount once async controls (region picker, Show-all-nodes) settle.
+      setTimeout(() => menus.forEach((m) => m._updateBadge && m._updateBadge()), 0);
+    })();
 
     // Feed show/hide
     const feedEl = document.getElementById('liveFeed');
