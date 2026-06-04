@@ -1477,17 +1477,29 @@
     }
     _rebindDPRListener();
 
-    // #1490 — animations + trails need their own pane above markerPane.
-    // PR #1334 moved node markers from L.circleMarker (overlayPane @ 400)
-    // to L.marker+divIcon (markerPane @ 600); animations stayed in the
-    // default overlayPane and were occluded by every node marker. Custom
-    // pane @ 650 puts them strictly above all nodes. (tooltipPane shares
-    // 650 — tooltips are user-triggered, harmless to share.)
+    // #1490 — animations + trails need their own pane above the nodes.
+    // NOTE: node markers are L.circleMarker, which render in the default
+    // overlayPane @ 400 (nodesLayer below has no custom pane). An earlier
+    // plan (#1334) to move them to markerPane @ 600 via divIcon was lost in
+    // an upstream merge, so any layer sharing overlayPane @ 400 and added
+    // after the nodes paints on top of them. A custom pane @ 650 puts
+    // animations strictly above all nodes. (tooltipPane shares 650 —
+    // tooltips are user-triggered, harmless to share.)
     map.createPane('liveAnimPane');
     map.getPane('liveAnimPane').style.zIndex = 650;
     // Pointer-events default to none so the pane doesn't steal clicks
     // from the marker pane underneath (clickablePathsLayer handles that).
     map.getPane('liveAnimPane').style.pointerEvents = 'none';
+
+    // Heat layer lives BELOW the node markers and must never intercept
+    // clicks. L.heatLayer defaults to overlayPane @ 400 (same pane as the
+    // circleMarker nodes) and is added later, so without its own pane it
+    // both paints over the dots and swallows their clicks. Give it a
+    // dedicated pane under overlayPane with pointer-events disabled;
+    // showHeatMap reparents the heat canvas into it on add.
+    map.createPane('heatPane');
+    map.getPane('heatPane').style.zIndex = 350;       // tiles(200) < heat(350) < nodes(400)
+    map.getPane('heatPane').style.pointerEvents = 'none';
 
     nodesLayer = L.layerGroup().addTo(map);
     pathsLayer = L.layerGroup({ pane: 'liveAnimPane' }).addTo(map);
@@ -4040,10 +4052,23 @@
       heatLayer = L.heatLayer(points, {
         radius: 25, blur: 15, maxZoom: 14, minOpacity: 0.05,
         gradient: { 0.2: '#0d47a1', 0.4: '#1565c0', 0.6: '#42a5f5', 0.8: '#ffca28', 1.0: '#ff5722' }
-      }).addTo(map);
-      // Set overall layer opacity via canvas element
-      if (heatLayer._canvas) { heatLayer._canvas.style.opacity = savedOpacity; }
-      else { setTimeout(function() { if (heatLayer && heatLayer._canvas) heatLayer._canvas.style.opacity = savedOpacity; }, 100); }
+      });
+      // Move the heat canvas into heatPane (below nodes, pointer-events:none)
+      // and set its opacity BEFORE it becomes visible, so it never occludes
+      // or blocks the node dots. Registered before addTo so the 'add' handler
+      // runs once the canvas exists.
+      var _applyHeatCanvas = function () {
+        var c = heatLayer && heatLayer._canvas;
+        if (!c) return false;
+        var pane = map.getPane('heatPane');
+        if (pane && c.parentNode !== pane) pane.appendChild(c);
+        c.style.pointerEvents = 'none';
+        c.style.opacity = savedOpacity;
+        return true;
+      };
+      heatLayer.on('add', _applyHeatCanvas);
+      heatLayer.addTo(map);
+      if (!_applyHeatCanvas()) { setTimeout(_applyHeatCanvas, 100); }
       window._meshcoreLiveHeatLayer = heatLayer;
     }
   }
