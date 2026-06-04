@@ -99,16 +99,16 @@
             if (!nodes.length) { list.hidden = true; return; }
             list.hidden = false;
             nodes.forEach(function (node) {
-              if (!node.latitude || !node.longitude) return;
+              if (node.lat == null || node.lon == null) return;
               var li = document.createElement('li');
               li.className = 'rfc-autocomplete-item';
               li.textContent = (node.name || node.public_key.slice(0, 12)) +
-                ' (' + (+node.latitude).toFixed(4) + ', ' + (+node.longitude).toFixed(4) + ')';
+                ' (' + (+node.lat).toFixed(4) + ', ' + (+node.lon).toFixed(4) + ')';
               li.addEventListener('mousedown', function (e) {
                 e.preventDefault();
                 input.value = node.name || node.public_key.slice(0, 12);
                 list.innerHTML = ''; list.hidden = true;
-                setTX((+node.latitude).toFixed(6), (+node.longitude).toFixed(6));
+                setTX((+node.lat).toFixed(6), (+node.lon).toFixed(6));
               });
               list.appendChild(li);
             });

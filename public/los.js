@@ -137,22 +137,23 @@
       if (q.length < 2) { list.innerHTML = ''; list.hidden = true; return; }
       debounce = setTimeout(function () {
         fetch('/api/nodes/search?q=' + encodeURIComponent(q) + '&limit=8')
-          .then(function (r) { return r.ok ? r.json() : []; })
-          .then(function (nodes) {
+          .then(function (r) { return r.ok ? r.json() : { nodes: [] }; })
+          .then(function (data) {
+            var nodes = data.nodes || [];
             list.innerHTML = '';
-            if (!nodes || !nodes.length) { list.hidden = true; return; }
+            if (!nodes.length) { list.hidden = true; return; }
             list.hidden = false;
             nodes.forEach(function (node) {
-              if (!node.latitude || !node.longitude) return;
+              if (node.lat == null || node.lon == null) return;
               var li = document.createElement('li');
               li.className = 'los-autocomplete-item';
               li.textContent = (node.name || node.public_key.slice(0, 12)) +
-                ' (' + (+node.latitude).toFixed(4) + ', ' + (+node.longitude).toFixed(4) + ')';
+                ' (' + (+node.lat).toFixed(4) + ', ' + (+node.lon).toFixed(4) + ')';
               li.addEventListener('mousedown', function (e) {
                 e.preventDefault();
                 input.value = node.name || node.public_key.slice(0, 12);
                 list.innerHTML = ''; list.hidden = true;
-                setPointFn((+node.latitude).toFixed(6), (+node.longitude).toFixed(6));
+                setPointFn((+node.lat).toFixed(6), (+node.lon).toFixed(6));
               });
               list.appendChild(li);
             });
