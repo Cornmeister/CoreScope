@@ -166,10 +166,17 @@ type RateLimitConfig struct {
 
 // LOSConfig controls line-of-sight analysis behaviour.
 type LOSConfig struct {
-	ElevationURL  string `json:"elevationURL,omitempty"`  // base URL for open-topo-data (default https://api.opentopodata.org)
-	SampleMin     int    `json:"sampleMin,omitempty"`     // minimum elevation sample points (default 50)
-	SampleMax     int    `json:"sampleMax,omitempty"`     // maximum elevation sample points (default 500)
-	CacheTTLHours int    `json:"cacheTTLHours,omitempty"` // elevation cache TTL in hours (default 24)
+	ElevationURL string `json:"elevationURL,omitempty"` // base URL for open-topo-data (default https://api.opentopodata.org)
+	// ElevationDataset is the opentopodata dataset queried first (default
+	// "srtm30m"). Set to your AHN dataset name for high-resolution Dutch
+	// terrain. ElevationFallbackDataset is queried for points the primary
+	// lacks — i.e. outside its coverage (AHN is NL-only) — e.g. "srtm30m".
+	// Empty fallback = no fallback.
+	ElevationDataset         string `json:"elevationDataset,omitempty"`
+	ElevationFallbackDataset string `json:"elevationFallbackDataset,omitempty"`
+	SampleMin                int    `json:"sampleMin,omitempty"`     // minimum elevation sample points (default 50)
+	SampleMax                int    `json:"sampleMax,omitempty"`     // maximum elevation sample points (default 500)
+	CacheTTLHours            int    `json:"cacheTTLHours,omitempty"` // elevation cache TTL in hours (default 24)
 }
 
 // RFConfig controls RF coverage analysis behaviour.
@@ -386,6 +393,20 @@ func (c *Config) LOSElevationURL() string {
 		return c.LOS.ElevationURL
 	}
 	return "https://api.opentopodata.org"
+}
+
+func (c *Config) LOSElevationDataset() string {
+	if c != nil && c.LOS != nil && c.LOS.ElevationDataset != "" {
+		return c.LOS.ElevationDataset
+	}
+	return "srtm30m"
+}
+
+func (c *Config) LOSElevationFallbackDataset() string {
+	if c != nil && c.LOS != nil {
+		return c.LOS.ElevationFallbackDataset
+	}
+	return ""
 }
 
 func (c *Config) LOSSampleMin() int {

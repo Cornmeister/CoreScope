@@ -177,6 +177,10 @@ type topoDataset struct {
 }
 
 type topoPoint struct {
+	// opentopodata / open-elevation return elevation flat on each result
+	// (results[].elevation). This is the configured default API's shape.
+	Elevation *float64 `json:"elevation"`
+	// Some services nest it under datasets[] — kept for compatibility.
 	Datasets []topoDataset `json:"datasets"`
 }
 
@@ -196,14 +200,65 @@ func (h *losHandler) fetchElevations(ctx context.Context, lats, lons []float64) 
 			missing = append(missing, i)
 		}
 	}
+	if len(missing) == 0 {
+		return elevs, false, nil
+	}
 
-	const batchSize = 100
-	for start := 0; start < len(missing); start += batchSize {
-		end := start + batchSize
-		if end > len(missing) {
-			end = len(missing)
+	fallback := h.cfg.LOSElevationFallbackDataset()
+
+	// Primary dataset (e.g. AHN — high-resolution, but Netherlands-only).
+	resolved, stillMissing, perr := h.fetchDataset(ctx, h.cfg.LOSElevationDataset(), missing, lats, lons)
+	if perr != nil {
+		if fallback == "" {
+			return nil, false, perr // preserve original behaviour when no fallback is configured
 		}
-		batch := missing[start:end]
+		// With a fallback configured, a primary failure is not fatal — let the
+		// fallback dataset try every point the primary couldn't return.
+		log.Printf("[los] primary elevation dataset %q failed (%v) — falling back to %q", h.cfg.LOSElevationDataset(), perr, fallback)
+		resolved, stillMissing = nil, missing
+	}
+	for idx, e := range resolved {
+		elevs[idx] = e
+		h.cache.set(lats[idx], lons[idx], e)
+	}
+
+	// Fallback dataset (e.g. srtm30m) for points the primary lacks — outside the
+	// primary's coverage area (AHN stops at the Dutch border) or if it was down.
+	if fallback != "" && len(stillMissing) > 0 {
+		fbResolved, fbMissing, ferr := h.fetchDataset(ctx, fallback, stillMissing, lats, lons)
+		if ferr != nil {
+			log.Printf("[los] fallback elevation dataset %q failed: %v", fallback, ferr)
+		} else {
+			for idx, e := range fbResolved {
+				elevs[idx] = e
+				h.cache.set(lats[idx], lons[idx], e)
+			}
+			stillMissing = fbMissing
+		}
+	}
+
+	if len(stillMissing) > 0 {
+		dataGaps = true
+		log.Printf("[los] %d/%d profile points had no elevation (primary %q, fallback %q) — using 0",
+			len(stillMissing), n, h.cfg.LOSElevationDataset(), fallback)
+	}
+	return elevs, dataGaps, nil
+}
+
+// fetchDataset queries a single opentopodata dataset for the given point indices,
+// batched to opentopodata's 100-locations-per-request limit. It returns the
+// resolved elevations keyed by index and the indices that came back with no data
+// (null elevation, or fewer/no results — e.g. the point is outside the dataset's
+// coverage, or the dataset isn't served by this instance).
+func (h *losHandler) fetchDataset(ctx context.Context, dataset string, idxs []int, lats, lons []float64) (resolved map[int]float64, missing []int, err error) {
+	resolved = make(map[int]float64, len(idxs))
+	const batchSize = 100
+	for start := 0; start < len(idxs); start += batchSize {
+		end := start + batchSize
+		if end > len(idxs) {
+			end = len(idxs)
+		}
+		batch := idxs[start:end]
 
 		var sb strings.Builder
 		for j, idx := range batch {
@@ -212,41 +267,44 @@ func (h *losHandler) fetchElevations(ctx context.Context, lats, lons []float64) 
 			}
 			fmt.Fprintf(&sb, "%.6f,%.6f", lats[idx], lons[idx])
 		}
-		url := h.cfg.LOSElevationURL() + "/v1/srtm30m?locations=" + sb.String()
+		url := h.cfg.LOSElevationURL() + "/v1/" + dataset + "?locations=" + sb.String()
 
 		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if reqErr != nil {
-			return nil, false, fmt.Errorf("los elevation request: %w", reqErr)
+			return nil, nil, fmt.Errorf("los elevation request: %w", reqErr)
 		}
 		resp, doErr := h.client.Do(req)
 		if doErr != nil {
-			return nil, false, fmt.Errorf("los elevation fetch: %w", doErr)
+			return nil, nil, fmt.Errorf("los elevation fetch: %w", doErr)
 		}
 		var tr topoResponse
 		decErr := json.NewDecoder(resp.Body).Decode(&tr)
 		resp.Body.Close()
 		if decErr != nil {
-			return nil, false, fmt.Errorf("los elevation decode: %w", decErr)
+			return nil, nil, fmt.Errorf("los elevation decode: %w", decErr)
 		}
 
 		for j, idx := range batch {
 			if j >= len(tr.Results) {
-				dataGaps = true
-				log.Printf("[los] elevation API returned fewer results than requested")
+				missing = append(missing, idx)
 				continue
 			}
 			r := tr.Results[j]
-			if len(r.Datasets) == 0 || r.Datasets[0].Elevation == nil {
-				dataGaps = true
-				log.Printf("[los] null elevation for (%.4f, %.4f) — using 0", lats[idx], lons[idx])
+			// opentopodata/open-elevation return elevation flat
+			// (results[].elevation); some services nest it under datasets[].
+			// Accept either shape.
+			elev := r.Elevation
+			if elev == nil && len(r.Datasets) > 0 {
+				elev = r.Datasets[0].Elevation
+			}
+			if elev == nil {
+				missing = append(missing, idx)
 				continue
 			}
-			e := *r.Datasets[0].Elevation
-			elevs[idx] = e
-			h.cache.set(lats[idx], lons[idx], e)
+			resolved[idx] = *elev
 		}
 	}
-	return elevs, dataGaps, nil
+	return resolved, missing, nil
 }
 
 // ─── HTTP handler ──────────────────────────────────────────────────────────────

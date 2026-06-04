@@ -447,10 +447,12 @@
   },
   "_comment_meshMapper": "Optional MeshMapper coverage layer proxy. Leave apiKey empty to disable.",
   "los": {
-    "elevationURL": "https://api.opentopodata.org",
+    "elevationURL": "http://localhost:5000",
+    "elevationDataset": "ahn",
+    "elevationFallbackDataset": "srtm30m",
     "sampleMin": 50,
     "sampleMax": 500,
     "cacheTTLHours": 24
   },
-  "_comment_los": "Line-of-sight calculator (POST /api/los). elevationURL: base URL of an open-topo-data compatible API (default https://api.opentopodata.org — uses the free public instance, rate-limited; run your own instance for production use: https://www.opentopodata.org/server/). sampleMin/sampleMax: number of elevation profile points sampled along the path (clamped to [sampleMin, sampleMax], auto-scaled by distance at 1 point per 50 m). cacheTTLHours: how long elevation results are cached in memory (default 24 h)."
+  "_comment_los": "Line-of-sight calculator (POST /api/los) + RF coverage (POST /api/rf-coverage). elevationURL: base URL of an open-topo-data compatible API. elevationDataset: dataset queried first (default 'srtm30m'). To use high-resolution Dutch terrain, run a self-hosted opentopodata serving AHN GeoTIFFs (https://www.opentopodata.org/server/ — the public api.opentopodata.org does NOT host AHN), name the dataset (e.g. 'ahn'), point elevationURL at it, and set elevationDataset to that name. For RF coverage in the (flat) Netherlands prefer the AHN DSM/oppervlaktemodel product — it includes buildings and trees, the real 869 MHz blockers — over the DTM/maaiveld bare-earth product. Note: DSM places every point (including node locations) at surface height, so a node next to tall clutter is modelled on top of it — realistic for roof/mast-mounted nodes, optimistic for street-level ones. elevationFallbackDataset: dataset queried for points the primary lacks — outside AHN's coverage (i.e. outside the Netherlands) the lookup falls back to this (e.g. 'srtm30m'); empty disables fallback. sampleMin/sampleMax: number of elevation profile points sampled along the path (clamped to [sampleMin, sampleMax], auto-scaled by distance at 1 point per 50 m). cacheTTLHours: how long elevation results are cached in memory (default 24 h)."
 }
