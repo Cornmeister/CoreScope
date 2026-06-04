@@ -65,6 +65,7 @@ type Config struct {
 	ChannelKeys        map[string]string    `json:"channelKeys,omitempty"`
 	HashChannels       []string             `json:"hashChannels,omitempty"`
 	HashRegions        []string             `json:"hashRegions,omitempty"`
+	HashRegionsPath    string               `json:"hashRegionsPath,omitempty"`
 	Retention          *RetentionConfig     `json:"retention,omitempty"`
 	Metrics            *MetricsConfig       `json:"metrics,omitempty"`
 	GeoFilter          *GeoFilterConfig     `json:"geo_filter,omitempty"`

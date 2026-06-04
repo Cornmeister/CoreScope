@@ -296,7 +296,7 @@ func main() {
 		log.Printf("No channel keys loaded — GRP_TXT packets will not be decrypted")
 	}
 
-	regionKeys := loadRegionKeys(cfg)
+	regionKeys := loadRegionKeys(cfg, *configPath)
 	store.BackfillDefaultScopeAsync(regionKeys)
 
 	// Connect to each MQTT source
@@ -1322,9 +1322,46 @@ func loadChannelKeys(cfg *Config, configPath string) map[string]string {
 	return keys
 }
 
-func loadRegionKeys(cfg *Config) map[string][]byte {
+// loadRegionKeys builds the region scope-matching keys. Region names come from
+// two sources, merged: a JSON file of region names (default HashRegions.json in
+// the config dir, mirroring channel-rainbow.json) plus the inline hashRegions
+// config field. Each name's key is derived as SHA256("#name")[:16].
+func loadRegionKeys(cfg *Config, configPath string) map[string][]byte {
 	keys := make(map[string][]byte)
-	for _, raw := range cfg.HashRegions {
+
+	// 1. Region names from the HashRegions.json file (lowest priority / bulk list).
+	regionsPath := os.Getenv("HASH_REGIONS_PATH")
+	if regionsPath == "" {
+		regionsPath = cfg.HashRegionsPath
+	}
+	if regionsPath == "" {
+		regionsPath = filepath.Join(filepath.Dir(configPath), "HashRegions.json")
+	}
+	fileCount := 0
+	if data, err := os.ReadFile(regionsPath); err == nil {
+		var fileRegions []string
+		if err := json.Unmarshal(data, &fileRegions); err == nil {
+			fileCount = addRegionKeys(keys, fileRegions)
+			log.Printf("[regions] loaded %d region name(s) from %s", fileCount, regionsPath)
+		} else {
+			log.Printf("[regions] warning: failed to parse region file %s: %v", regionsPath, err)
+		}
+	}
+
+	// 2. Inline hashRegions from config (merged on top; same derivation).
+	addRegionKeys(keys, cfg.HashRegions)
+
+	if len(keys) > 0 {
+		log.Printf("[regions] %d region key(s) loaded", len(keys))
+	}
+	return keys
+}
+
+// addRegionKeys normalizes each name (trim, ensure leading '#'), derives its
+// scope key, and stores it. Returns the number of new keys added.
+func addRegionKeys(keys map[string][]byte, names []string) int {
+	added := 0
+	for _, raw := range names {
 		name := strings.TrimSpace(raw)
 		if name == "" {
 			log.Printf("[regions] skipping empty hashRegions entry")
@@ -1334,20 +1371,21 @@ func loadRegionKeys(cfg *Config) map[string][]byte {
 			name = "#" + name
 		}
 		if _, exists := keys[name]; exists {
-			log.Printf("[regions] duplicate region %q ignored", name)
 			continue
 		}
 		h := sha256.Sum256([]byte(name))
 		keys[name] = h[:16]
+		added++
 	}
-	if len(keys) > 0 {
-		log.Printf("[regions] %d region key(s) loaded", len(keys))
-	}
-	return keys
+	return added
 }
 
-// matchScope performs one HMAC-SHA256 per configured region. Expected
-// len(regionKeys) ≤ 50; beyond that, consider a pre-indexed lookup table.
+// matchScope performs one HMAC-SHA256 per configured region against this
+// packet. The HMAC keys the packet payload, so results cannot be precomputed
+// into a lookup table — cost is O(len(regionKeys)) per transport-route packet.
+// With a full HashRegions.json (the Dutch set is ~1.6k regions) this is the
+// hot path; if packet throughput suffers, trim the region list to the zones
+// actually present in your network rather than loading every plaats code.
 func matchScope(regionKeys map[string][]byte, payloadType byte, payloadRaw []byte, code1 string) string {
 	if code1 == "0000" || len(regionKeys) == 0 || len(payloadRaw) == 0 {
 		return ""

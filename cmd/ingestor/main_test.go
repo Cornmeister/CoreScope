@@ -790,7 +790,9 @@ func TestIATAFilterDoesNotDropStatusMessages(t *testing.T) {
 
 func TestLoadRegionKeys(t *testing.T) {
 	cfg := &Config{HashRegions: []string{"#belgium", "eu", "  #Test  ", "", "#belgium"}}
-	keys := loadRegionKeys(cfg)
+	// Empty configPath → looks for ./HashRegions.json (absent here), so only the
+	// inline cfg.HashRegions are exercised.
+	keys := loadRegionKeys(cfg, "")
 
 	// Deduplication + normalization
 	if len(keys) != 3 {
@@ -810,6 +812,50 @@ func TestLoadRegionKeys(t *testing.T) {
 	// "  #Test  " should be normalized to "#Test"
 	if _, ok := keys["#Test"]; !ok {
 		t.Error("expected #Test key")
+	}
+}
+
+func TestLoadRegionKeysFromFile(t *testing.T) {
+	dir := t.TempDir()
+	// Bulk region names live in HashRegions.json beside the config file. Names
+	// appear with and without the leading '#' to exercise normalization.
+	regions := []string{"#nl-grq", "nl-rtm", "  #nl-utc  ", "", "#belgium"}
+	data, _ := json.Marshal(regions)
+	if err := os.WriteFile(filepath.Join(dir, "HashRegions.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Inline config overlaps with the file (#belgium) and adds a new region (#eu).
+	cfg := &Config{HashRegions: []string{"#belgium", "#eu"}}
+	keys := loadRegionKeys(cfg, filepath.Join(dir, "config.json"))
+
+	// 4 from file (#nl-grq, #nl-rtm, #nl-utc, #belgium) + 1 new inline (#eu);
+	// #belgium is shared and must not be double-counted.
+	if len(keys) != 5 {
+		t.Fatalf("len(keys) = %d, want 5", len(keys))
+	}
+	for _, want := range []string{"#nl-grq", "#nl-rtm", "#nl-utc", "#belgium", "#eu"} {
+		if _, ok := keys[want]; !ok {
+			t.Errorf("expected key %q", want)
+		}
+	}
+	// File-derived key matches the documented SHA256("#name")[:16] derivation.
+	wantBelgium, _ := hex.DecodeString("7085b78ed010599094f8c8e7d1aa0e27")
+	if got := keys["#belgium"]; !bytes.Equal(got, wantBelgium) {
+		t.Errorf("#belgium key mismatch: got %x, want %x", got, wantBelgium)
+	}
+}
+
+func TestLoadRegionKeysFromShippedFile(t *testing.T) {
+	// The repo ships a populated HashRegions.json (Dutch region set). Loading it
+	// via the default path should yield a large, non-empty key set.
+	configPath := filepath.Join("..", "..", "config.json")
+	if _, err := os.Stat(filepath.Join("..", "..", "HashRegions.json")); err != nil {
+		t.Skipf("HashRegions.json not present: %v", err)
+	}
+	keys := loadRegionKeys(&Config{}, configPath)
+	if len(keys) < 1000 {
+		t.Errorf("expected a large region set from shipped HashRegions.json, got %d", len(keys))
 	}
 }
 
