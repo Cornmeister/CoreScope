@@ -1516,14 +1516,14 @@ window.addEventListener('DOMContentLoaded', () => {
         for (const n of nodeList.slice(0, 5)) {
           if (n.name && n.name.toLowerCase().includes(q.toLowerCase())) {
             html += `<div class="search-result-item" tabindex="0" role="option" data-href="#/nodes/${n.public_key}">
-              <span class="search-result-type">Node</span>${n.name} — ${truncate(n.public_key || '', 16)}</div>`;
+              <span class="search-result-type">Node</span>${escapeHtml(n.name)} — ${truncate(n.public_key || '', 16)}</div>`;
           }
         }
         const chList = Array.isArray(channels) ? channels : [];
         for (const c of chList) {
           if (c.name && c.name.toLowerCase().includes(q.toLowerCase())) {
             html += `<div class="search-result-item" tabindex="0" role="option" data-href="#/channels/${c.channel_hash}">
-              <span class="search-result-type">Channel</span>${c.name}</div>`;
+              <span class="search-result-type">Channel</span>${escapeHtml(c.name)}</div>`;
           }
         }
         if (!html) html = '<div class="search-no-results">No results found</div>';

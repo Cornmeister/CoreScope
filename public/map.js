@@ -23,7 +23,11 @@
   // Safe escape — falls back to identity if app.js hasn't loaded yet.
   // Note: `esc` is not a true global; some IIFEs define it locally. Reference
   // through globalThis so the optional lookup is safe under `no-undef`.
-  const safeEsc = (typeof globalThis.esc === 'function') ? globalThis.esc : function (s) { return s; };
+  // Fall back to the global escapeHtml (app.js) — NOT identity — so node/observer
+  // names in popups are always HTML-escaped (XSS: adv_name is attacker-controlled).
+  const safeEsc = (typeof globalThis.esc === 'function') ? globalThis.esc
+    : (typeof window.escapeHtml === 'function') ? window.escapeHtml
+    : function (s) { return s; };
 
   // Roles loaded from shared roles.js (ROLE_STYLE, ROLE_LABELS, ROLE_COLORS globals)
 

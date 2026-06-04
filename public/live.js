@@ -2873,7 +2873,7 @@
     const dl = document.getElementById('liveNodeFilterList');
     if (!dl) return;
     dl.innerHTML = Object.values(nodeData).map(n =>
-      `<option value="${n.public_key}">${n.name || n.public_key.slice(0, 8)}</option>`
+      `<option value="${escapeHtml(n.public_key)}">${escapeHtml(n.name || n.public_key.slice(0, 8))}</option>`
     ).join('');
   }
 

@@ -497,7 +497,7 @@ reboot</code></pre>
     function statBlock(title, items) {
       var rows = items.length
         ? items.map(function (item, i) {
-            return `<li><span class="obs-stat-rank">${i + 1}</span><span class="obs-stat-name" title="${item.title || item.name}">${item.name}</span><span class="obs-stat-val">${item.val}</span></li>`;
+            return `<li><span class="obs-stat-rank">${i + 1}</span><span class="obs-stat-name" title="${escapeHtml(item.title || item.name)}">${escapeHtml(item.name)}</span><span class="obs-stat-val">${item.val}</span></li>`;
           }).join('')
         : '<li><span class="text-muted" style="font-size:11px">No data</span></li>';
       return `<div class="obs-stat-block"><div class="obs-stat-block-title">${title}</div><ol class="obs-stat-list">${rows}</ol></div>`;
@@ -626,7 +626,7 @@ reboot</code></pre>
       const shape = h.cls === 'health-green' ? '●' : h.cls === 'health-yellow' ? '▲' : '✕';
       return `<tr style="cursor:pointer" tabindex="0" role="row" data-action="navigate" data-value="#/observers/${encodeURIComponent(o.id)}" onclick="location.hash='#/observers/${encodeURIComponent(o.id)}'">
             <td><span class="health-dot ${h.cls}" title="${h.label}">${shape}</span> ${h.label}</td>
-            <td class="mono">${o.name || o.id}</td>
+            <td class="mono">${escapeHtml(o.name || o.id)}</td>
             <td>${o.radio ? 'SF' + (o.radio.split(',')[2] || '?') : '<span class="text-muted">—</span>'}</td>
             <td>${o.iata ? `<span class="badge-region">${o.iata}</span>` : '—'}</td>
             <td>${timeAgo(o.last_seen)}</td>
