@@ -810,7 +810,7 @@
         }).catch(() => {
           if (content) content.innerHTML = '<div class="text-muted">Failed to load direct packets</div>';
         });
-      })(0, 20);
+      })(168, 20);
 
       // Fetch neighbors for this node (full-screen view)
       fetchAndRenderNeighbors(n.public_key, 'fullNeighborsContent', {

@@ -2405,7 +2405,12 @@ func (s *Server) handleNodeDirectPackets(w http.ResponseWriter, r *http.Request)
 			limit = n
 		}
 	}
-	sinceHours := 0
+	// Default to a 7-day window. Without a time bound the query degrades to a
+	// full scan of `transmissions` (the "directly heard" test is a non-sargable
+	// json_extract over path_json), which on a busy node takes tens of seconds.
+	// A first_seen lower bound turns the plan into a bounded index range SEARCH.
+	// The node-detail UI only ever offers up to 7d, so this matches its widest view.
+	sinceHours := 168
 	if v := r.URL.Query().Get("since"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			sinceHours = n
