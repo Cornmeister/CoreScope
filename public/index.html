@@ -39,10 +39,13 @@
   <!-- Server theme inlined here (after stylesheets) so the page paints with the
        operator's theme before app.js fetches /api/config/theme — no color flash. -->
   __THEME_STYLE__
-  <!-- Base Leaflet stays eager: the default home page renders node mini-maps
-       (L.map). The markercluster/heat plugins and Chart.js are lazy-loaded
-       per route via lazyPageScripts in app.js. -->
+  <!-- Base Leaflet + its plugins load eagerly (defer preserves order, so
+       L.markerClusterGroup / L.heatLayer are defined before map.js / live.js
+       run). The old per-route lazy loader was removed; these two plugins were
+       not re-added, which silently broke map clustering and the live heatmap. -->
   <script defer src="vendor/leaflet-1.9.4.js?v=__BUST__"></script>
+  <script defer src="vendor/leaflet.markercluster.js?v=__BUST__"></script>
+  <script defer src="vendor/leaflet-heat.js?v=__BUST__"></script>
 </head>
 <body>
   <a class="skip-link" href="#app">Skip to content</a>
