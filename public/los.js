@@ -8,6 +8,8 @@
   var losPolyline = null;
   var relayMarker = null;
   var losChart = null;
+  var losModalChart = null;
+  var _lastResult = null; // last analysis payload, for the full-screen modal
   var pickingPoint = null; // 'a' | 'b' | null
   var _cleanups = []; // teardown callbacks for destroy()
 
@@ -206,6 +208,7 @@
   }
 
   function renderResult(data) {
+    _lastResult = data;
     var resultEl = document.getElementById('los-result');
     var statusClass = data.los_clear ? 'los-clear' : 'los-blocked';
     var statusText  = data.los_clear
@@ -227,13 +230,29 @@
     }
 
     var gapsHtml = data.data_gaps
-      ? '<div class="los-warning">⚠️ Some elevation values unavailable — estimated as sea level.</div>'
+      ? '<div class="los-warning">⚠️ Some elevation values unavailable, estimated as sea level.</div>'
       : '';
+
+    var endpointGapHtml = '';
+    if (data.endpoint_gap_a || data.endpoint_gap_b) {
+      var which = (data.endpoint_gap_a && data.endpoint_gap_b)
+        ? 'Both endpoints have'
+        : (data.endpoint_gap_a ? 'Point A has' : 'Point B has');
+      endpointGapHtml = '<div class="los-warning los-warning-strong">⚠️ ' + which +
+        ' no elevation data, so the antenna base was assumed to be at sea level. ' +
+        'This shifts the whole sightline, so the result may be unreliable. ' +
+        'Try a point with terrain coverage.</div>';
+    }
 
     resultEl.innerHTML =
       '<div class="los-status ' + statusClass + '">' + statusText + '</div>' +
       '<div class="los-distance">Distance: <strong>' + data.distance_km.toFixed(2) + ' km</strong></div>' +
       gapsHtml +
+      endpointGapHtml +
+      '<div class="los-chart-head">' +
+        '<span>Elevation profile</span>' +
+        '<button class="los-btn los-btn-sm" id="los-expand">⛶ Full screen</button>' +
+      '</div>' +
       '<div class="los-chart-wrap"><canvas id="los-chart"></canvas></div>' +
       relayHtml;
 
@@ -246,24 +265,24 @@
       }
     }
 
+    var expandBtn = document.getElementById('los-expand');
+    if (expandBtn) expandBtn.addEventListener('click', openModal);
+
     renderChart(data.profile, data.distance_km);
   }
 
-  function renderChart(profile, totalKm) {
-    var canvas = document.getElementById('los-chart');
-    if (!canvas || typeof Chart === 'undefined') return;
-    if (losChart) { losChart.destroy(); losChart = null; }
-
+  // Shared Chart.js config so the inline chart and the full-screen modal stay
+  // identical. Earth curvature raises the terrain relative to the straight RF
+  // ray, so we plot effective terrain (terrain + bulge) against the straight LOS.
+  function losChartConfig(profile, totalKm) {
     var n = profile.length;
     var labels = profile.map(function (_, i) {
       return (i / Math.max(n - 1, 1) * totalKm).toFixed(2);
     });
-    // Earth curvature raises the terrain relative to the straight RF ray, so plot
-    // effective terrain (terrain + bulge) against the straight line of sight.
     var terrain = profile.map(function (p) { return p.terrain_elev + p.bulge; });
     var losLine  = profile.map(function (p) { return p.los_elev; });
 
-    losChart = new Chart(canvas, {
+    return {
       type: 'line',
       data: {
         labels: labels,
@@ -309,7 +328,46 @@
           y: { title: { display: true, text: 'Elevation (m ASL)' } },
         },
       },
-    });
+    };
+  }
+
+  function renderChart(profile, totalKm) {
+    var canvas = document.getElementById('los-chart');
+    if (!canvas || typeof Chart === 'undefined') return;
+    if (losChart) { losChart.destroy(); losChart = null; }
+    losChart = new Chart(canvas, losChartConfig(profile, totalKm));
+  }
+
+  // ── Full-screen modal ────────────────────────────────────────────────────────
+  function openModal() {
+    if (!_lastResult) return;
+    var modal = document.getElementById('los-modal');
+    if (!modal) return;
+
+    var d = _lastResult;
+    var statusClass = d.los_clear ? 'los-clear' : 'los-blocked';
+    var statusText  = d.los_clear
+      ? '🟢 Clear — direct LOS confirmed'
+      : '🔴 Blocked — ' + d.max_violation_m.toFixed(1) + ' m max violation';
+    var summary = document.getElementById('los-modal-summary');
+    if (summary) {
+      summary.innerHTML =
+        '<span class="los-status ' + statusClass + '">' + statusText + '</span>' +
+        '<span class="los-distance">Distance: <strong>' + d.distance_km.toFixed(2) + ' km</strong></span>';
+    }
+
+    modal.hidden = false;
+    if (typeof Chart !== 'undefined') {
+      if (losModalChart) { losModalChart.destroy(); losModalChart = null; }
+      var canvas = document.getElementById('los-modal-chart');
+      if (canvas) losModalChart = new Chart(canvas, losChartConfig(d.profile, d.distance_km));
+    }
+  }
+
+  function closeModal() {
+    var modal = document.getElementById('los-modal');
+    if (modal) modal.hidden = true;
+    if (losModalChart) { losModalChart.destroy(); losModalChart = null; }
   }
 
   function showError(msg, retryable) {
@@ -330,6 +388,17 @@
       '<h2>🔭 Line-of-Sight Analyzer</h2>' +
       '<div class="los-body">' +
         '<div class="los-controls">' +
+          '<details class="los-help">' +
+            '<summary>How this works</summary>' +
+            '<ul>' +
+              '<li>Terrain elevation is sampled along the straight path from Point A to Point B.</li>' +
+              '<li>Earth curvature uses the standard 4/3 effective radius. The bulge grows with the square of distance, so it climbs fast on long links (about 1.5 m at 10 km, 20 m at 37 km, 37 m at 50 km).</li>' +
+              '<li>Antenna height is measured from the ground directly under each point, so a 2 m antenna on a 100 m hill sits at 102 m above sea level.</li>' +
+              '<li>The path is Clear only when the terrain plus curvature stays below the straight line between the two antenna tips.</li>' +
+              '<li>Where elevation data is missing (for example over open water) the point is estimated at sea level. A missing endpoint is flagged separately because it shifts the whole sightline.</li>' +
+              '<li>This is geometric line of sight. It does not subtract a Fresnel-zone clearance, so a real radio link needs a bit more margin than Clear implies.</li>' +
+            '</ul>' +
+          '</details>' +
           '<div class="los-point-group">' +
             '<h3>Point A</h3>' +
             '<div class="los-autocomplete-wrap">' +
@@ -365,6 +434,16 @@
             '<button class="tpick-btn" id="los-tile-default">🗺 Default</button>' +
             '<button class="tpick-btn" id="los-tile-topo">🏔 Topo</button>' +
           '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div id="los-modal" class="los-modal" hidden>' +
+        '<div class="los-modal-backdrop" id="los-modal-backdrop"></div>' +
+        '<div class="los-modal-content">' +
+          '<div class="los-modal-head">' +
+            '<div id="los-modal-summary" class="los-modal-summary"></div>' +
+            '<button class="los-btn los-btn-sm" id="los-modal-close">✕ Close</button>' +
+          '</div>' +
+          '<div class="los-modal-chart-wrap"><canvas id="los-modal-chart"></canvas></div>' +
         '</div>' +
       '</div>' +
     '</div>';
@@ -410,6 +489,22 @@
       '.los-chart-wrap { height: 200px; margin-bottom: 10px; }',
       '.los-relay-info { font-size: 13px; padding: 8px 10px; background: var(--section-bg); border: 1px solid var(--border); border-radius: 6px; }',
       '.los-btn-sm { padding: 3px 8px; font-size: 12px; width: auto; margin-left: 6px; }',
+      '.los-warning-strong { color: var(--status-red); background: rgba(239,68,68,0.10); border: 1px solid rgba(239,68,68,0.3); }',
+      '.los-help { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; font-size: 12px; color: var(--text-muted); }',
+      '.los-help summary { cursor: pointer; font-weight: 600; color: var(--text); font-size: 13px; }',
+      '.los-help ul { margin: 8px 0 0; padding-left: 18px; line-height: 1.5; }',
+      '.los-help li { margin-bottom: 5px; }',
+      '.los-chart-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--text-muted); margin: 4px 0; }',
+      '.los-chart-head .los-btn-sm { margin-left: 0; }',
+      '.los-modal { position: fixed; inset: 0; z-index: 3000; display: flex; align-items: center; justify-content: center; }',
+      '.los-modal[hidden] { display: none; }',
+      '.los-modal-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,0.6); }',
+      '.los-modal-content { position: relative; background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; width: min(1100px, 94vw); height: min(82vh, 820px); padding: 16px; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.45); }',
+      '.los-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }',
+      '.los-modal-summary { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }',
+      '.los-modal-summary .los-status { margin-bottom: 0; }',
+      '.los-modal-summary .los-distance { margin-bottom: 0; }',
+      '.los-modal-chart-wrap { flex: 1; min-height: 0; }',
       '/* tile picker — shared class, also used by rf-coverage and analytics route-history map */',
       '.tool-tile-picker { position: absolute; top: 8px; right: 8px; z-index: 500; display: flex; gap: 3px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px; padding: 3px; box-shadow: 0 1px 4px rgba(0,0,0,0.15); }',
       '.tpick-btn { padding: 4px 9px; font-size: 11px; border: none; border-radius: 4px; cursor: pointer; background: transparent; color: var(--text-muted); }',
@@ -455,6 +550,15 @@
         }
         document.getElementById('los-tile-default').addEventListener('click', function () { switchLosTile('default'); });
         document.getElementById('los-tile-topo').addEventListener('click', function () { switchLosTile('topo'); });
+
+        // ── Full-screen modal close handlers ───────────────────────────────
+        var modalClose = document.getElementById('los-modal-close');
+        var modalBackdrop = document.getElementById('los-modal-backdrop');
+        if (modalClose) modalClose.addEventListener('click', closeModal);
+        if (modalBackdrop) modalBackdrop.addEventListener('click', closeModal);
+        function onEsc(e) { if (e.key === 'Escape') closeModal(); }
+        document.addEventListener('keydown', onEsc);
+        _cleanups.push(function () { document.removeEventListener('keydown', onEsc); });
       }, 0);
     },
     destroy: function () {
@@ -468,6 +572,8 @@
       if (_losThemeObs) { _losThemeObs.disconnect(); _losThemeObs = null; }
       _losTileLayer = null;
       if (losChart) { losChart.destroy(); losChart = null; }
+      if (losModalChart) { losModalChart.destroy(); losModalChart = null; }
+      _lastResult = null;
       markerA = markerB = losPolyline = relayMarker = null;
       pickingPoint = null;
       var s = document.getElementById('los-styles');

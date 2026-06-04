@@ -189,6 +189,10 @@
       ? ' <span style="color:#f59e0b">(⚠️ Some elevation data missing)</span>'
       : '';
 
+    var centerGapNote = data.center_gap
+      ? '<br><span style="color:var(--status-red)">⚠️ The transmitter has no elevation data, so its antenna base was assumed to be at sea level. Coverage may be unreliable. Try a TX point with terrain coverage.</span>'
+      : '';
+
     var sfLabel = data.sf ? ('SF' + data.sf) : 'SF7';
     showStatus('ok',
       '✅ ' + sfLabel +
@@ -198,7 +202,8 @@
       '<br>Sensitivity: <strong>' + data.sensitivity_dbm + ' dBm</strong>' +
       ' · Max range: <strong>' + maxKm + ' km</strong>' +
       ' · Avg range: <strong>' + avgKm + ' km</strong>' +
-      gapsNote
+      gapsNote +
+      centerGapNote
     );
   }
 
@@ -238,11 +243,30 @@
       '.rfc-status-ok{background:rgba(34,197,94,0.12);color:var(--status-green);border:1px solid rgba(34,197,94,0.3)}',
       '.rfc-status-error{background:rgba(239,68,68,0.10);color:var(--status-red);border:1px solid rgba(239,68,68,0.3)}',
       '.rfc-status-info{background:rgba(59,130,246,0.10);color:var(--accent);border:1px solid rgba(59,130,246,0.3)}',
+      '.rfc-help{font-size:12px;color:var(--text-muted)}',
+      '.rfc-help summary{cursor:pointer;font-weight:600;color:var(--text);font-size:13px}',
+      '.rfc-help ul{margin:8px 0 0;padding-left:18px;line-height:1.5}',
+      '.rfc-help li{margin-bottom:5px}',
+      '.rfc-fullscreen-btn{position:absolute;top:8px;left:8px;z-index:500;padding:5px 10px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,0.15)}',
+      '.rfc-fullscreen-btn:hover{background:var(--row-hover)}',
+      '.rfc-map-wrap.rfc-fullscreen{position:fixed;inset:0;z-index:3000;border-radius:0;height:auto}',
       '@media(max-width:640px){.rfc-layout{flex-direction:column}.rfc-panel{width:100%;height:auto}.rfc-map-wrap{height:300px}}',
       '</style>',
       '<h2 style="margin:0 0 12px;font-size:18px">📡 RF Coverage Analyzer</h2>',
       '<div class="rfc-layout">',
       '  <div class="rfc-panel">',
+      '    <div class="rfc-section">',
+      '      <details class="rfc-help">',
+      '        <summary>How this works</summary>',
+      '        <ul>',
+      '          <li>The tool sweeps many directions from the transmitter and walks outward until either the link budget runs out or terrain blocks the path.</li>',
+      '          <li>Range is limited by two things: signal path loss (power, frequency, spreading factor and the environment model) and line of sight including Earth curvature (4/3 effective radius).</li>',
+      '          <li>Antenna height is measured from the ground directly under the transmitter.</li>',
+      '          <li>A higher spreading factor lowers the receiver sensitivity threshold, so it reaches further but is slower.</li>',
+      '          <li>Where elevation data is missing the point is estimated at sea level. If the transmitter itself has no data the whole result is unreliable and is flagged.</li>',
+      '        </ul>',
+      '      </details>',
+      '    </div>',
       '    <div class="rfc-section">',
       '      <h3>TX Node</h3>',
       '      <div class="rfc-field rfc-autocomplete-wrap">',
@@ -299,6 +323,7 @@
       '  </div>',
       '  <div class="rfc-map-wrap">',
       '    <div id="rfc-map"></div>',
+      '    <button class="rfc-fullscreen-btn" id="rfc-fullscreen">⛶ Full screen</button>',
       '    <div class="tool-tile-picker" id="rfc-tile-picker">',
       '      <button class="tpick-btn" id="rfc-tile-default">🗺 Default</button>',
       '      <button class="tpick-btn" id="rfc-tile-topo">🏔 Topo</button>',
@@ -330,6 +355,27 @@
     _cleanups.push(function () {
       if (pickBtn) pickBtn.removeEventListener('click', onPickClick);
       if (runBtn)  runBtn.removeEventListener('click', onRunClick);
+    });
+
+    // ── Full-screen map toggle ─────────────────────────────────────────────
+    var fsBtn = document.getElementById('rfc-fullscreen');
+    function setFullscreen(on) {
+      var wrap = document.querySelector('.rfc-map-wrap');
+      if (!wrap) return;
+      wrap.classList.toggle('rfc-fullscreen', on);
+      if (fsBtn) fsBtn.textContent = on ? '✕ Exit full screen' : '⛶ Full screen';
+      if (rfMap) setTimeout(function () { rfMap.invalidateSize(); }, 50);
+    }
+    function onFsClick() {
+      var wrap = document.querySelector('.rfc-map-wrap');
+      setFullscreen(!(wrap && wrap.classList.contains('rfc-fullscreen')));
+    }
+    function onFsEsc(e) { if (e.key === 'Escape') setFullscreen(false); }
+    if (fsBtn) fsBtn.addEventListener('click', onFsClick);
+    document.addEventListener('keydown', onFsEsc);
+    _cleanups.push(function () {
+      if (fsBtn) fsBtn.removeEventListener('click', onFsClick);
+      document.removeEventListener('keydown', onFsEsc);
     });
 
     // ── Tile picker ────────────────────────────────────────────────────────
