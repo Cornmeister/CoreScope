@@ -26,8 +26,13 @@
   const _scratchFrom = { x: 0, y: 0 };
   const _scratchTo = { x: 0, y: 0 };
   let clickablePaths = [];
-  const CLICKABLE_PATH_TTL_MS = 30000;
-  const CLICKABLE_PATH_MAX = 50;
+  let _clickablePruneInterval = null;
+  // Clickable trail corridors are invisible/wide and were only pruned when a
+  // new packet arrived, so they piled up (50 stale corridors → "random" trace
+  // popups on empty map). Keep a short window that tracks the recently-visible
+  // trails, and prune actively (below) so they expire with the trails.
+  const CLICKABLE_PATH_TTL_MS = 5000;   // was 30000
+  const CLICKABLE_PATH_MAX = 8;         // ~ the recent-trail set; was 50
   const CLICKABLE_POPUP_DISMISS_MS = 20000;
   let nodeMarkers = {};
   let nodeData = {};
@@ -2379,6 +2384,10 @@
 
     // Prune stale nodes every 60 seconds
     _pruneInterval = setInterval(pruneStaleNodes, 60000);
+    // Actively prune clickable trail corridors every second so they expire
+    // with the visible trails and never pile up when packets pause
+    // (pruneClickablePaths otherwise only runs when a new packet arrives).
+    _clickablePruneInterval = setInterval(function () { pruneClickablePaths(Date.now()); }, 1000);
 
     // Refresh relative timestamps in feed every 10 seconds (#701)
     _feedTimestampInterval = setInterval(function() {
@@ -4466,6 +4475,7 @@
     if (_lcdClockInterval) { clearInterval(_lcdClockInterval); _lcdClockInterval = null; }
     if (_rateCounterInterval) { clearInterval(_rateCounterInterval); _rateCounterInterval = null; }
     if (_pruneInterval) { clearInterval(_pruneInterval); _pruneInterval = null; }
+    if (_clickablePruneInterval) { clearInterval(_clickablePruneInterval); _clickablePruneInterval = null; }
     if (_feedTimestampInterval) { clearInterval(_feedTimestampInterval); _feedTimestampInterval = null; }
     if (_affinityInterval) { clearInterval(_affinityInterval); _affinityInterval = null; }
     if (ws) { ws.onclose = null; ws.close(); ws = null; }
