@@ -262,15 +262,6 @@
     }
     map = L.map('leaflet-map', { zoomControl: true }).setView(initCenter, initZoom);
 
-    // Heat layer must render below markers and never intercept clicks.
-    // L.heatLayer defaults to overlayPane @ 400; unclustered markers
-    // (markerLayer) share that stack, so give heat its own lower pane with
-    // pointer-events disabled. toggleHeatmap reparents the heat canvas into
-    // it on add. (tiles 200 < heat 350 < overlay markers 400)
-    map.createPane('heatPane');
-    map.getPane('heatPane').style.zIndex = 350;
-    map.getPane('heatPane').style.pointerEvents = 'none';
-
     // If navigated with ?node=PUBKEY, highlight that node after markers load
     targetNodeKey = urlParams.get('node') || null;
 
@@ -1892,13 +1883,15 @@
       radius: 25, blur: 15, maxZoom: 14, minOpacity: 0.05,
       gradient: { 0.2: '#0d47a1', 0.4: '#1565c0', 0.6: '#42a5f5', 0.8: '#ffca28', 1.0: '#ff5722' }
     });
-    // Set opacity + move the canvas into heatPane (below markers,
-    // pointer-events:none) BEFORE it's visible — hook the 'add' event.
+    // Keep the heat canvas in overlayPane (leaflet-heat's onRemove removes it
+    // from there — moving it elsewhere throws on teardown). Move it to the
+    // BOTTOM of the pane so markers paint over it, and disable pointer events
+    // so it never intercepts clicks. Opacity set before it's visible.
     heatLayer.on('add', function() {
       var canvas = heatLayer._canvas || (heatLayer.getContainer && heatLayer.getContainer());
       if (canvas) {
-        var pane = map.getPane('heatPane');
-        if (pane && canvas.parentNode !== pane) pane.appendChild(canvas);
+        var op = canvas.parentNode;
+        if (op && op.firstChild !== canvas) op.insertBefore(canvas, op.firstChild);
         canvas.style.pointerEvents = 'none';
         canvas.style.opacity = savedOpacity;
       }

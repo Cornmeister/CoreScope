@@ -1521,16 +1521,6 @@
     // from the marker pane underneath (clickablePathsLayer handles that).
     map.getPane('liveAnimPane').style.pointerEvents = 'none';
 
-    // Heat layer lives BELOW the node markers and must never intercept
-    // clicks. L.heatLayer defaults to overlayPane @ 400 (same pane as the
-    // circleMarker nodes) and is added later, so without its own pane it
-    // both paints over the dots and swallows their clicks. Give it a
-    // dedicated pane under overlayPane with pointer-events disabled;
-    // showHeatMap reparents the heat canvas into it on add.
-    map.createPane('heatPane');
-    map.getPane('heatPane').style.zIndex = 350;       // tiles(200) < heat(350) < nodes(400)
-    map.getPane('heatPane').style.pointerEvents = 'none';
-
     nodesLayer = L.layerGroup().addTo(map);
     pathsLayer = L.layerGroup({ pane: 'liveAnimPane' }).addTo(map);
     animLayer = L.layerGroup({ pane: 'liveAnimPane' }).addTo(map);
@@ -4129,15 +4119,18 @@
         radius: 25, blur: 15, maxZoom: 14, minOpacity: 0.05,
         gradient: { 0.2: '#0d47a1', 0.4: '#1565c0', 0.6: '#42a5f5', 0.8: '#ffca28', 1.0: '#ff5722' }
       });
-      // Move the heat canvas into heatPane (below nodes, pointer-events:none)
-      // and set its opacity BEFORE it becomes visible, so it never occludes
-      // or blocks the node dots. Registered before addTo so the 'add' handler
-      // runs once the canvas exists.
+      // Keep the heat canvas in overlayPane: leaflet-heat's onRemove does
+      // overlayPane.removeChild(canvas), so moving it to another pane makes
+      // teardown throw (NotFoundError) and aborts SPA navigation. Instead
+      // move it to the BOTTOM of overlayPane so node markers paint over it,
+      // and disable pointer events so it never intercepts marker clicks.
+      // Opacity is applied before first paint. Runs on 'add' once the canvas
+      // exists.
       var _applyHeatCanvas = function () {
         var c = heatLayer && heatLayer._canvas;
         if (!c) return false;
-        var pane = map.getPane('heatPane');
-        if (pane && c.parentNode !== pane) pane.appendChild(c);
+        var op = c.parentNode;
+        if (op && op.firstChild !== c) op.insertBefore(c, op.firstChild);
         c.style.pointerEvents = 'none';
         c.style.opacity = savedOpacity;
         return true;
