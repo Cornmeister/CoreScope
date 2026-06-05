@@ -856,10 +856,13 @@
   50% { opacity: 0.6; }
 }
 
-/* Site nav auto-hide on live page — fixed overlay, no layout shift */
+/* Site nav auto-hide on live page — fixed overlay, no layout shift.
+ * Hide via opacity/visibility ONLY (no translateY): the slide-up transform
+ * meant the nav's hit-box animated over 0.25s on wake, so clicking a link
+ * while it slid in missed (visible but un-clickable). Keeping it in place
+ * means a visible nav is always exactly where you click it. */
 .nav-autohide {
   opacity: 0 !important;
-  transform: translateY(-100%) !important;
   pointer-events: none !important;
   visibility: hidden;
 }
